@@ -21,9 +21,13 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   tool-call logging middleware (name/duration/outcome only), HTTP bind guard, bearer auth, `NewHTTPServer`.
 - `internal/tools/` — tool implementations; `Register` (the only way to add a tool) and
   `MustInputSchema` (enums, date pattern).
+- `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
+  (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
+  targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
+  `daily_metrics` cache (closed key list, `algo_version` mismatch = miss).
 - `internal/version/` — version injected via `-ldflags`.
-- Planned (see `plans/health-coach-mcp-mvp.md`): `internal/store/`, `internal/googlehealth/`,
-  `internal/metrics/`, `internal/healthdata/`.
+- Planned (see `plans/health-coach-mcp-mvp.md`): `internal/googlehealth/`, `internal/metrics/`,
+  `internal/healthdata/`.
 
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,
@@ -37,6 +41,8 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - **Register tools with `tools.Register`, never `mcp.AddTool`.** Handlers return `(Out, error)`; a
   `coach.ToolError` reaches the client as JSON `{code,message,hint}` text (never `StructuredContent`),
   any other error or panic becomes `internal_error`. `ToolError` messages must not contain health values.
+- **Schema changes are new migration files**, never edits to an applied one. Notes search quotes
+  every word as an FTS5 phrase; user text is never FTS syntax.
 - **Dates in tool inputs are `coach.LocalDate`**; `Bounds`/`AddDays` return errors, never panic.
 - **Enums** in tool inputs come from `tools.MustInputSchema`; the `jsonschema` tag is description only.
 - **Medical guardrail.** Tool descriptions and outputs must not diagnose or prescribe medication;
@@ -46,5 +52,5 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - Every tool gets an in-memory transport test (`mcp.NewInMemoryTransports`).
 
 ## Stack
-Go 1.27 · `github.com/modelcontextprotocol/go-sdk` · planned: `golang.org/x/oauth2`,
-`modernc.org/sqlite` (pure Go, keeps cross-compiling cgo-free).
+Go 1.27 · `github.com/modelcontextprotocol/go-sdk` · `modernc.org/sqlite` (pure Go, keeps
+cross-compiling cgo-free) · planned: `golang.org/x/oauth2`.

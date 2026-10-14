@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
 	"github.com/athosmartinez/health-coach-mcp/internal/server"
+	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
 
 type options struct {
@@ -55,36 +57,66 @@ func run(o options) int {
 	return 0
 }
 
-func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) error {
-	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log})
+func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) (err error) {
+	// Validate every option before touching disk, so a typo in a flag never
+	// creates the store.
+	exposed, err := validate(cfg, o)
 	if err != nil {
 		return err
 	}
 
-	switch o.transport {
-	case "stdio":
+	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, "coach.db"), time.Now)
+	if errors.Is(err, context.Canceled) {
+		return nil // a signal during startup is a normal shutdown
+	}
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// The last close checkpoints the WAL; a failure there must not be silent.
+		if cerr := st.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close store: %w", cerr))
+		}
+	}()
+
+	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st})
+	if err != nil {
+		return err
+	}
+
+	if o.transport == "stdio" {
 		// A signal cancels ctx; that is a normal shutdown, not a failure.
 		if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 		return nil
+	}
+	return serveHTTP(ctx, s, cfg, o, exposed, log)
+}
+
+// validate checks the options and reports whether HTTP would be exposed beyond loopback.
+func validate(cfg config.Config, o options) (exposed bool, err error) {
+	if cfg.TimeZone == nil {
+		return false, errors.New("config: TimeZone is required")
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		return false, fmt.Errorf("config: DataDir %q must be an absolute path", cfg.DataDir)
+	}
+	switch o.transport {
+	case "stdio":
+		return false, nil
 	case "http":
-		return serveHTTP(ctx, s, cfg, o, log)
+		if (o.tlsCert == "") != (o.tlsKey == "") {
+			return false, errors.New("-tls-cert and -tls-key must be set together")
+		}
+		return server.CheckHTTPBind(o.addr, cfg.HTTPToken)
 	default:
-		return fmt.Errorf("unknown transport %q (want stdio or http)", o.transport)
+		return false, fmt.Errorf("unknown transport %q (want stdio or http)", o.transport)
 	}
 }
 
-func serveHTTP(ctx context.Context, s *mcp.Server, cfg config.Config, o options, log *slog.Logger) error {
-	if (o.tlsCert == "") != (o.tlsKey == "") {
-		return errors.New("-tls-cert and -tls-key must be set together")
-	}
+func serveHTTP(ctx context.Context, s *mcp.Server, cfg config.Config, o options, exposed bool, log *slog.Logger) error {
 	useTLS := o.tlsCert != ""
-
-	exposed, err := server.CheckHTTPBind(o.addr, cfg.HTTPToken)
-	if err != nil {
-		return err
-	}
 	if exposed && !useTLS {
 		log.Warn("serving health data over plain HTTP beyond loopback; the bearer token and responses can be sniffed on the network. Use -tls-cert/-tls-key, a TLS proxy or a private tunnel")
 	}
@@ -109,8 +141,13 @@ func serveHTTP(ctx context.Context, s *mcp.Server, cfg config.Config, o options,
 	// Wait for in-flight requests; long-lived SSE streams are cut at the deadline.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		// Streams still open at the deadline are cut so no handler outlives the store.
+		log.Warn("shutdown deadline reached; closing remaining connections")
+		_ = srv.Close()
 	}
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		return err

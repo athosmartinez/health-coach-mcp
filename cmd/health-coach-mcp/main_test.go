@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,10 +12,12 @@ import (
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
 )
 
-var (
-	discard = slog.New(slog.NewTextHandler(io.Discard, nil))
-	testCfg = config.Config{TimeZone: time.UTC}
-)
+var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// testConfig keeps the store in a temp dir, never in the working directory.
+func testConfig(t *testing.T) config.Config {
+	return config.Config{TimeZone: time.UTC, DataDir: t.TempDir()}
+}
 
 func TestServeRejectsBadOptions(t *testing.T) {
 	cases := map[string]options{
@@ -25,14 +28,14 @@ func TestServeRejectsBadOptions(t *testing.T) {
 		"unparseable address": {transport: "http", addr: "nope"},
 	}
 	for name, o := range cases {
-		if err := serve(context.Background(), testCfg, o, discard); err == nil {
+		if err := serve(context.Background(), testConfig(t), o, discard); err == nil {
 			t.Errorf("%s: serve returned nil", name)
 		}
 	}
 }
 
 func TestServeRequiresTimeZone(t *testing.T) {
-	err := serve(context.Background(), config.Config{}, options{transport: "stdio"}, discard)
+	err := serve(context.Background(), config.Config{DataDir: t.TempDir()}, options{transport: "stdio"}, discard)
 	if err == nil || !strings.Contains(err.Error(), "TimeZone") {
 		t.Fatalf("err = %v, want missing TimeZone", err)
 	}
@@ -41,7 +44,8 @@ func TestServeRequiresTimeZone(t *testing.T) {
 func TestServeHTTPShutsDownCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, testCfg, options{transport: "http", addr: "127.0.0.1:0"}, discard) }()
+	cfg := testConfig(t)
+	go func() { done <- serve(ctx, cfg, options{transport: "http", addr: "127.0.0.1:0"}, discard) }()
 
 	time.Sleep(100 * time.Millisecond)
 	cancel()
@@ -52,5 +56,25 @@ func TestServeHTTPShutsDownCleanly(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return after cancel")
+	}
+}
+
+func TestServeFailsWhenStoreCannotOpen(t *testing.T) {
+	blocker := t.TempDir() + "/file"
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{TimeZone: time.UTC, DataDir: blocker}
+	if err := serve(context.Background(), cfg, options{transport: "stdio"}, discard); err == nil {
+		t.Fatal("serve must fail when the store cannot be opened")
+	}
+}
+
+func TestServeCreatesStore(t *testing.T) {
+	cfg := testConfig(t)
+	// The store opens before the transport is chosen, so an unknown one still creates it.
+	_ = serve(context.Background(), cfg, options{transport: "grpc"}, discard)
+	if _, err := os.Stat(cfg.DataDir + "/coach.db"); err != nil {
+		t.Fatalf("coach.db not created in DataDir: %v", err)
 	}
 }

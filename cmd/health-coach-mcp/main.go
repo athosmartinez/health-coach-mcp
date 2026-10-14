@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
 	"github.com/athosmartinez/health-coach-mcp/internal/server"
+	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
 
 type options struct {
@@ -56,7 +58,13 @@ func run(o options) int {
 }
 
 func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) error {
-	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log})
+	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, "coach.db"), time.Now)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st})
 	if err != nil {
 		return err
 	}

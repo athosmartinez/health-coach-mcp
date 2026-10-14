@@ -66,7 +66,8 @@ Conventions for **every** tool:
     "sources": ["Google Fitbit Air"], "quality_flags": [], "generated_at": "…" }
   ```
 - Errors are tool errors (`IsError: true`) with a stable `code`: `auth_expired`, `scope_missing`,
-  `upstream_unavailable`, `no_data`, `invalid_input`. The error goes as JSON `{code, message, hint}` in the
+  `upstream_unavailable`, `no_data`, `invalid_input`, `internal_error` (unexpected failure; the detail
+  isn't exposed because it could contain health data). The error goes as JSON `{code, message, hint}` in the
   **text content**, with no `StructuredContent` (so as not to violate the tool's `outputSchema`).
   `auth_expired` includes the re-login command. Arguments that fail the input schema are rejected by the
   SDK itself before the handler runs (protocol error), not with `invalid_input`.

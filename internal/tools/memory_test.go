@@ -607,6 +607,14 @@ func TestLabsReportFlagOverridesTheRange(t *testing.T) {
 	if q.Urgent || q.Guidance != medicalHint || q.Series[0].Points[0].Status != "flagged" {
 		t.Errorf("history query = %+v", q)
 	}
+	// Backfilling an old critical report under the newer value: flagged and urgent
+	// per value, but no "care today" for the batch.
+	c.ok("labs_record", map[string]any{"collected_on": "2023-05-01", "results": []any{
+		lab("potassium", 6.6, "mmol/L", map[string]any{"ref_low": 3.5, "ref_high": 5.1, "report_flag": "crítico"}),
+	}}, &rec)
+	if rec.Urgent || !rec.Recorded[0].Urgent || rec.Guidance != medicalHint {
+		t.Errorf("backfilled critical value = urgent %v, recorded %+v, guidance %q", rec.Urgent, rec.Recorded[0], rec.Guidance)
+	}
 }
 
 func TestLabsReplacementsAndUnits(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -398,9 +399,10 @@ type labsRecordOut struct {
 	NoReference []string               `json:"no_reference" jsonschema:"analytes stored without a range: not known to be normal"`
 	Replaced    []store.LabReplacement `json:"replaced"`
 	UnitChanges []store.LabUnitChange  `json:"unit_changes"`
-	Urgent      bool                   `json:"urgent"`
-	Guidance    string                 `json:"guidance,omitempty"`
-	Notice      string                 `json:"notice"`
+	// Urgent: a value marked critical with no newer result stored for its analyte.
+	Urgent   bool   `json:"urgent"`
+	Guidance string `json:"guidance,omitempty"`
+	Notice   string `json:"notice"`
 }
 
 func (m memory) labsRecord(ctx context.Context, _ *mcp.CallToolRequest, in labsRecordIn) (labsRecordOut, error) {
@@ -426,7 +428,9 @@ func (m memory) labsRecord(ctx context.Context, _ *mcp.CallToolRequest, in labsR
 	for _, r := range batch.Results {
 		status, urgent := r.Assess()
 		out.Recorded = append(out.Recorded, labRecorded{r, status, urgent})
-		out.Urgent = out.Urgent || urgent
+		// A backfilled critical value under a newer one is history: it stays
+		// urgent per value but does not send the user to care today.
+		out.Urgent = out.Urgent || (urgent && !slices.Contains(batch.NewerStored, r.Analyte))
 		switch status {
 		case store.LabLow, store.LabHigh, store.LabFlagged:
 			out.NeedsReview = append(out.NeedsReview, labFlag{

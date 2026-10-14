@@ -181,6 +181,9 @@ type LabBatch struct {
 	Results     []LabResult      `json:"results"`
 	Replaced    []LabReplacement `json:"replaced"`
 	UnitChanges []LabUnitChange  `json:"unit_changes"`
+	// NewerStored lists analytes that already have a value after this
+	// collection date: a backfilled result is history, not today's state.
+	NewerStored []string `json:"newer_stored"`
 }
 
 // RecordLabs stores a batch from one collection date. A result for an analyte
@@ -234,7 +237,7 @@ func (s *Store) RecordLabs(ctx context.Context, collectedOn coach.LocalDate, lab
 	}
 
 	stamp, at := s.stamp()
-	out = LabBatch{Results: make([]LabResult, 0, len(values)), Replaced: []LabReplacement{}, UnitChanges: []LabUnitChange{}}
+	out = LabBatch{Results: make([]LabResult, 0, len(values)), Replaced: []LabReplacement{}, UnitChanges: []LabUnitChange{}, NewerStored: []string{}}
 	for _, v := range values {
 		var (
 			prev          LabValue
@@ -267,6 +270,9 @@ func (s *Store) RecordLabs(ctx context.Context, collectedOn coach.LocalDate, lab
 			var otherUnit, otherOn string
 			err = tx.QueryRowContext(ctx, `SELECT unit, collected_on FROM lab_results WHERE analyte = ? AND `+side.query+` LIMIT 1`,
 				v.Analyte, string(collectedOn)).Scan(&otherUnit, &otherOn)
+			if err == nil && side.relation == "later" {
+				out.NewerStored = append(out.NewerStored, v.Analyte)
+			}
 			switch {
 			case err == nil && UnitKey(otherUnit) != UnitKey(v.Unit):
 				out.UnitChanges = append(out.UnitChanges, LabUnitChange{
@@ -309,8 +315,9 @@ type LabRows struct {
 }
 
 // QueryLabs lists results ordered by analyte then date. analyte "" means all;
-// since "" means no lower bound. Past the row cap the oldest rows are dropped,
-// so each analyte's latest value is never lost.
+// since "" means no lower bound. Past the row cap the oldest rows are dropped
+// (Truncated is set): an analyte whose values all predate the cut is missing
+// entirely, so a caller that needs it should filter by analyte.
 func (s *Store) QueryLabs(ctx context.Context, analyte string, since coach.LocalDate) (out LabRows, err error) {
 	defer wrapErr("query labs", &err)
 	if err := validDate("since", since, true); err != nil {

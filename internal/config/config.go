@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	// Embedded zone database: minimal containers and Windows have no zoneinfo,
+	// and the default zone must load everywhere.
+	_ "time/tzdata"
 )
 
 const (
@@ -33,33 +36,60 @@ func Load(getenv func(string) string, homeDir func() (string, error)) (Config, e
 		return Config{}, fmt.Errorf("resolve home dir: %w", err)
 	}
 
-	tzName := or(getenv("HCM_TZ"), defaultTimeZone)
-	loc, err := time.LoadLocation(tzName)
+	loc, err := loadZone(getenv("HCM_TZ"))
 	if err != nil {
-		return Config{}, fmt.Errorf("HCM_TZ %q: %w", tzName, err)
+		return Config{}, err
+	}
+	dataDir, err := dir("HCM_DATA_DIR", getenv("HCM_DATA_DIR"), filepath.Join("~", ".local", "share", appName), home)
+	if err != nil {
+		return Config{}, err
+	}
+	configDir, err := dir("HCM_CONFIG_DIR", getenv("HCM_CONFIG_DIR"), filepath.Join("~", ".config", appName), home)
+	if err != nil {
+		return Config{}, err
 	}
 
 	return Config{
 		TimeZone:  loc,
-		DataDir:   expandHome(or(getenv("HCM_DATA_DIR"), filepath.Join("~", ".local", "share", appName)), home),
-		ConfigDir: expandHome(or(getenv("HCM_CONFIG_DIR"), filepath.Join("~", ".config", appName)), home),
-		HTTPToken: getenv("HCM_HTTP_TOKEN"),
+		DataDir:   dataDir,
+		ConfigDir: configDir,
+		// Secrets read from files often end in a newline that the client never sends.
+		HTTPToken: strings.TrimSpace(getenv("HCM_HTTP_TOKEN")),
 	}, nil
 }
 
-func or(v, fallback string) string {
-	if v == "" {
-		return fallback
+// loadZone rejects "Local": it makes the meaning of a day depend on the host.
+func loadZone(name string) (*time.Location, error) {
+	if name == "" {
+		name = defaultTimeZone
 	}
-	return v
+	if strings.EqualFold(strings.TrimSpace(name), "local") {
+		return nil, fmt.Errorf("HCM_TZ %q: use an IANA zone such as %s, not the host zone", name, defaultTimeZone)
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("HCM_TZ %q: %w", name, err)
+	}
+	return loc, nil
 }
 
-func expandHome(p, home string) string {
-	if p == "~" {
-		return home
+// dir expands ~ and requires an absolute result, so the store never lands in
+// whatever directory the server was started from (possibly inside a git repo).
+func dir(name, v, fallback, home string) (string, error) {
+	if v == "" {
+		v = fallback
 	}
-	if rest, ok := strings.CutPrefix(p, "~/"); ok {
-		return filepath.Join(home, rest)
+	p := v
+	switch {
+	case p == "~":
+		p = home
+	case strings.HasPrefix(p, "~/"):
+		p = filepath.Join(home, p[2:])
+	case strings.HasPrefix(p, "~"):
+		return "", fmt.Errorf("%s %q: ~user paths are not supported", name, v)
 	}
-	return p
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("%s %q: must be an absolute path", name, v)
+	}
+	return filepath.Clean(p), nil
 }

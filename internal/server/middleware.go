@@ -3,14 +3,18 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 )
 
 // logToolCalls records one line per tools/call with only the tool name, duration
-// and outcome. Arguments and results are never logged: both carry health data.
+// and outcome. Arguments, results and error messages are never logged: all of
+// them may carry health data.
 func logToolCalls(log *slog.Logger, now func() time.Time) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -25,14 +29,13 @@ func logToolCalls(log *slog.Logger, now func() time.Time) mcp.Middleware {
 			res, err := next(ctx, method, req)
 
 			attrs := []any{"tool", tool, "duration_ms", now().Sub(start).Milliseconds()}
-			switch r := res.(type) {
-			case *mcp.CallToolResult:
+			if r, ok := res.(*mcp.CallToolResult); ok && r != nil {
 				attrs = append(attrs, "is_error", r.IsError)
 				if r.IsError {
 					attrs = append(attrs, "code", errorCode(r))
 				}
-			case nil:
-				attrs = append(attrs, "is_error", true, "code", "protocol_error")
+			} else {
+				attrs = append(attrs, "is_error", true, "code", failureCode(ctx, err))
 			}
 			log.InfoContext(ctx, "tool_call", attrs...)
 			return res, err
@@ -40,8 +43,13 @@ func logToolCalls(log *slog.Logger, now func() time.Time) mcp.Middleware {
 	}
 }
 
-// errorCode extracts only the code field of a coach error payload.
+// errorCode extracts only the code of a coach error. Errors produced by the SDK
+// itself (input validation, unknown tool) carry plain text and log as sdk_error.
 func errorCode(r *mcp.CallToolResult) string {
+	var we coach.WireError
+	if errors.As(r.GetError(), &we) {
+		return string(we.Code)
+	}
 	for _, c := range r.Content {
 		if tc, ok := c.(*mcp.TextContent); ok {
 			var payload struct {
@@ -52,5 +60,13 @@ func errorCode(r *mcp.CallToolResult) string {
 			}
 		}
 	}
-	return "unknown"
+	return "sdk_error"
+}
+
+// failureCode classifies a call that produced no result at all.
+func failureCode(ctx context.Context, err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return "canceled"
+	}
+	return "protocol_error"
 }

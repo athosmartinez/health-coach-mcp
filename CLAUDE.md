@@ -12,13 +12,15 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 
 ## Layout
 - `cmd/health-coach-mcp/` — entry point; picks the transport (`-transport=stdio|http`).
-- `internal/config/` — env config: `HCM_TZ` (default America/Sao_Paulo), `HCM_DATA_DIR`,
-  `HCM_CONFIG_DIR`, `HCM_HTTP_TOKEN` (required to bind HTTP beyond loopback).
-- `internal/coach/` — shared domain: `LocalDate` (local-day bucketing, sleep → day it ends),
-  `Envelope[T]` + `Coverage`, `ToolError` codes and `ErrorResult`.
-- `internal/server/` — `Deps` + `New(Deps)` (one `registerX` line per feature), tool-call logging
-  middleware (name/duration/outcome only), HTTP bind guard and bearer auth. Transport-agnostic.
-- `internal/tools/` — tool implementations; `MustInputSchema` patches enums onto inferred schemas.
+- `internal/config/` — env config: `HCM_TZ` (IANA zone, default America/Sao_Paulo, `Local` rejected,
+  tzdata embedded), `HCM_DATA_DIR`, `HCM_CONFIG_DIR` (absolute after `~` expansion), `HCM_HTTP_TOKEN`
+  (≥32 chars, required to bind HTTP beyond loopback).
+- `internal/coach/` — shared domain: `LocalDate` (validated on decode; DST-safe `Bounds`; sleep → day it
+  ends), `Envelope[T]` + `Coverage`/`ConfidenceLevel`, `ToolError` codes, `WireError`, `ErrorResult`.
+- `internal/server/` — `Deps` + `New(Deps) (*mcp.Server, error)` (one `registerX` line per feature),
+  tool-call logging middleware (name/duration/outcome only), HTTP bind guard, bearer auth, `NewHTTPServer`.
+- `internal/tools/` — tool implementations; `Register` (the only way to add a tool) and
+  `MustInputSchema` (enums, date pattern).
 - `internal/version/` — version injected via `-ldflags`.
 - Planned (see `plans/health-coach-mcp-mvp.md`): `internal/store/`, `internal/googlehealth/`,
   `internal/metrics/`, `internal/healthdata/`.
@@ -30,9 +32,12 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - **stdout is the JSON-RPC channel in stdio mode.** Log only via `slog` to stderr; never `fmt.Print`.
 - **No health data or secrets in git.** OAuth client JSON, tokens, `*.db` and exports stay out
   (see `.gitignore`). Tests use synthetic fixtures only.
-- **HTTP beyond loopback requires `HCM_HTTP_TOKEN`** (bearer auth); startup fails otherwise.
-- **Tool errors** go through `coach.ErrorResult`: JSON `{code,message,hint}` as text, never
-  `StructuredContent`. Messages must not contain health values.
+- **HTTP beyond loopback requires `HCM_HTTP_TOKEN`** (bearer auth, ≥32 chars); startup fails otherwise.
+  Without `-tls-cert/-tls-key` it is plain HTTP: use a TLS proxy or private tunnel (Tailscale) on a LAN.
+- **Register tools with `tools.Register`, never `mcp.AddTool`.** Handlers return `(Out, error)`; a
+  `coach.ToolError` reaches the client as JSON `{code,message,hint}` text (never `StructuredContent`),
+  any other error or panic becomes `internal_error`. `ToolError` messages must not contain health values.
+- **Dates in tool inputs are `coach.LocalDate`**; `Bounds`/`AddDays` return errors, never panic.
 - **Enums** in tool inputs come from `tools.MustInputSchema`; the `jsonschema` tag is description only.
 - **Medical guardrail.** Tool descriptions and outputs must not diagnose or prescribe medication;
   flag out-of-range values and point to a doctor.

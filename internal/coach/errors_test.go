@@ -39,6 +39,13 @@ func TestErrorResultFromToolError(t *testing.T) {
 	}
 }
 
+func TestErrorResultAcceptsPointerToolError(t *testing.T) {
+	out := decode(t, ErrorResult(&ToolError{Code: CodeNoData, Message: "no sleep recorded"}))
+	if out["code"] != "no_data" {
+		t.Errorf("code = %q, want no_data", out["code"])
+	}
+}
+
 func TestErrorResultHidesUnknownErrorDetails(t *testing.T) {
 	out := decode(t, ErrorResult(errors.New("resting hr 57 failed to parse")))
 	if out["code"] != "internal_error" {
@@ -46,5 +53,20 @@ func TestErrorResultHidesUnknownErrorDetails(t *testing.T) {
 	}
 	if out["message"] == "resting hr 57 failed to parse" {
 		t.Error("raw error text may carry health data and must not be echoed")
+	}
+}
+
+func TestWireErrorIsJSONAndUnwraps(t *testing.T) {
+	w := ToWire(fmt.Errorf("wrapped: %w", ToolError{Code: CodeScopeMissing, Message: "missing sleep scope"}))
+	var payload ToolError
+	if err := json.Unmarshal([]byte(w.Error()), &payload); err != nil {
+		t.Fatalf("Error() is not JSON: %v", err)
+	}
+	if payload.Code != CodeScopeMissing {
+		t.Errorf("code = %q", payload.Code)
+	}
+	var te ToolError
+	if !errors.As(w, &te) || te.Code != CodeScopeMissing {
+		t.Error("WireError must unwrap to its ToolError")
 	}
 }

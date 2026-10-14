@@ -24,10 +24,17 @@
 - `CLAUDE.md` "Layout" updated when a package is created.
 
 ### Fixed contracts (defined in Step 1 — do not change in later steps without updating this plan)
-- **Wiring:** `server.New(deps server.Deps) *mcp.Server` with
-  `Deps{Cfg config.Config; Now func() time.Time; Logger *slog.Logger}` (Step 1). Each step that creates a
+- **Wiring:** `server.New(deps server.Deps) (*mcp.Server, error)` with
+  `Deps{Cfg config.Config; Now func() time.Time; Logger *slog.Logger}` (Step 1). `New` fails when
+  `Cfg.TimeZone` is nil (no silent default) and is where later steps validate their dependencies. Each step that creates a
   package adds its field (`Store *store.Store` in 2/3, `Health healthdata.Source` in 6a/7). Each feature registers through its own `registerX(s, deps)` in
   `internal/tools/<feature>.go` and adds **one line** to `New`. Tools whose dependency is `nil` aren't registered.
+- **Tool registration:** always `tools.Register[In, Out](s, tool, func(ctx, req, In) (Out, error))`, never
+  `mcp.AddTool` directly. It turns any error into the JSON error contract (non-`ToolError` → `internal_error`,
+  text hidden), skips output-schema validation on errors (a zero `Envelope` would fail it) and recovers panics.
+- **Dates:** `coach.LocalDate` validates itself on JSON decode (`UnmarshalText`; `""` = omitted) and the
+  inferred schema carries `coach.DatePattern`. `Bounds(loc) (start, end, error)` and `AddDays(n) (LocalDate, error)`
+  return errors instead of panicking; `Bounds` handles DST days (23h/25h) and skipped midnights.
 - **`main` wiring (single place, `cmd/health-coach-mcp/main.go`):** `config.Load` → `store.Open` (from Step 2)
   → `googlehealth.New` (from Step 4b) → `healthdata.New` (from Step 6a) → `server.New`. Subcommands
   (`auth login|status`) are dispatched **before** parsing the server flags (Step 4a).
@@ -35,8 +42,12 @@
   with `Enum`s/`Format`s through helpers in `internal/tools/schema.go` (the `jsonschema` tag is a **description
   only**, it doesn't create an enum). Pass it as `Tool.InputSchema`. An invalid argument is rejected by the SDK
   before the handler — tests assert the SDK error, not `invalid_input`.
-- **Errors:** `coach.ToolError{Code, Message, Hint}` → `CallToolResult{IsError: true, Content: [TextContent(JSON)]}`,
-  **no** `StructuredContent` (it would break `outputSchema`).
+- **Errors:** handlers return `coach.ToolError{Code, Message, Hint}` (value or pointer); `tools.Register` sends it as
+  `CallToolResult{IsError: true, Content: [TextContent(JSON)]}`, **no** `StructuredContent` (it would break `outputSchema`).
+  `coach.ErrorResult` is only for low-level handlers. Enums on `[]string` go on `items`; on `*string`, `null` stays allowed.
+- **HTTP (R6):** `server.CheckHTTPBind` returns `(exposed, err)`; beyond loopback `HCM_HTTP_TOKEN` must be ≥32 chars;
+  `main` warns when exposed without `-tls-cert/-tls-key`. `server.NewHTTPServer` sets timeouts (no `WriteTimeout`, SSE)
+  and a 30-min session timeout; bearer scheme is case-insensitive, failures logged with remote addr only.
 
 ### Expected conflicts
 Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5), `main.go` (3, 4a), `server.go`
@@ -99,7 +110,8 @@ stable error codes and partial-day handling; §2 fixes TZ and units; R4 (logs wi
 
 **Verification.** Table tests: `Confidence` (6/7/20/21), `LocalDate` (invalid, 29-02), `SleepDay` (23:00→09:24 BRT lands on the end day), `ErrorResult` checked **via the in-memory client** (`IsError=true`, text parses as JSON with `code`), middleware doesn't log arguments (captured `slog` handler), `-addr 0.0.0.0:8787` without a token fails.
 
-**Exit criteria.** `server_info` passes with `New(Deps{})`; godoc on the contracts; CLAUDE.md Layout updated.
+**Exit criteria.** `server_info` passes with `New(Deps{Cfg: {TimeZone}})`; godoc on the contracts; CLAUDE.md Layout updated.
+PR review (Go/security/test reviewers) fixes applied in the same PR: see "Fixed contracts".
 **Rollback.** Revert the PR.
 
 ---

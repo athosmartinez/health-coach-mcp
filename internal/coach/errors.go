@@ -29,18 +29,42 @@ type ToolError struct {
 
 func (e ToolError) Error() string { return string(e.Code) + ": " + e.Message }
 
-// ErrorResult converts err into a tool error result. The payload goes in text
-// content, not StructuredContent, because the SDK validates structured content
-// against the tool's success output schema. Errors that are not ToolErrors are
-// reported generically since their text may carry health data.
-func ErrorResult(err error) *mcp.CallToolResult {
+// AsToolError returns the ToolError in err's chain (value or pointer). Any other
+// error becomes a generic internal_error, since its text may carry health data.
+func AsToolError(err error) ToolError {
 	var te ToolError
-	if !errors.As(err, &te) {
-		te = ToolError{Code: CodeInternal, Message: "unexpected internal error"}
+	if errors.As(err, &te) {
+		return te
 	}
-	body, _ := json.Marshal(te)
-	return &mcp.CallToolResult{
-		IsError: true,
-		Content: []mcp.Content{&mcp.TextContent{Text: string(body)}},
+	var pte *ToolError
+	if errors.As(err, &pte) && pte != nil {
+		return *pte
 	}
+	return ToolError{Code: CodeInternal, Message: "unexpected internal error"}
+}
+
+// WireError is the error a tool handler returns to the SDK. The SDK writes
+// err.Error() as the result's only text content, so Error() is the JSON payload
+// {code,message,hint}. Returning an error instead of a result also skips the
+// SDK's output-schema validation, which would reject a zero Envelope.
+type WireError struct{ ToolError }
+
+func (e WireError) Error() string {
+	// Marshal cannot fail: ToolError holds only strings.
+	b, _ := json.Marshal(e.ToolError)
+	return string(b)
+}
+
+func (e WireError) Unwrap() error { return e.ToolError }
+
+// ToWire converts any error into a WireError (see AsToolError).
+func ToWire(err error) WireError { return WireError{AsToolError(err)} }
+
+// ErrorResult builds an error result directly, for low-level handlers that
+// return *mcp.CallToolResult themselves. The payload goes in text content, never
+// StructuredContent, which the SDK validates against the success output schema.
+func ErrorResult(err error) *mcp.CallToolResult {
+	res := &mcp.CallToolResult{}
+	res.SetError(ToWire(err))
+	return res
 }

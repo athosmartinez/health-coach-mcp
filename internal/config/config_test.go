@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -30,12 +31,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadOverridesAndTildeExpansion(t *testing.T) {
+func TestLoadOverrides(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		"HCM_TZ":         "UTC",
 		"HCM_DATA_DIR":   "~/data",
 		"HCM_CONFIG_DIR": "/etc/hcm",
-		"HCM_HTTP_TOKEN": "s3cret",
+		"HCM_HTTP_TOKEN": "s3cret\n",
 	}), home)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -50,13 +51,58 @@ func TestLoadOverridesAndTildeExpansion(t *testing.T) {
 		t.Errorf("ConfigDir = %q", cfg.ConfigDir)
 	}
 	if cfg.HTTPToken != "s3cret" {
-		t.Errorf("HTTPToken = %q", cfg.HTTPToken)
+		t.Errorf("HTTPToken = %q, want surrounding whitespace trimmed", cfg.HTTPToken)
 	}
 }
 
-func TestLoadRejectsInvalidTimeZone(t *testing.T) {
-	if _, err := Load(env(map[string]string{"HCM_TZ": "Mars/Olympus"}), home); err == nil {
-		t.Fatal("expected error for unknown time zone")
+func TestLoadDirs(t *testing.T) {
+	cases := []struct {
+		in, want string
+		ok       bool
+	}{
+		{"~", "/home/test", true},
+		{"~/", "/home/test", true},
+		{"~/a/../b", "/home/test/b", true},
+		{"/abs/~/x", "/abs/~/x", true},
+		{"~user/x", "", false},
+		{"~foo", "", false},
+		{"data", "", false},
+		{"./data", "", false},
+	}
+	for _, key := range []string{"HCM_DATA_DIR", "HCM_CONFIG_DIR"} {
+		for _, c := range cases {
+			cfg, err := Load(env(map[string]string{key: c.in}), home)
+			if (err == nil) != c.ok {
+				t.Errorf("%s=%q err = %v, want ok=%v", key, c.in, err, c.ok)
+				continue
+			}
+			if !c.ok {
+				if !strings.Contains(err.Error(), key) {
+					t.Errorf("%s=%q error %q does not name the variable", key, c.in, err)
+				}
+				continue
+			}
+			got := cfg.DataDir
+			if key == "HCM_CONFIG_DIR" {
+				got = cfg.ConfigDir
+			}
+			if got != c.want {
+				t.Errorf("%s=%q → %q, want %q", key, c.in, got, c.want)
+			}
+		}
+	}
+}
+
+func TestLoadRejectsBadTimeZones(t *testing.T) {
+	for _, tz := range []string{"Mars/Olympus", "Local", "local", " "} {
+		_, err := Load(env(map[string]string{"HCM_TZ": tz}), home)
+		if err == nil {
+			t.Errorf("HCM_TZ=%q accepted", tz)
+			continue
+		}
+		if !strings.Contains(err.Error(), "HCM_TZ") {
+			t.Errorf("HCM_TZ=%q error %q does not name the variable", tz, err)
+		}
 	}
 }
 

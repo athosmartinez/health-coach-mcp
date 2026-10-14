@@ -171,7 +171,7 @@ func TestToolCallLogShapeAndNoLeaks(t *testing.T) {
 		{map[string]any{"mode": "ok", "probe": sentinel}, false, ""},
 		{map[string]any{"mode": "tool_error", "probe": sentinel}, true, "auth_expired"},
 		{map[string]any{"mode": "raw_error"}, true, "internal_error"},
-		{map[string]any{"mode": "ok", "unexpected": sentinel}, true, "sdk_error"},
+		{map[string]any{"mode": "ok", "unexpected": sentinel}, true, "invalid_input"}, // SDK schema error, mapped
 	}
 	for _, c := range cases {
 		if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "leak", Arguments: c.args}); err != nil {
@@ -258,5 +258,37 @@ func TestMemoryToolsNeedAStore(t *testing.T) {
 	}))
 	if !slices.Equal(got, want) {
 		t.Errorf("with a store: %v, want %v", got, want)
+	}
+}
+
+func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	deps := testDeps()
+	deps.Store = st
+	cs := connect(t, newServer(t, deps))
+
+	cases := []map[string]any{
+		{"name": "targets_set", "args": map[string]any{"kcal": 2000}},                                    // missing required field
+		{"name": "note_add", "args": map[string]any{"kind": "rant", "text": "x"}},                        // enum
+		{"name": "targets_set", "args": map[string]any{"effective_from": "2026-02-30", "kcal": 1}},       // decode
+		{"name": "preference_set", "args": map[string]any{"key": strings.Repeat("k", 5000), "value": 1}}, // store
+	}
+	for _, c := range cases {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c["name"].(string), Arguments: c["args"]})
+		if err != nil {
+			t.Fatalf("%v: %v", c, err)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		var te coach.ToolError
+		if !res.IsError || json.Unmarshal([]byte(text), &te) != nil || te.Code != coach.CodeInvalidInput || te.Hint == "" {
+			t.Errorf("%s: %s, want the invalid_input JSON contract", c["name"], text)
+		}
+		if len(te.Message) > maxEchoedError+len("…") {
+			t.Errorf("%s: message not bounded (%d bytes)", c["name"], len(te.Message))
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -64,7 +65,36 @@ func InputSchema[In any](enums map[string][]string) (*jsonschema.Schema, error) 
 			return nil, fmt.Errorf("enum for %q: %w", prop, err)
 		}
 	}
+	relaxOptional(s)
 	return s, nil
+}
+
+// relaxOptional lets every optional property also be null or "" (LLM clients
+// often send those for "not set"); Go decodes both to the zero value, which
+// the handlers treat as omitted. Required properties keep their strict schema.
+func relaxOptional(obj *jsonschema.Schema) {
+	for name, ps := range obj.Properties {
+		if slices.Contains(obj.Required, name) || ps == nil {
+			continue
+		}
+		if ps.Type != "" {
+			ps.Types, ps.Type = []string{"null", ps.Type}, ""
+		}
+		isString := slices.Contains(ps.Types, "string")
+		if ps.Enum != nil {
+			for _, extra := range []any{nil, ""} {
+				if (extra == nil || isString) && !slices.Contains(ps.Enum, extra) {
+					ps.Enum = append(ps.Enum, extra)
+				}
+			}
+		}
+		if isString && strings.HasPrefix(ps.Pattern, "^") && strings.HasSuffix(ps.Pattern, "$") {
+			ps.Pattern = "^(?:" + ps.Pattern[1:len(ps.Pattern)-1] + ")?$"
+		}
+		if slices.Contains(ps.Types, "object") {
+			relaxOptional(ps)
+		}
+	}
 }
 
 func applyEnum(ps *jsonschema.Schema, values []string) error {

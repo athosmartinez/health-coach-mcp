@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -22,6 +23,8 @@ const (
 	maxTags          = 20
 	maxTagLen        = 64
 	maxQueryWords    = 32
+	// maxNotes bounds the table: decades of daily check-ins.
+	maxNotes = 50_000
 )
 
 // Note is a free-text coach note.
@@ -71,9 +74,15 @@ func (s *Store) AddNote(ctx context.Context, n Note) (out Note, err error) {
 		return Note{}, err
 	}
 	stamp, at := s.stamp()
+	// The count check and the insert share one INSERT ... SELECT, so the cap holds under concurrency.
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO notes (kind, text, tags, related_date, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id`,
-		n.Kind, n.Text, string(tags), nullString(string(n.RelatedDate)), stamp).Scan(&n.ID)
+		INSERT INTO notes (kind, text, tags, related_date, created_at)
+		SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM notes) < ?
+		RETURNING id`,
+		n.Kind, n.Text, string(tags), nullString(string(n.RelatedDate)), stamp, maxNotes).Scan(&n.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Note{}, invalid("note history is full (%d notes)", maxNotes)
+	}
 	if err != nil {
 		return Note{}, err
 	}

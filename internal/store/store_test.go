@@ -256,8 +256,8 @@ func TestConcurrentFirstOpen(t *testing.T) {
 	}
 	defer s.Close()
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("migration applied %d times (%v)", n, err)
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != embeddedMigrations(t) {
+		t.Errorf("schema_migrations has %d rows (%v), want one per migration (%d)", n, err, embeddedMigrations(t))
 	}
 }
 
@@ -304,8 +304,8 @@ func TestMigrationIsIdempotent(t *testing.T) {
 	if err := s2.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 1 {
-		t.Errorf("schema_migrations has %d rows, want 1", versions)
+	if versions != embeddedMigrations(t) {
+		t.Errorf("schema_migrations has %d rows, want %d", versions, embeddedMigrations(t))
 	}
 	if _, err := s2.GetMetric(ctx, "2026-10-10", "steps", 1); err != nil {
 		t.Errorf("data lost on reopen: %v", err)
@@ -584,7 +584,7 @@ func TestClearMetricsTouchesOnlyTheCache(t *testing.T) {
 	if err := s.PutMetric(ctx, Metric{Date: "2026-10-10", Key: "steps", Value: 1, AlgoVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m")}); err != nil {
+	if _, _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AddNote(ctx, Note{Kind: "checkin", Text: "keep me"}); err != nil {
@@ -605,7 +605,7 @@ func TestClearMetricsTouchesOnlyTheCache(t *testing.T) {
 	if res, _ := s.SearchNotes(ctx, NoteFilter{}); len(res.Notes) != 1 {
 		t.Errorf("notes lost: %+v", res)
 	}
-	if labs, _ := s.QueryLabs(ctx, "", ""); len(labs) != 1 {
+	if labs, _ := labRows(s.QueryLabs(ctx, "", "")); len(labs) != 1 {
 		t.Errorf("labs lost: %+v", labs)
 	}
 }
@@ -617,16 +617,16 @@ func TestClosedStoreReturnsErrors(t *testing.T) {
 	_ = s.Close()
 	checks := map[string]error{}
 	_, checks["Profile"] = s.Profile(ctx)
-	_, checks["UpdateProfile"] = s.UpdateProfile(ctx, ProfilePatch{})
-	_, checks["SetTarget"] = s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(1)})
+	_, _, checks["UpdateProfile"] = s.UpdateProfile(ctx, ProfilePatch{})
+	_, _, checks["SetTarget"] = s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(1)})
 	_, checks["TargetInForce"] = s.TargetInForce(ctx, "2026-10-01")
 	_, checks["Targets"] = s.Targets(ctx)
-	_, checks["UpsertHealthItem"] = s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "x", Status: "active"})
+	_, _, checks["UpsertHealthItem"] = s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "x", Status: "active"})
 	_, checks["HealthItems"] = s.HealthItems(ctx, "", "")
-	checks["SetPreference"] = s.SetPreference(ctx, "k", []byte(`1`))
+	_, _, checks["SetPreference"] = s.SetPreference(ctx, "k", []byte(`1`))
 	_, checks["Preferences"] = s.Preferences(ctx)
 	_, checks["RecordLabs"] = s.RecordLabs(ctx, "2026-10-01", "", "chat", []LabValue{{Analyte: "ldl", Value: 1, Unit: "x"}})
-	_, checks["QueryLabs"] = s.QueryLabs(ctx, "", "")
+	_, checks["QueryLabs"] = labRows(s.QueryLabs(ctx, "", ""))
 	_, checks["AddNote"] = s.AddNote(ctx, Note{Kind: "checkin", Text: "x"})
 	_, checks["SearchNotes"] = s.SearchNotes(ctx, NoteFilter{})
 	checks["PutMetric"] = s.PutMetric(ctx, Metric{Date: "2026-10-01", Key: "steps", Value: 1})
@@ -646,7 +646,7 @@ func TestClosedStoreReturnsErrors(t *testing.T) {
 func TestCorruptRowsFailWholeList(t *testing.T) {
 	s, _ := openTest(t)
 	for _, d := range []coach.LocalDate{"2026-10-01", "2026-10-02"} {
-		if _, err := s.SetTarget(ctx, Target{EffectiveFrom: d, Kcal: ptr(2000)}); err != nil {
+		if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: d, Kcal: ptr(2000)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -688,5 +688,39 @@ func TestNotFoundIsNoData(t *testing.T) {
 	}
 	if got := coach.AsToolError(err); got.Code != coach.CodeNoData {
 		t.Errorf("tools would report %q, want no_data", got.Code)
+	}
+}
+
+func embeddedMigrations(t *testing.T) int {
+	t.Helper()
+	list, err := listMigrations(migrations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(list)
+}
+
+func TestTableCaps(t *testing.T) {
+	s, _ := openTest(t)
+	stamp, _ := s.stamp()
+	// Fill straight through SQL: inserting 50k rows one call at a time is slow.
+	fill := func(q string, n int) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx, `WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < ?) `+q, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fill(`INSERT INTO notes (kind, text, created_at) SELECT 'checkin', 'n', '`+stamp+`' FROM seq`, maxNotes)
+	if _, err := s.AddNote(ctx, Note{Kind: "checkin", Text: "one more"}); !isInvalidInput(err) {
+		t.Errorf("note over the cap err = %v", err)
+	}
+	fill(`INSERT INTO lab_results (collected_on, analyte, value, unit, source, created_at)
+		SELECT '2000-01-01', 'a' || i, 1, 'u', 'chat', '`+stamp+`' FROM seq`, maxLabTotal-1)
+	two := []LabValue{{Analyte: "x", Value: 1, Unit: "u"}, {Analyte: "y", Value: 1, Unit: "u"}}
+	if _, err := s.RecordLabs(ctx, "2026-10-01", "", "chat", two); !isInvalidInput(err) {
+		t.Errorf("labs over the cap err = %v", err)
+	}
+	if _, err := s.RecordLabs(ctx, "2026-10-01", "", "chat", two[:1]); err != nil {
+		t.Errorf("labs up to the cap rejected: %v", err)
 	}
 }

@@ -33,10 +33,10 @@ func TestProfileMergesPatches(t *testing.T) {
 	}
 
 	birth := coach.LocalDate("1990-01-01")
-	if _, err := s.UpdateProfile(ctx, ProfilePatch{BirthDate: &birth, HeightCm: ptr(180.0)}); err != nil {
+	if _, _, err := s.UpdateProfile(ctx, ProfilePatch{BirthDate: &birth, HeightCm: ptr(180.0)}); err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.UpdateProfile(ctx, ProfilePatch{
+	p, _, err := s.UpdateProfile(ctx, ProfilePatch{
 		Goal: &Goal{Type: "cut", TargetWeightKg: ptr(75.0), Deadline: "2027-01-31"},
 		Plan: &TrainingPlan{Split: "ppl"},
 	})
@@ -62,7 +62,7 @@ func TestProfileMergesPatches(t *testing.T) {
 func TestProfileClearAndValidation(t *testing.T) {
 	s, _ := openTest(t)
 	h := 180.0
-	p, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m"), HeightCm: &h, Goal: &Goal{Type: "cut"}})
+	p, _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m"), HeightCm: &h, Goal: &Goal{Type: "cut"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestProfileClearAndValidation(t *testing.T) {
 	if *p.HeightCm != 180 {
 		t.Errorf("result aliases the patch: %v", *p.HeightCm)
 	}
-	p, err = s.UpdateProfile(ctx, ProfilePatch{Clear: []string{"sex", "goal"}})
+	p, _, err = s.UpdateProfile(ctx, ProfilePatch{Clear: []string{"sex", "goal"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestProfileClearAndValidation(t *testing.T) {
 		{Plan: &TrainingPlan{Notes: string(make([]byte, maxProfileText+1))}},
 	}
 	for _, patch := range bad {
-		if _, err := s.UpdateProfile(ctx, patch); !isInvalidInput(err) {
+		if _, _, err := s.UpdateProfile(ctx, patch); !isInvalidInput(err) {
 			t.Errorf("UpdateProfile(%+v) err = %v, want invalid_input", patch, err)
 		}
 	}
@@ -103,9 +103,11 @@ func TestProfileClearAndValidation(t *testing.T) {
 func TestProfileValidationIsDeterministic(t *testing.T) {
 	s, _ := openTest(t)
 	patch := ProfilePatch{HeightCm: ptr(-1.0), Goal: &Goal{TargetWeightKg: ptr(-1.0), TargetBodyFatPct: ptr(-1.0)}}
-	first := fmt.Sprint(s.UpdateProfile(ctx, patch))
+	_, _, firstErr := s.UpdateProfile(ctx, patch)
+	first := fmt.Sprint(firstErr)
 	for range 20 {
-		if got := fmt.Sprint(s.UpdateProfile(ctx, patch)); got != first {
+		if _, _, err := s.UpdateProfile(ctx, patch); fmt.Sprint(err) != first {
+			got := fmt.Sprint(err)
 			t.Fatalf("error changes between runs: %q vs %q", got, first)
 		}
 	}
@@ -113,7 +115,7 @@ func TestProfileValidationIsDeterministic(t *testing.T) {
 
 func TestCorruptProfileJSONCanBeRepaired(t *testing.T) {
 	s, _ := openTest(t)
-	if _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m"), Goal: &Goal{Type: "cut"}, Plan: &TrainingPlan{Split: "ppl"}}); err != nil {
+	if _, _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m"), Goal: &Goal{Type: "cut"}, Plan: &TrainingPlan{Split: "ppl"}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct{ col, field string }{{"goal_json", "goal"}, {"plan_json", "training_plan"}} {
@@ -129,11 +131,11 @@ func TestCorruptProfileJSONCanBeRepaired(t *testing.T) {
 		if !errors.As(err, &syntax) {
 			t.Errorf("corrupt %s: JSON cause dropped: %v", c.col, err)
 		}
-		if _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("f")}); err == nil {
+		if _, _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("f")}); err == nil {
 			t.Errorf("unrelated patch over corrupt %s must still fail", c.col)
 		}
 		// Clearing (or setting) the corrupt field repairs the profile.
-		p, err := s.UpdateProfile(ctx, ProfilePatch{Clear: []string{c.field}})
+		p, _, err := s.UpdateProfile(ctx, ProfilePatch{Clear: []string{c.field}})
 		if err != nil {
 			t.Fatalf("repair %s: %v", c.col, err)
 		}
@@ -147,7 +149,7 @@ func TestCorruptProfileJSONCanBeRepaired(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE profile SET goal_json = '{bad'`); err != nil {
 		t.Fatal(err)
 	}
-	if p, err := s.UpdateProfile(ctx, ProfilePatch{Goal: &Goal{Type: "bulk"}}); err != nil || p.Goal.Type != "bulk" {
+	if p, _, err := s.UpdateProfile(ctx, ProfilePatch{Goal: &Goal{Type: "bulk"}}); err != nil || p.Goal.Type != "bulk" {
 		t.Errorf("setting the corrupt goal must repair it: %+v, %v", p, err)
 	}
 }
@@ -159,10 +161,10 @@ func TestTargetsVersioning(t *testing.T) {
 	if _, err := s.TargetInForce(ctx, "2026-10-14"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("no targets err = %v", err)
 	}
-	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2400), WeeklySessions: ptr(4)}); err != nil {
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2400), WeeklySessions: ptr(4)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-15", Kcal: ptr(2200)}); err != nil {
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-15", Kcal: ptr(2200)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -196,22 +198,22 @@ func TestTargetsVersioning(t *testing.T) {
 		{EffectiveFrom: "2026-10-01", WeeklySessions: ptr(maxWeeklySessions + 1)},
 		{EffectiveFrom: "2026-10-01", Clear: []string{"carbs"}},
 	} {
-		if _, err := s.SetTarget(ctx, bad); !isInvalidInput(err) {
+		if _, _, err := s.SetTarget(ctx, bad); !isInvalidInput(err) {
 			t.Errorf("SetTarget(%+v) err = %v, want invalid_input", bad, err)
 		}
 	}
 	// Exactly at the limits is accepted.
-	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-11-01", Kcal: ptr(maxKcal), ProteinG: ptr(maxProteinG), WeeklySessions: ptr(maxWeeklySessions)}); err != nil {
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-11-01", Kcal: ptr(maxKcal), ProteinG: ptr(maxProteinG), WeeklySessions: ptr(maxWeeklySessions)}); err != nil {
 		t.Errorf("limits rejected: %v", err)
 	}
 }
 
 func TestPartialTargetCarriesOtherFieldsForward(t *testing.T) {
 	s, _ := openTest(t)
-	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000), ProteinG: ptr(150), WeeklySessions: ptr(4)}); err != nil {
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000), ProteinG: ptr(150), WeeklySessions: ptr(4)}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-20", Kcal: ptr(1900)})
+	got, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-20", Kcal: ptr(1900)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +236,7 @@ func TestSameDateCorrectionCarriesFromThatRow(t *testing.T) {
 		{EffectiveFrom: "2026-10-15", Kcal: ptr(1900)},
 	}
 	for _, st := range steps {
-		if _, err := s.SetTarget(ctx, st); err != nil {
+		if _, _, err := s.SetTarget(ctx, st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -243,7 +245,7 @@ func TestSameDateCorrectionCarriesFromThatRow(t *testing.T) {
 		t.Errorf("same-date correction = %+v, want {1900, 160 from the same row, 4}", tg)
 	}
 	// A back-dated version does not rewrite the later one.
-	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-10", Kcal: ptr(2100)}); err != nil {
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-10", Kcal: ptr(2100)}); err != nil {
 		t.Fatal(err)
 	}
 	if later, _ := s.TargetInForce(ctx, "2026-10-15"); *later.Kcal != 1900 || *later.ProteinG != 160 {
@@ -256,10 +258,10 @@ func TestSameDateCorrectionCarriesFromThatRow(t *testing.T) {
 
 func TestTargetClear(t *testing.T) {
 	s, _ := openTest(t)
-	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000), ProteinG: ptr(150)}); err != nil {
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000), ProteinG: ptr(150)}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-10", Clear: []string{"protein_g"}})
+	got, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-10", Clear: []string{"protein_g"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +277,7 @@ func TestTargetClear(t *testing.T) {
 
 func TestHealthItemsUpsertAndFilter(t *testing.T) {
 	s, _ := openTest(t)
-	knee, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "knee", Status: "active", Details: "ACL", StartedOn: "2026-09-01"})
+	knee, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "knee", Status: "active", Details: "ACL", StartedOn: "2026-09-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,13 +286,13 @@ func TestHealthItemsUpsertAndFilter(t *testing.T) {
 		{Kind: "supplement", Name: "omega 3", Status: "paused"},
 		{Kind: "injury", Name: "ankle", Status: "resolved"},
 	} {
-		if _, err := s.UpsertHealthItem(ctx, it); err != nil {
+		if _, _, err := s.UpsertHealthItem(ctx, it); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// A status-only update keeps details and dates.
-	again, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "Knee ", Status: "resolved", EndedOn: "2026-10-10"})
+	again, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "Knee ", Status: "resolved", EndedOn: "2026-10-10"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,15 +329,15 @@ func TestHealthItemsUpsertAndFilter(t *testing.T) {
 
 func TestHealthItemClearAndDateOrder(t *testing.T) {
 	s, _ := openTest(t)
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "condition", Name: "asthma", Status: "active", Details: "mild", StartedOn: "2010-01-01"}); err != nil {
+	if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "condition", Name: "asthma", Status: "active", Details: "mild", StartedOn: "2010-01-01"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "condition", Name: "asthma", Status: "active", Clear: []string{"details"}})
+	got, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "condition", Name: "asthma", Status: "active", Clear: []string{"details"}})
 	if err != nil || got.Details != "" || got.StartedOn != "2010-01-01" {
 		t.Errorf("clear details = %+v, %v", got, err)
 	}
 	// A new ended_on before the stored started_on is rejected and rolled back.
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "condition", Name: "asthma", Status: "resolved", EndedOn: "2009-01-01"}); !isInvalidInput(err) {
+	if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "condition", Name: "asthma", Status: "resolved", EndedOn: "2009-01-01"}); !isInvalidInput(err) {
 		t.Errorf("ended_on before stored started_on err = %v", err)
 	}
 	if items, _ := s.HealthItems(ctx, "condition", ""); items[0].Status != "active" || items[0].EndedOn != "" {
@@ -355,11 +357,11 @@ func TestHealthItemValidation(t *testing.T) {
 		{Kind: "injury", Name: "x", Status: "active", Clear: []string{"status"}},
 	}
 	for _, it := range bad {
-		if _, err := s.UpsertHealthItem(ctx, it); !isInvalidInput(err) {
+		if _, _, err := s.UpsertHealthItem(ctx, it); !isInvalidInput(err) {
 			t.Errorf("UpsertHealthItem(%s/%q/%s) err = %v, want invalid_input", it.Kind, it.Name, it.Status, err)
 		}
 	}
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "x", Status: "active", Details: string(make([]byte, maxDetailsLen))}); err != nil {
+	if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "x", Status: "active", Details: string(make([]byte, maxDetailsLen))}); err != nil {
 		t.Errorf("details at the limit rejected: %v", err)
 	}
 }
@@ -367,14 +369,14 @@ func TestHealthItemValidation(t *testing.T) {
 func TestHealthItemCountCap(t *testing.T) {
 	s, _ := openTest(t)
 	for i := range maxHealthItems {
-		if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: fmt.Sprintf("s%d", i), Status: "active"}); err != nil {
+		if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: fmt.Sprintf("s%d", i), Status: "active"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: "one more", Status: "active"}); !isInvalidInput(err) {
+	if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: "one more", Status: "active"}); !isInvalidInput(err) {
 		t.Errorf("item over the cap err = %v", err)
 	}
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: "s0", Status: "paused"}); err != nil {
+	if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: "s0", Status: "paused"}); err != nil {
 		t.Errorf("updating an existing item at the cap must work: %v", err)
 	}
 }
@@ -383,13 +385,13 @@ func TestHealthItemCountCap(t *testing.T) {
 
 func TestPreferences(t *testing.T) {
 	s, _ := openTest(t)
-	if err := s.SetPreference(ctx, " training_time ", json.RawMessage(`"morning"`)); err != nil {
+	if _, _, err := s.SetPreference(ctx, " training_time ", json.RawMessage(`"morning"`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPreference(ctx, "foods_avoid", json.RawMessage(`["lactose"]`)); err != nil {
+	if _, _, err := s.SetPreference(ctx, "foods_avoid", json.RawMessage(`["lactose"]`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPreference(ctx, "training_time", json.RawMessage(`"evening"`)); err != nil {
+	if _, _, err := s.SetPreference(ctx, "training_time", json.RawMessage(`"evening"`)); err != nil {
 		t.Fatal(err)
 	}
 	prefs, err := s.Preferences(ctx)
@@ -401,12 +403,12 @@ func TestPreferences(t *testing.T) {
 	}
 	big := json.RawMessage(`"` + strings.Repeat("a", maxPrefValue) + `"`)
 	for key, v := range map[string]json.RawMessage{"x": json.RawMessage(`not json`), "": json.RawMessage(`1`), "big": big} {
-		if err := s.SetPreference(ctx, key, v); !isInvalidInput(err) {
+		if _, _, err := s.SetPreference(ctx, key, v); !isInvalidInput(err) {
 			t.Errorf("SetPreference(%q) err = %v, want invalid_input", key, err)
 		}
 	}
 	atLimit := json.RawMessage(`"` + strings.Repeat("a", maxPrefValue-2) + `"`)
-	if err := s.SetPreference(ctx, "notes", atLimit); err != nil {
+	if _, _, err := s.SetPreference(ctx, "notes", atLimit); err != nil {
 		t.Errorf("value at the limit rejected: %v", err)
 	}
 }
@@ -414,14 +416,14 @@ func TestPreferences(t *testing.T) {
 func TestPreferenceCountCap(t *testing.T) {
 	s, _ := openTest(t)
 	for i := range maxPreferences {
-		if err := s.SetPreference(ctx, fmt.Sprintf("k%d", i), json.RawMessage(`1`)); err != nil {
+		if _, _, err := s.SetPreference(ctx, fmt.Sprintf("k%d", i), json.RawMessage(`1`)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.SetPreference(ctx, "one_more", json.RawMessage(`1`)); !isInvalidInput(err) {
+	if _, _, err := s.SetPreference(ctx, "one_more", json.RawMessage(`1`)); !isInvalidInput(err) {
 		t.Errorf("key over the cap err = %v", err)
 	}
-	if err := s.SetPreference(ctx, "k0", json.RawMessage(`2`)); err != nil {
+	if _, _, err := s.SetPreference(ctx, "k0", json.RawMessage(`2`)); err != nil {
 		t.Errorf("overwriting at the cap must work: %v", err)
 	}
 }
@@ -443,7 +445,7 @@ func TestLabsUpsertAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first[1].Analyte != "glucose_fasting" || !first[1].OutOfRange() || first[0].OutOfRange() {
+	if first.Results[1].Analyte != "glucose_fasting" || !first.Results[1].OutOfRange() || first.Results[0].OutOfRange() {
 		t.Errorf("normalization/out-of-range wrong: %+v", first)
 	}
 
@@ -455,7 +457,7 @@ func TestLabsUpsertAndQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ldl, err := s.QueryLabs(ctx, "LDL", "")
+	ldl, err := labRows(s.QueryLabs(ctx, "LDL", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,11 +465,11 @@ func TestLabsUpsertAndQuery(t *testing.T) {
 		ldl[1].CollectedOn != "2026-10-01" || ldl[1].Lab != "" || ldl[1].RefHigh != nil {
 		t.Errorf("ldl series = %+v", ldl)
 	}
-	recent, _ := s.QueryLabs(ctx, "", "2026-09-15")
+	recent, _ := labRows(s.QueryLabs(ctx, "", "2026-09-15"))
 	if len(recent) != 1 || recent[0].CollectedOn != "2026-10-01" {
 		t.Errorf("since filter = %+v", recent)
 	}
-	all, _ := s.QueryLabs(ctx, "", "")
+	all, _ := labRows(s.QueryLabs(ctx, "", ""))
 	var seq []string
 	for _, r := range all {
 		seq = append(seq, r.Analyte+"@"+string(r.CollectedOn))
@@ -475,7 +477,7 @@ func TestLabsUpsertAndQuery(t *testing.T) {
 	if want := []string{"glucose_fasting@2026-09-01", "ldl@2026-09-01", "ldl@2026-10-01"}; !slices.Equal(seq, want) {
 		t.Errorf("order = %v, want %v", seq, want)
 	}
-	if _, err := s.QueryLabs(ctx, "", "garbage"); !isInvalidInput(err) {
+	if _, err := labRows(s.QueryLabs(ctx, "", "garbage")); !isInvalidInput(err) {
 		t.Errorf("invalid since err = %v", err)
 	}
 }
@@ -509,7 +511,7 @@ func TestLabsValidation(t *testing.T) {
 	if _, err := s.RecordLabs(ctx, "2026-11-01", "", "chat", []LabValue{{Analyte: "hdl", Value: 50, Unit: "mg/dL"}, {Analyte: "", Value: 1, Unit: "x"}}); err == nil {
 		t.Fatal("batch with a bad row accepted")
 	}
-	if hdl, _ := s.QueryLabs(ctx, "hdl", ""); len(hdl) != 0 {
+	if hdl, _ := labRows(s.QueryLabs(ctx, "hdl", "")); len(hdl) != 0 {
 		t.Errorf("partial batch committed: %+v", hdl)
 	}
 	// The caller's slice is not mutated by normalization.
@@ -765,17 +767,17 @@ func TestConcurrentReadThenWriteTransactions(t *testing.T) {
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			_, err := s.UpdateProfile(ctx, ProfilePatch{HeightCm: ptr(float64(170 + i))})
+			_, _, err := s.UpdateProfile(ctx, ProfilePatch{HeightCm: ptr(float64(170 + i))})
 			errs <- err
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000 + i)})
+			_, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000 + i)})
 			errs <- err
 		}()
 		go func() {
 			defer wg.Done()
-			_, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: "creatine", Status: "active"})
+			_, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "supplement", Name: "creatine", Status: "active"})
 			errs <- err
 		}()
 	}
@@ -794,5 +796,160 @@ func TestConcurrentReadThenWriteTransactions(t *testing.T) {
 	}
 	if p, _ := s.Profile(ctx); *p.HeightCm < 170 || *p.HeightCm > 185 {
 		t.Errorf("height = %v, want one of the written values", *p.HeightCm)
+	}
+}
+
+// labRows unwraps QueryLabs for tests that only need the rows.
+func labRows(r LabRows, err error) ([]LabResult, error) { return r.Results, err }
+
+func TestLabStatus(t *testing.T) {
+	lo, hi := ptr(70.0), ptr(99.0)
+	cases := []struct {
+		v    LabValue
+		want string
+	}{
+		{LabValue{Value: 70, RefLow: lo, RefHigh: hi}, LabInRange}, // inclusive bounds
+		{LabValue{Value: 99, RefLow: lo, RefHigh: hi}, LabInRange},
+		{LabValue{Value: 69.9, RefLow: lo, RefHigh: hi}, LabLow},
+		{LabValue{Value: 99.1, RefLow: lo, RefHigh: hi}, LabHigh},
+		{LabValue{Value: 5, RefLow: ptr(10.0)}, LabLow}, // only a lower bound
+		{LabValue{Value: 50, RefLow: ptr(10.0)}, LabInRange},
+		{LabValue{Value: 5.7, RefHigh: ptr(5.7), RefHighExclusive: true}, LabHigh}, // "< 5.7"
+		{LabValue{Value: 5.6, RefHigh: ptr(5.7), RefHighExclusive: true}, LabInRange},
+		{LabValue{Value: 60, RefLow: ptr(60.0), RefLowExclusive: true}, LabLow}, // "> 60"
+		{LabValue{Value: 900}, LabNoReference},                                  // no range is not "normal"
+	}
+	for _, c := range cases {
+		if got := c.v.Status(); got != c.want {
+			t.Errorf("Status(%+v) = %s, want %s", c.v, got, c.want)
+		}
+		if c.v.OutOfRange() != (c.want == LabLow || c.want == LabHigh) {
+			t.Errorf("OutOfRange(%+v) disagrees with %s", c.v, c.want)
+		}
+	}
+}
+
+func TestLabsReportReplacementsAndUnitChanges(t *testing.T) {
+	s, _ := openTest(t)
+	if _, err := s.RecordLabs(ctx, "2025-09-01", "LabA", "pdf", []LabValue{{Analyte: "glucose", Value: 100, Unit: "mg/dL"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.RecordLabs(ctx, "2026-09-01", "LabB", "pdf", []LabValue{
+		{Analyte: "glucose", Value: 5.5, Unit: "mmol/L", RefText: "3,9 a 5,5", ReportFlag: "H"},
+		{Analyte: "creatinine", Value: 1.0, Unit: "mg/dL"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.UnitChanges) != 1 || b.UnitChanges[0].Analyte != "glucose" || b.UnitChanges[0].PreviousUnit != "mg/dL" || b.UnitChanges[0].PreviousOn != "2025-09-01" {
+		t.Errorf("unit changes = %+v", b.UnitChanges)
+	}
+	if len(b.Replaced) != 0 {
+		t.Errorf("nothing was replaced: %+v", b.Replaced)
+	}
+	// Same date again: urine creatinine sent under the blood name replaces it, visibly.
+	b, err = s.RecordLabs(ctx, "2026-09-01", "LabC", "chat", []LabValue{{Analyte: "creatinine", Value: 80, Unit: "mg/dL"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Replaced) != 1 || b.Replaced[0].PreviousValue != 1.0 || b.Replaced[0].PreviousLab != "LabB" {
+		t.Errorf("replaced = %+v", b.Replaced)
+	}
+	// A unit spelled differently is the same unit.
+	b, err = s.RecordLabs(ctx, "2026-10-01", "", "chat", []LabValue{{Analyte: "creatinine", Value: 1.1, Unit: "MG / dl"}})
+	if err != nil || len(b.UnitChanges) != 0 {
+		t.Errorf("case/space-only unit difference flagged: %+v, %v", b.UnitChanges, err)
+	}
+	rows, _ := labRows(s.QueryLabs(ctx, "glucose", ""))
+	if rows[1].RefText != "3,9 a 5,5" || rows[1].ReportFlag != "H" {
+		t.Errorf("ref_text/report_flag not stored: %+v", rows[1])
+	}
+	if _, err := s.RecordLabs(ctx, "2026-10-02", "", "chat", []LabValue{{Analyte: "x", Value: 1, Unit: "u", RefHighExclusive: true}}); !isInvalidInput(err) {
+		t.Errorf("exclusive flag without its bound err = %v", err)
+	}
+}
+
+func TestQueryLabsTruncationKeepsLatest(t *testing.T) {
+	s, _ := openTest(t)
+	stamp, _ := s.stamp()
+	// maxLabRows old "aaa" rows, then one recent "zzz": the cut must drop old rows, not the newest.
+	if _, err := s.db.ExecContext(ctx, `WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < ?)
+		INSERT INTO lab_results (collected_on, analyte, value, unit, source, created_at)
+		SELECT date('2000-01-01', '+' || i || ' days'), 'aaa', i, 'u', 'chat', ? FROM seq`, maxLabRows, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordLabs(ctx, "2026-10-01", "", "chat", []LabValue{{Analyte: "zzz", Value: 1, Unit: "u"}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.QueryLabs(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Truncated || len(r.Results) != maxLabRows {
+		t.Fatalf("truncated=%v rows=%d, want true and %d", r.Truncated, len(r.Results), maxLabRows)
+	}
+	last := r.Results[len(r.Results)-1]
+	if last.Analyte != "zzz" || r.Results[0].CollectedOn == "2000-01-02" {
+		t.Errorf("newest row dropped or oldest kept: first %s/%s, last %s", r.Results[0].Analyte, r.Results[0].CollectedOn, last.Analyte)
+	}
+	if one, _ := s.QueryLabs(ctx, "zzz", ""); one.Truncated || len(one.Results) != 1 {
+		t.Errorf("filtered query = %+v", one)
+	}
+}
+
+func TestSetAndClearSameFieldIsRejected(t *testing.T) {
+	s, _ := openTest(t)
+	if _, _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m"), Clear: []string{"sex"}}); !isInvalidInput(err) {
+		t.Errorf("profile set+clear err = %v", err)
+	}
+	if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000), Clear: []string{"kcal"}}); !isInvalidInput(err) {
+		t.Errorf("target set+clear err = %v", err)
+	}
+	if _, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "x", Status: "active", Details: "d", Clear: []string{"details"}}); !isInvalidInput(err) {
+		t.Errorf("health item set+clear err = %v", err)
+	}
+	long := strings.Repeat("z", 1000)
+	_, _, err := s.UpdateProfile(ctx, ProfilePatch{Clear: []string{long}})
+	if !isInvalidInput(err) || strings.Contains(err.Error(), long) {
+		t.Errorf("unknown clear field must be rejected without echoing it whole: %v", err)
+	}
+}
+
+func TestWritesReturnThePreviousValue(t *testing.T) {
+	s, _ := openTest(t)
+	_, prev, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m")})
+	if err != nil || prev != nil {
+		t.Fatalf("first profile update: prev %+v, %v", prev, err)
+	}
+	_, prev, _ = s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("f")})
+	if prev == nil || prev.Sex != "m" {
+		t.Errorf("profile prev = %+v", prev)
+	}
+
+	_, tp, _ := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000)})
+	if tp != nil {
+		t.Errorf("first target prev = %+v", tp)
+	}
+	_, tp, _ = s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2100)})
+	if tp == nil || *tp.Kcal != 2000 || tp.EffectiveFrom != "2026-10-01" {
+		t.Errorf("same-date correction prev = %+v", tp)
+	}
+
+	_, hp, _ := s.UpsertHealthItem(ctx, HealthItem{Kind: "allergy", Name: "peanut", Status: "active"})
+	if hp != nil {
+		t.Errorf("new item prev = %+v", hp)
+	}
+	_, hp, _ = s.UpsertHealthItem(ctx, HealthItem{Kind: "allergy", Name: "Peanut", Status: "resolved"})
+	if hp == nil || hp.Status != "active" {
+		t.Errorf("item prev = %+v", hp)
+	}
+
+	key, pp, _ := s.SetPreference(ctx, "  tone ", json.RawMessage(`"direct"`))
+	if key != "tone" || pp != nil {
+		t.Errorf("new preference: key %q prev %s", key, pp)
+	}
+	_, pp, _ = s.SetPreference(ctx, "tone", json.RawMessage(`"gentle"`))
+	if string(pp) != `"direct"` {
+		t.Errorf("preference prev = %s", pp)
 	}
 }

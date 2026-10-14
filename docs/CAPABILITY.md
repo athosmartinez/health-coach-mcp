@@ -118,13 +118,13 @@ hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories); `granula
 
 | Tool | Input | Output / effect |
 |---|---|---|
-| `profile_get()` | — | Profile + targets in force + preferences |
+| `profile_get()` | — | Profile (+ `age_years`) + targets in force + **active/paused health items** + preferences; missing parts are omitted, not `no_data` |
 | `profile_update(patch)` | partial fields: `birth_date`, `sex`, `height_cm`, `goal` {type, target_weight_kg, target_body_fat_pct, deadline}, `training_plan` {split, notes} | Updated profile |
 | `targets_set(effective_from, kcal?, protein_g?, weekly_sessions?, clear[]?)` | new version (I6); **sole source** of the weekly sessions target; omitted fields are carried forward from the version in force (the same date's row when correcting it), `clear[]` drops them | Version created; previous ones preserved |
 | `health_item_upsert(kind, name, status, details?, started_on?, ended_on?, clear[]?)` | `kind` ∈ condition, medication, supplement, injury, allergy, restriction; `name` trimmed, case-insensitive | Item created/updated; on update omitted details/dates are kept (`clear[]` erases them), so a status change never wipes history |
 | `health_items_list(kind?, status?)` | filters | List |
-| `labs_record(collected_on, source, lab?, results[])` | `source` ∈ pdf, chat, file (default `chat`); `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; same (`collected_on`, `analyte`) **replaces** the value (correction); `out_of_range[]` flagged (R3) |
-| `labs_query(analyte?, since?)` | filters | Series per analyte with the reference |
+| `labs_record(collected_on, source, lab?, results[])` | `source` ∈ pdf, chat, file (default `chat`); `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; same (`collected_on`, `analyte`) **replaces** the value, listed in `replaced[]`; per value `status` ∈ in_range, low, high, **no_reference** (no range ≠ normal); `out_of_range[]` (R3, with `report_flag`), `no_reference[]`, `unit_changes[]`; optional `ref_low_exclusive`/`ref_high_exclusive` ("< X"), `ref_text`, `report_flag` |
+| `labs_query(analyte?, since?)` | filters | Series per analyte with per-point `status`, `latest`, `units[]`/`mixed_units`; `truncated` keeps the newest rows |
 | `preference_set(key, value)` / `preferences_get()` | free key-value (e.g. `foods_avoid`, `training_time`) | — |
 | `note_add(kind, text, tags?, related_date?)` | `kind` ∈ insight, decision, checkin, symptom | Note created |
 | `notes_search(kind?, since?, query?, limit?)` | filters + text (every word must appear; no prefix match; accents folded) | `{notes, more}` — `more` = older matches exist beyond the limit |
@@ -134,6 +134,15 @@ fields; omitted fields stay unchanged. Store limits (rejected as `invalid_input`
 note text 8 KB, 20 tags of ≤64 chars, 200 preferences of ≤16 KB, 500 health items (details ≤4 KB), 32 search
 words, 200 notes per search, 2000 lab rows per query, 400-day metric ranges. Filters are validated too (an unknown
 `kind` is `invalid_input`, not an empty list). A miss (no profile, no target in force, cache miss) is `no_data`.
+
+Every write that overwrites returns the `previous` value (profile, target version in force, health item,
+preference). Optional inputs also accept `null` and `""` as "not set". Every tool error, including the SDK's
+schema and decoding errors, is the `{code,message,hint}` JSON. Annotations: reads are read-only; overwriting
+tools are idempotent and **destructive** (clients should confirm); `note_add` appends; all are closed-world.
+Outputs with stored free text carry a `notice` that it is data, not instructions. Guardrail texts (R3) travel in
+the outputs: no diagnosis, no starting/stopping/dosing any medication **or supplement**, prompt care for values the
+report marks critical. Known limit: the SDK decodes arguments as float64 during schema validation, so integers
+beyond 2^53 lose precision.
 
 Idempotency: `labs_record` upserts by (`collected_on`, `analyte`); `health_item_upsert` by
 (`kind`, `name`). Deletion only through explicit `*_delete` tools (phase 2) — the MVP doesn't delete.

@@ -51,8 +51,8 @@ func TestInputSchemaKeepsNullAllowedForPointers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InputSchema: %v", err)
 	}
-	if got := s.Properties["maybe"].Enum; !slices.Equal(got, []any{"x", nil}) {
-		t.Errorf("enum = %v, want [x <nil>]", got)
+	if got := s.Properties["maybe"].Enum; !slices.Equal(got, []any{"x", nil, ""}) {
+		t.Errorf("enum = %v, want [x <nil> \"\"] (optional: null and empty mean not set)", got)
 	}
 }
 
@@ -61,8 +61,20 @@ func TestInputSchemaDatePattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InputSchema: %v", err)
 	}
-	if day := s.Properties["day"]; day.Type != "string" || day.Pattern != coach.DatePattern {
-		t.Errorf("day schema = type %q pattern %q", day.Type, day.Pattern)
+	// Optional: the pattern also accepts "" and the type null ("not set").
+	day := s.Properties["day"]
+	if !slices.Equal(day.Types, []string{"null", "string"}) || day.Pattern != `^(?:\d{4}-\d{2}-\d{2})?$` {
+		t.Errorf("optional day schema = types %v pattern %q", day.Types, day.Pattern)
+	}
+	type required struct {
+		Day coach.LocalDate `json:"day"`
+	}
+	strict, err := InputSchema[required](nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := strict.Properties["day"]; d.Type != "string" || d.Pattern != coach.DatePattern {
+		t.Errorf("required day schema = type %q pattern %q, want the strict date", d.Type, d.Pattern)
 	}
 }
 

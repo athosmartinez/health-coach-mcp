@@ -70,3 +70,41 @@ func failureCode(ctx context.Context, err error) string {
 	}
 	return "protocol_error"
 }
+
+// maxEchoedError bounds SDK validation text copied into an error message: it
+// can quote the arguments the client sent.
+const maxEchoedError = 500
+
+// toolErrorContract rewrites the errors the SDK produces before a handler runs
+// (argument validation and decoding) into the coach contract, so every tool
+// error is JSON {code,message,hint}. Handler errors already are: tools.Register
+// sends them as coach.WireError, so any other error result is an input problem.
+func toolErrorContract() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			r, ok := res.(*mcp.CallToolResult)
+			if method != "tools/call" || !ok || r == nil || !r.IsError {
+				return res, err
+			}
+			var we coach.WireError
+			if errors.As(r.GetError(), &we) {
+				return res, err
+			}
+			msg := "the arguments do not match the tool's input schema"
+			if len(r.Content) > 0 {
+				if tc, ok := r.Content[0].(*mcp.TextContent); ok && tc.Text != "" {
+					msg = tc.Text
+				}
+			}
+			if len(msg) > maxEchoedError {
+				msg = msg[:maxEchoedError] + "…"
+			}
+			fixed := &mcp.CallToolResult{}
+			fixed.SetError(coach.WireError{ToolError: coach.ToolError{
+				Code: coach.CodeInvalidInput, Message: msg, Hint: "check the tool's input schema and retry",
+			}})
+			return fixed, err
+		}
+	}
+}

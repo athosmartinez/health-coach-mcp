@@ -668,8 +668,10 @@ func TestCorruptRowsFailWholeList(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE notes SET created_at = ?, tags = '[bad'`, fixedClock().Format(timeLayout)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SearchNotes(ctx, NoteFilter{}); err == nil || !strings.Contains(err.Error(), "tags are corrupt") {
-		t.Errorf("corrupt tags err = %v", err)
+	// One note with unreadable tags must not hide every other note.
+	if res, err := s.SearchNotes(ctx, NoteFilter{}); err != nil || len(res.Notes) == 0 ||
+		!res.Notes[0].TagsUnreadable || len(res.Notes[0].Tags) != 0 {
+		t.Errorf("corrupt tags: %+v, %v", res, err)
 	}
 	var c stampCol
 	if err := c.Scan(42); err == nil {
@@ -722,5 +724,29 @@ func TestTableCaps(t *testing.T) {
 	}
 	if _, err := s.RecordLabs(ctx, "2026-10-01", "", "chat", two[:1]); err != nil {
 		t.Errorf("labs up to the cap rejected: %v", err)
+	}
+}
+
+func TestNotesQueryLengthCaps(t *testing.T) {
+	s, _ := openTest(t)
+	for name, q := range map[string]string{
+		"long query": strings.Repeat("ab ", maxQueryBytes/3+1),
+		"long word":  strings.Repeat("a", maxQueryWordLen+1),
+	} {
+		if _, err := s.SearchNotes(ctx, NoteFilter{Query: q}); !isInvalidInput(err) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	if _, err := s.SearchNotes(ctx, NoteFilter{Query: strings.Repeat("a", maxQueryWordLen)}); err != nil {
+		t.Errorf("word at the cap rejected: %v", err)
+	}
+}
+
+func TestTruncateKeepsRunesWhole(t *testing.T) {
+	if got := truncate("críti", 3); got != "cr…" {
+		t.Errorf("truncate cut inside a rune: %q", got)
+	}
+	if got := truncate("abc", 3); got != "abc" {
+		t.Errorf("truncate at length changed the text: %q", got)
 	}
 }

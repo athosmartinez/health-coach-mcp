@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 )
@@ -19,7 +20,7 @@ const (
 	maxNameLen        = 200
 	maxDetailsLen     = 4 << 10
 	maxPrefKeyLen     = 100
-	maxPrefValue      = 16 << 10
+	maxPrefValue      = 2 << 10
 	maxPreferences    = 200
 	maxProfileText    = 2 << 10
 	maxHealthItems    = 500
@@ -53,6 +54,9 @@ type Profile struct {
 	Goal      *Goal           `json:"goal,omitempty"`
 	Plan      *TrainingPlan   `json:"training_plan,omitempty"`
 	UpdatedAt time.Time       `json:"updated_at"`
+	// CorruptFields names stored fields that no longer decode and are left
+	// out above; setting or clearing them repairs the profile.
+	CorruptFields []string `json:"corrupt_fields,omitempty"`
 }
 
 // ProfileFields are the names accepted by ProfilePatch.Clear.
@@ -83,10 +87,14 @@ func validateClear(clear, fields []string, set map[string]bool) error {
 	return nil
 }
 
-// truncate shortens caller-supplied text echoed in an error message.
+// truncate shortens caller-supplied text echoed in an error message, at a rune
+// boundary so accented text is not cut mid-character.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }
@@ -106,16 +114,12 @@ func (p ProfilePatch) replaces(field string) bool {
 }
 
 // Profile returns the profile, or an ErrNotFound error before the first update.
+// Fields that no longer decode are left out and named in CorruptFields, so the
+// rest of the profile stays readable.
 func (s *Store) Profile(ctx context.Context) (p Profile, err error) {
 	defer wrapErr("profile", &err)
-	p, corrupt, err := getProfile(ctx, s.db)
-	if err != nil {
-		return Profile{}, err
-	}
-	if len(corrupt) > 0 {
-		return Profile{}, corrupt[0]
-	}
-	return p, nil
+	p, _, err = getProfile(ctx, s.db)
+	return p, err
 }
 
 type querier interface {
@@ -128,14 +132,43 @@ type corruptField struct {
 	err   error
 }
 
-func (c corruptField) Error() string {
-	return fmt.Sprintf("stored %s is corrupt (set or clear it to repair): %v", c.field, c.err)
+// corruptFields blocks an update that would rewrite corrupt fields it does not
+// replace. It unwraps to an invalid_input ToolError (naming the fields, never
+// their content) and to the decode errors.
+type corruptFields []corruptField
+
+func (c corruptFields) names() []string {
+	names := make([]string, len(c))
+	for i, f := range c {
+		names[i] = f.field
+	}
+	return names
 }
 
-func (c corruptField) Unwrap() error { return c.err }
+func (c corruptFields) Error() string {
+	causes := make([]error, len(c))
+	for i, f := range c {
+		causes[i] = f.err
+	}
+	return fmt.Sprintf("stored %s corrupt (set or clear to repair): %v", strings.Join(c.names(), ", "), errors.Join(causes...))
+}
 
-// getProfile reads the profile. JSON columns that fail to decode are reported
-// separately so UpdateProfile can still overwrite them.
+func (c corruptFields) Unwrap() []error {
+	names := strings.Join(c.names(), ", ")
+	errs := []error{coach.ToolError{
+		Code:    coach.CodeInvalidInput,
+		Message: "the stored " + names + " cannot be read",
+		Hint:    "set a new value or add it to clear in this same call to repair it (clear: " + names + ")",
+	}}
+	for _, f := range c {
+		errs = append(errs, f.err)
+	}
+	return errs
+}
+
+// getProfile reads the profile. JSON columns that fail to decode are left nil,
+// named in CorruptFields and returned with their cause, so UpdateProfile can
+// still overwrite them.
 func getProfile(ctx context.Context, q querier) (Profile, []corruptField, error) {
 	var (
 		p                    Profile
@@ -167,6 +200,9 @@ func getProfile(ctx context.Context, q querier) (Profile, []corruptField, error)
 			p.Plan = nil
 			corrupt = append(corrupt, corruptField{"training_plan", err})
 		}
+	}
+	for _, c := range corrupt {
+		p.CorruptFields = append(p.CorruptFields, c.field)
 	}
 	return p, corrupt, nil
 }
@@ -243,11 +279,16 @@ func (s *Store) UpdateProfile(ctx context.Context, patch ProfilePatch) (p Profil
 	case !errors.Is(err, ErrNotFound):
 		return Profile{}, nil, err
 	}
+	var blocking corruptFields
 	for _, c := range corrupt {
 		if !patch.replaces(c.field) {
-			return Profile{}, nil, c
+			blocking = append(blocking, c)
 		}
 	}
+	if len(blocking) > 0 {
+		return Profile{}, nil, blocking
+	}
+	p.CorruptFields = nil // every corrupt field is replaced below; prev still names them
 	if patch.BirthDate != nil {
 		p.BirthDate = *patch.BirthDate
 	}

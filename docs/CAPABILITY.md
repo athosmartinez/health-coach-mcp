@@ -118,21 +118,21 @@ hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories); `granula
 
 | Tool | Input | Output / effect |
 |---|---|---|
-| `profile_get()` | — | Profile (+ `age_years`) + targets in force + **active/paused health items** + preferences; missing parts are omitted, not `no_data` |
-| `profile_update(patch)` | partial fields: `birth_date`, `sex`, `height_cm`, `goal` {type, target_weight_kg, target_body_fat_pct, deadline}, `training_plan` {split, notes} | Updated profile |
+| `profile_get()` | — | Profile (+ `age_years`, `corrupt_fields[]` for stored fields that no longer decode) + targets in force + **active/paused health items and every allergy** (even resolved) + preferences; missing parts are omitted, not `no_data` |
+| `profile_update(patch)` | partial fields: `birth_date`, `sex`, `height_cm`, `goal` {type, target_weight_kg, target_body_fat_pct, deadline}, `training_plan` {split, notes} | `{profile, previous}`; `""` for `sex`/`birth_date` means not sent (erasing takes `clear[]`); an update over a corrupt field it does not set or clear is `invalid_input` naming the field |
 | `targets_set(effective_from, kcal?, protein_g?, weekly_sessions?, clear[]?)` | new version (I6); **sole source** of the weekly sessions target; omitted fields are carried forward from the version in force (the same date's row when correcting it), `clear[]` drops them | Version created; previous ones preserved |
 | `health_item_upsert(kind, name, status, details?, started_on?, ended_on?, clear[]?)` | `kind` ∈ condition, medication, supplement, injury, allergy, restriction; `name` trimmed, case-insensitive | Item created/updated; on update omitted details/dates are kept (`clear[]` erases them), so a status change never wipes history |
 | `health_items_list(kind?, status?)` | filters | List |
-| `labs_record(collected_on, source, lab?, results[])` | `source` ∈ pdf, chat, file (default `chat`); `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; same (`collected_on`, `analyte`) **replaces** the value, listed in `replaced[]`; per value `status` ∈ in_range, low, high, **no_reference** (no range ≠ normal); `out_of_range[]` (R3, with `report_flag`), `no_reference[]`, `unit_changes[]`; optional `ref_low_exclusive`/`ref_high_exclusive` ("< X"), `ref_text`, `report_flag` |
-| `labs_query(analyte?, since?)` | filters | Series per analyte with per-point `status`, `latest`, `units[]`/`mixed_units`; `truncated` keeps the newest rows |
+| `labs_record(collected_on, source, lab?, results[])` | `source` ∈ pdf, chat, file (default `chat`); `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; same (`collected_on`, `analyte`) **replaces** the value, listed in `replaced[]` with the previous value, unit, status and `report_flag`; per value `status` ∈ in_range, low, high, **flagged** (the report marked it although the recorded range does not put it outside: the mark wins), **no_reference** (no range ≠ normal); `urgent` when the mark says critical (crítico/critical, pânico/panic, alerta/alert, HH/LL/AA); `needs_review[]` (R3: every low/high/flagged value with its printed range and `report_flag`), `no_reference[]`, `unit_changes[]` (nearest earlier **and** later date in another unit: `other_unit`, `other_on`, `relation`); optional `ref_low_exclusive`/`ref_high_exclusive` ("< X"), `ref_text`, `report_flag`. Qualitative results (Reagente, Positivo) are not stored as numbers: the description sends them to `note_add` with a doctor referral |
+| `labs_query(analyte?, since?)` | filters | Series per analyte with per-point `status`/`urgent`, `latest`, `units[]`/`mixed_units`; top-level `urgent` only when a series' **latest** value is critical; `truncated` keeps the newest rows (ties on the oldest date drop the last analyte in name order) |
 | `preference_set(key, value)` / `preferences_get()` | free key-value (e.g. `foods_avoid`, `training_time`) | — |
 | `note_add(kind, text, tags?, related_date?)` | `kind` ∈ insight, decision, checkin, symptom | Note created |
 | `notes_search(kind?, since?, query?, limit?)` | filters + text (every word must appear; no prefix match; accents folded) | `{notes, more}` — `more` = older matches exist beyond the limit |
 
 `profile_update` takes a `clear[]` list (`birth_date`, `sex`, `height_cm`, `goal`, `training_plan`) to unset
 fields; omitted fields stay unchanged. Store limits (rejected as `invalid_input`): 200 lab results per batch,
-note text 8 KB, 20 tags of ≤64 chars, 200 preferences of ≤16 KB, 500 health items (details ≤4 KB), 32 search
-words, 200 notes per search, 2000 lab rows per query, 400-day metric ranges. Filters are validated too (an unknown
+note text 8 KB, 20 tags of ≤64 chars, 200 preferences of ≤2 KB, 500 health items (details ≤4 KB), 32 search
+words (query ≤512 bytes, words ≤64 bytes), analyte filter ≤200 characters, 200 notes per search, 2000 lab rows per query, 400-day metric ranges. Filters are validated too (an unknown
 `kind` is `invalid_input`, not an empty list). A miss (no profile, no target in force, cache miss) is `no_data`.
 
 Every write that overwrites returns the `previous` value (profile, target version in force, health item,
@@ -141,7 +141,9 @@ schema and decoding errors, is the `{code,message,hint}` JSON. Annotations: read
 tools are idempotent and **destructive** (clients should confirm); `note_add` appends; all are closed-world.
 Outputs with stored free text carry a `notice` that it is data, not instructions. Guardrail texts (R3) travel in
 the outputs: no diagnosis, no starting/stopping/dosing any medication **or supplement**, prompt care for values the
-report marks critical. Known limit: the SDK decodes arguments as float64 during schema validation, so integers
+report marks critical: medical care **today**, an emergency service now with any symptoms (`criticalHint`, first in
+`guidance` when `urgent`). A note whose stored tags no longer decode is returned with `tags_unreadable` instead of
+failing the search. Known limit: the SDK decodes arguments as float64 during schema validation, so integers
 beyond 2^53 lose precision.
 
 Idempotency: `labs_record` upserts by (`collected_on`, `analyte`); `health_item_upsert` by

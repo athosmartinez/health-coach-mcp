@@ -122,34 +122,51 @@ func TestCorruptProfileJSONCanBeRepaired(t *testing.T) {
 		if _, err := s.db.ExecContext(ctx, `UPDATE profile SET `+c.col+` = '{bad'`); err != nil {
 			t.Fatal(err)
 		}
-		_, err := s.Profile(ctx)
-		var cf corruptField
-		if !errors.As(err, &cf) || cf.field != c.field || !strings.Contains(err.Error(), "set or clear it") {
-			t.Errorf("corrupt %s: err = %v", c.col, err)
+		// The rest of the profile stays readable and the field is named.
+		got, err := s.Profile(ctx)
+		if err != nil || got.Sex != "m" || len(got.CorruptFields) != 1 || got.CorruptFields[0] != c.field {
+			t.Errorf("corrupt %s: profile = %+v, %v", c.col, got, err)
+		}
+		_, _, err = s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("f")})
+		if !isInvalidInput(err) {
+			t.Errorf("unrelated patch over corrupt %s: err = %v, want invalid_input", c.col, err)
+		}
+		if te := coach.AsToolError(err); !strings.Contains(te.Message, c.field) || !strings.Contains(te.Hint, "clear") {
+			t.Errorf("corrupt %s: tool error %+v does not say how to repair", c.col, te)
 		}
 		var syntax *json.SyntaxError
 		if !errors.As(err, &syntax) {
 			t.Errorf("corrupt %s: JSON cause dropped: %v", c.col, err)
 		}
-		if _, _, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("f")}); err == nil {
-			t.Errorf("unrelated patch over corrupt %s must still fail", c.col)
-		}
 		// Clearing (or setting) the corrupt field repairs the profile.
-		p, _, err := s.UpdateProfile(ctx, ProfilePatch{Clear: []string{c.field}})
+		p, prev, err := s.UpdateProfile(ctx, ProfilePatch{Clear: []string{c.field}})
 		if err != nil {
 			t.Fatalf("repair %s: %v", c.col, err)
 		}
-		if p.Sex != "m" {
-			t.Errorf("repair dropped other fields: %+v", p)
+		if p.Sex != "m" || len(p.CorruptFields) != 0 {
+			t.Errorf("repair dropped other fields or kept the mark: %+v", p)
 		}
-		if _, err := s.Profile(ctx); err != nil {
-			t.Errorf("still corrupt after repair: %v", err)
+		if prev == nil || len(prev.CorruptFields) != 1 {
+			t.Errorf("previous profile must say the repaired field was corrupt: %+v", prev)
+		}
+		if got, err := s.Profile(ctx); err != nil || len(got.CorruptFields) != 0 {
+			t.Errorf("still corrupt after repair: %+v, %v", got, err)
 		}
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE profile SET goal_json = '{bad'`); err != nil {
 		t.Fatal(err)
 	}
-	if p, _, err := s.UpdateProfile(ctx, ProfilePatch{Goal: &Goal{Type: "bulk"}}); err != nil || p.Goal.Type != "bulk" {
+	if _, err := s.db.ExecContext(ctx, `UPDATE profile SET plan_json = '{bad'`); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Profile(ctx); strings.Join(got.CorruptFields, ",") != "goal,training_plan" {
+		t.Errorf("every corrupt field must be named: %v", got.CorruptFields)
+	}
+	_, _, err := s.UpdateProfile(ctx, ProfilePatch{Goal: &Goal{Type: "bulk"}})
+	if te := coach.AsToolError(err); !strings.Contains(te.Message, "training_plan") || strings.Contains(te.Message, "goal,") {
+		t.Errorf("only the unrepaired field blocks the update: %+v", te)
+	}
+	if p, _, err := s.UpdateProfile(ctx, ProfilePatch{Goal: &Goal{Type: "bulk"}, Clear: []string{"training_plan"}}); err != nil || p.Goal.Type != "bulk" {
 		t.Errorf("setting the corrupt goal must repair it: %+v, %v", p, err)
 	}
 }
@@ -841,7 +858,8 @@ func TestLabsReportReplacementsAndUnitChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(b.UnitChanges) != 1 || b.UnitChanges[0].Analyte != "glucose" || b.UnitChanges[0].PreviousUnit != "mg/dL" || b.UnitChanges[0].PreviousOn != "2025-09-01" {
+	want := LabUnitChange{Analyte: "glucose", Unit: "mmol/L", OtherUnit: "mg/dL", OtherOn: "2025-09-01", Relation: "earlier"}
+	if len(b.UnitChanges) != 1 || b.UnitChanges[0] != want {
 		t.Errorf("unit changes = %+v", b.UnitChanges)
 	}
 	if len(b.Replaced) != 0 {
@@ -852,7 +870,8 @@ func TestLabsReportReplacementsAndUnitChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(b.Replaced) != 1 || b.Replaced[0].PreviousValue != 1.0 || b.Replaced[0].PreviousLab != "LabB" {
+	if len(b.Replaced) != 1 || b.Replaced[0] != (LabReplacement{Analyte: "creatinine", PreviousValue: 1.0,
+		PreviousUnit: "mg/dL", PreviousLab: "LabB", PreviousStatus: LabNoReference}) {
 		t.Errorf("replaced = %+v", b.Replaced)
 	}
 	// A unit spelled differently is the same unit.
@@ -951,5 +970,73 @@ func TestWritesReturnThePreviousValue(t *testing.T) {
 	_, pp, _ = s.SetPreference(ctx, "tone", json.RawMessage(`"gentle"`))
 	if string(pp) != `"direct"` {
 		t.Errorf("preference prev = %s", pp)
+	}
+}
+
+// Every clearable field, one at a time: clearing erases only that field.
+func TestClearEveryField(t *testing.T) {
+	s, _ := openTest(t)
+	full := ProfilePatch{BirthDate: ptr(coach.LocalDate("1990-05-01")), Sex: ptr("m"), HeightCm: ptr(180.0),
+		Goal: &Goal{Type: "cut"}, Plan: &TrainingPlan{Split: "ppl"}}
+	empty := map[string]func(Profile) bool{
+		"birth_date": func(p Profile) bool { return p.BirthDate == "" }, "sex": func(p Profile) bool { return p.Sex == "" },
+		"height_cm": func(p Profile) bool { return p.HeightCm == nil }, "goal": func(p Profile) bool { return p.Goal == nil },
+		"training_plan": func(p Profile) bool { return p.Plan == nil },
+	}
+	for _, f := range ProfileFields {
+		if _, _, err := s.UpdateProfile(ctx, full); err != nil {
+			t.Fatal(err)
+		}
+		p, _, err := s.UpdateProfile(ctx, ProfilePatch{Clear: []string{f}})
+		if err != nil {
+			t.Fatalf("clear %s: %v", f, err)
+		}
+		for g, isEmpty := range empty {
+			if isEmpty(p) != (g == f) {
+				t.Errorf("clear %s: field %s empty=%v", f, g, isEmpty(p))
+			}
+		}
+	}
+
+	targetEmpty := map[string]func(Target) bool{
+		"kcal": func(t Target) bool { return t.Kcal == nil }, "protein_g": func(t Target) bool { return t.ProteinG == nil },
+		"weekly_sessions": func(t Target) bool { return t.WeeklySessions == nil },
+	}
+	for i, f := range TargetFields {
+		day := coach.LocalDate(fmt.Sprintf("2026-0%d-01", i+1))
+		if _, _, err := s.SetTarget(ctx, Target{EffectiveFrom: day, Kcal: ptr(2000), ProteinG: ptr(150), WeeklySessions: ptr(4)}); err != nil {
+			t.Fatal(err)
+		}
+		next := coach.LocalDate(fmt.Sprintf("2026-0%d-15", i+1))
+		got, _, err := s.SetTarget(ctx, Target{EffectiveFrom: next, Clear: []string{f}})
+		if err != nil {
+			t.Fatalf("clear %s: %v", f, err)
+		}
+		for g, isEmpty := range targetEmpty {
+			if isEmpty(got) != (g == f) {
+				t.Errorf("clear target %s: field %s empty=%v", f, g, isEmpty(got))
+			}
+		}
+	}
+
+	base := HealthItem{Kind: "injury", Name: "knee", Status: "active", Details: "left", StartedOn: "2026-01-01", EndedOn: "2026-02-01"}
+	itemEmpty := map[string]func(HealthItem) bool{
+		"details": func(h HealthItem) bool { return h.Details == "" }, "started_on": func(h HealthItem) bool { return h.StartedOn == "" },
+		"ended_on": func(h HealthItem) bool { return h.EndedOn == "" },
+	}
+	for _, f := range HealthItemFields {
+		if _, _, err := s.UpsertHealthItem(ctx, base); err != nil {
+			t.Fatal(err)
+		}
+		// Omitted fields are kept; only the cleared one goes.
+		got, _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: "knee", Status: "active", Clear: []string{f}})
+		if err != nil {
+			t.Fatalf("clear %s: %v", f, err)
+		}
+		for g, isEmpty := range itemEmpty {
+			if isEmpty(got) != (g == f) {
+				t.Errorf("clear item %s: field %s empty=%v", f, g, isEmpty(got))
+			}
+		}
 	}
 }

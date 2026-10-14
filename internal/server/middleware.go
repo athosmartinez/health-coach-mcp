@@ -6,10 +6,12 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
+	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 )
 
 // logToolCalls records one line per tools/call with only the tool name, duration
@@ -26,7 +28,7 @@ func logToolCalls(log *slog.Logger, now func() time.Time) mcp.Middleware {
 				tool = p.Name
 			}
 			start := now()
-			res, err := next(ctx, method, req)
+			res, err := next(tools.WithLogger(ctx, log), method, req)
 
 			attrs := []any{"tool", tool, "duration_ms", now().Sub(start).Milliseconds()}
 			if r, ok := res.(*mcp.CallToolResult); ok && r != nil {
@@ -97,14 +99,24 @@ func toolErrorContract() mcp.Middleware {
 					msg = tc.Text
 				}
 			}
-			if len(msg) > maxEchoedError {
-				msg = msg[:maxEchoedError] + "…"
-			}
 			fixed := &mcp.CallToolResult{}
 			fixed.SetError(coach.WireError{ToolError: coach.ToolError{
-				Code: coach.CodeInvalidInput, Message: msg, Hint: "check the tool's input schema and retry",
+				Code: coach.CodeInvalidInput, Message: capEchoed(msg), Hint: "check the tool's input schema and retry",
 			}})
 			return fixed, err
 		}
 	}
+}
+
+// capEchoed bounds msg to maxEchoedError bytes, cutting at a rune boundary so
+// an accented character is never split.
+func capEchoed(msg string) string {
+	if len(msg) <= maxEchoedError {
+		return msg
+	}
+	cut := maxEchoedError
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "…"
 }

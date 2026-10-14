@@ -23,6 +23,8 @@ const (
 	maxTags          = 20
 	maxTagLen        = 64
 	maxQueryWords    = 32
+	maxQueryBytes    = 512
+	maxQueryWordLen  = 64
 	// maxNotes bounds the table: decades of daily check-ins.
 	maxNotes = 50_000
 )
@@ -35,6 +37,9 @@ type Note struct {
 	Tags        []string        `json:"tags"`
 	RelatedDate coach.LocalDate `json:"related_date,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+	// TagsUnreadable marks a note whose stored tags no longer decode: the note
+	// is still returned (with no tags) instead of failing the whole search.
+	TagsUnreadable bool `json:"tags_unreadable,omitempty"`
 }
 
 func (n Note) validate() error {
@@ -172,7 +177,7 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (res NoteResults,
 		n.Tags = []string{}
 		if tags.Valid {
 			if err := json.Unmarshal([]byte(tags.String), &n.Tags); err != nil {
-				return NoteResults{}, fmt.Errorf("note %d: tags are corrupt: %w", n.ID, err)
+				n.Tags, n.TagsUnreadable = []string{}, true
 			}
 		}
 		n.RelatedDate, n.CreatedAt = coach.LocalDate(related.String), time.Time(stamp)
@@ -192,6 +197,9 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (res NoteResults,
 // are dropped: SQLite ends the string there and reports a syntax error. A
 // query with no words left is rejected rather than silently matching everything.
 func ftsQuery(q string) (string, error) {
+	if len(q) > maxQueryBytes {
+		return "", invalid("query is too long (max %d bytes)", maxQueryBytes)
+	}
 	words := strings.Fields(strings.ReplaceAll(q, "\x00", ""))
 	if len(words) == 0 {
 		return "", invalid("query has no words; omit it to list notes")
@@ -200,6 +208,9 @@ func ftsQuery(q string) (string, error) {
 		return "", invalid("search at most %d words", maxQueryWords)
 	}
 	for i, w := range words {
+		if len(w) > maxQueryWordLen {
+			return "", invalid("query words are at most %d bytes", maxQueryWordLen)
+		}
 		words[i] = `"` + strings.ReplaceAll(w, `"`, `""`) + `"`
 	}
 	return strings.Join(words, " "), nil

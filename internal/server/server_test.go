@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -147,7 +149,9 @@ func leakTool(_ context.Context, _ *mcp.CallToolRequest, in leakIn) (map[string]
 	case "tool_error":
 		return nil, coach.ToolError{Code: coach.CodeAuthExpired, Message: sentinel, Hint: sentinel}
 	case "raw_error":
-		return nil, errors.New(sentinel)
+		return nil, fmt.Errorf("wrapped: %w", errors.New(sentinel))
+	case "panic":
+		panic(sentinel)
 	}
 	return map[string]string{"value": sentinel}, nil
 }
@@ -171,6 +175,7 @@ func TestToolCallLogShapeAndNoLeaks(t *testing.T) {
 		{map[string]any{"mode": "ok", "probe": sentinel}, false, ""},
 		{map[string]any{"mode": "tool_error", "probe": sentinel}, true, "auth_expired"},
 		{map[string]any{"mode": "raw_error"}, true, "internal_error"},
+		{map[string]any{"mode": "panic"}, true, "internal_error"},
 		{map[string]any{"mode": "ok", "unexpected": sentinel}, true, "invalid_input"}, // SDK schema error, mapped
 	}
 	for _, c := range cases {
@@ -183,10 +188,24 @@ func TestToolCallLogShapeAndNoLeaks(t *testing.T) {
 	}
 
 	var calls []map[string]any
+	faults := map[string]map[string]any{}
 	for _, rec := range logs.records(t) {
-		if rec["msg"] == "tool_call" {
+		switch rec["msg"] {
+		case "tool_call":
 			calls = append(calls, rec)
+		case "tool_internal_error", "tool_panic":
+			faults[rec["msg"].(string)] = rec
 		}
+	}
+	// Internal faults are logged with where they happened, never what they said.
+	if f := faults["tool_internal_error"]; f == nil || f["tool"] != "leak" || f["error_types"] != "*fmt.wrapError > *errors.errorString" {
+		t.Errorf("internal error log = %v", f)
+	}
+	if f := faults["tool_panic"]; f == nil || f["panic_type"] != "string" || !strings.Contains(fmt.Sprint(f["stack"]), "leakTool") {
+		t.Errorf("panic log = %v", f)
+	}
+	if len(faults) != 2 {
+		t.Errorf("only internal faults are logged as errors: %v", faults)
 	}
 	if len(calls) != len(cases) {
 		t.Fatalf("got %d tool_call records, want %d (tools/list must not log)", len(calls), len(cases))
@@ -287,8 +306,36 @@ func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {
 		if !res.IsError || json.Unmarshal([]byte(text), &te) != nil || te.Code != coach.CodeInvalidInput || te.Hint == "" {
 			t.Errorf("%s: %s, want the invalid_input JSON contract", c["name"], text)
 		}
-		if len(te.Message) > maxEchoedError+len("…") {
-			t.Errorf("%s: message not bounded (%d bytes)", c["name"], len(te.Message))
+		if len(te.Message) > maxEchoedError+len("…") || !utf8.ValidString(te.Message) {
+			t.Errorf("%s: message not bounded or split a rune (%d bytes)", c["name"], len(te.Message))
 		}
+	}
+
+	// An SDK error quoting a long accented argument is cut, at a rune boundary.
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "note_add",
+		Arguments: map[string]any{"kind": strings.Repeat("é", 3000), "text": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var te coach.ToolError
+	if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &te); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(te.Message, "…") || len(te.Message) > maxEchoedError+len("…") || !utf8.ValidString(te.Message) ||
+		te.Hint != "check the tool's input schema and retry" {
+		t.Errorf("long SDK error = %d bytes, %+v", len(te.Message), te)
+	}
+}
+
+func TestCapEchoedKeepsRunesWhole(t *testing.T) {
+	for _, prefix := range []string{"", "a"} { // both parities of the cut
+		msg := prefix + strings.Repeat("é", maxEchoedError)
+		got := capEchoed(msg)
+		if !utf8.ValidString(got) || !strings.HasSuffix(got, "…") || len(got) > maxEchoedError+len("…") {
+			t.Errorf("prefix %q: capEchoed = %d bytes, valid=%v", prefix, len(got), utf8.ValidString(got))
+		}
+	}
+	if got := capEchoed("short"); got != "short" {
+		t.Errorf("short message changed: %q", got)
 	}
 }

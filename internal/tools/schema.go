@@ -69,9 +69,11 @@ func InputSchema[In any](enums map[string][]string) (*jsonschema.Schema, error) 
 	return s, nil
 }
 
-// relaxOptional lets every optional property also be null or "" (LLM clients
-// often send those for "not set"); Go decodes both to the zero value, which
-// the handlers treat as omitted. Required properties keep their strict schema.
+// relaxOptional lets every optional property be null, and optional strings
+// (plain, enum or patterned) also "" (LLM clients often send those for "not
+// set"). Numbers, booleans and objects accept null but not "". Handlers treat
+// both as omitted: Go decodes them to the zero value, and pointer fields where
+// "" would mean something map it to nil. Required properties stay strict.
 func relaxOptional(obj *jsonschema.Schema) {
 	for name, ps := range obj.Properties {
 		if slices.Contains(obj.Required, name) || ps == nil {

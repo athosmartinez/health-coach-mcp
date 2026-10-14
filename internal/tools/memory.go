@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,13 +26,18 @@ func (d MemoryDeps) today() coach.LocalDate { return coach.Today(d.Now(), d.Loc)
 // Guardrail texts (R3) travel with the data that needs them, so they reach the
 // model even when it skips the tool descriptions.
 const (
-	// medicalHint goes with every lab result that is flagged or has no range.
-	medicalHint = "Lab flags compare a value with the range printed on its own report; they are not diagnoses. " +
-		"Mention flagged values and suggest discussing them with a doctor. If the report marks a value as critical " +
-		"(see report_flag) or it is far outside its range, tell the user to contact a doctor promptly, urgently if " +
-		"they have symptoms. A value with status no_reference has no range on record: do not call it normal or " +
-		"abnormal. Never diagnose, and never suggest starting, stopping or changing the dose of any medication or " +
-		"supplement to correct a value; questions about doses or interactions go to a doctor or pharmacist."
+	// medicalHint goes with every lab result that needs review (anything but in_range).
+	medicalHint = "Lab statuses compare a value with the range printed on its own report; they are not diagnoses. " +
+		"Mention every low, high or flagged value and suggest discussing it with a doctor. flagged means the report " +
+		"itself marked the value (report_flag) although the recorded range does not put it outside: the report's " +
+		"mark takes precedence, so never reassure about it. A value with status no_reference has no range on " +
+		"record: do not call it normal or abnormal. Never diagnose, and never suggest starting, stopping or " +
+		"changing the dose of any medication or supplement to correct a value; questions about doses or " +
+		"interactions go to a doctor or pharmacist."
+	// criticalHint goes with results whose report flag marks them critical (urgent=true).
+	criticalHint = "A value is marked critical on its report (urgent=true): tell the user to seek medical care " +
+		"today, and to go to an emergency service now if they have any symptoms. Do not reassure, and do not " +
+		"suggest waiting for a routine appointment."
 	// unitHint goes with series whose values were recorded in different units.
 	unitHint = "This analyte was recorded in different units; do not compare those values as numbers or describe a trend across them."
 	// dataNotice goes with stored free text returned to the model (stored prompt-injection mitigation).
@@ -60,17 +66,19 @@ func RegisterMemory(s *mcp.Server, d MemoryDeps) {
 	Register(s, &mcp.Tool{
 		Name: "profile_get",
 		Description: "Returns what the coach knows about the user: profile (birth date, age, sex, height, goal, " +
-			"training plan), the targets in force today, active health history (conditions, medications, " +
-			"supplements, injuries, allergies, restrictions) and preferences. Call it before giving any advice and " +
-			"respect every active health item. Missing fields mean the user has not told the coach yet.",
+			"training plan), the targets in force today, active and paused health history (conditions, medications, " +
+			"supplements, injuries, restrictions; allergies whatever their status) and preferences. Call it before " +
+			"giving any advice and respect every health item returned. Missing fields mean the user has not told the " +
+			"coach yet; corrupt_fields names stored fields that could not be read.",
 		Annotations: readOnly,
 	}, m.profileGet)
 
 	Register(s, &mcp.Tool{
 		Name: "profile_update",
 		Description: "Updates the user's profile with what they told you. Only the fields you send change; " +
-			"goal and training_plan replace the whole object; fields in clear are removed. Returns the previous " +
-			"profile. The weekly sessions target is not part of the profile: use targets_set.",
+			"goal and training_plan replace the whole object; fields in clear are removed (an empty sex or " +
+			"birth_date means not sent, not removed). Returns the previous profile. The weekly sessions target is " +
+			"not part of the profile: use targets_set.",
 		InputSchema: MustInputSchema[profileUpdateIn](map[string][]string{"clear": store.ProfileFields}),
 		Annotations: overwrites,
 	}, m.profileUpdate)
@@ -110,9 +118,13 @@ func RegisterMemory(s *mcp.Server, d MemoryDeps) {
 	Register(s, &mcp.Tool{
 		Name: "labs_record",
 		Description: "Stores lab test results from one collection date (typed by the user, read from a PDF, " +
-			"or from a file). Each value gets a status (in_range, low, high, no_reference) against the range " +
-			"printed on its report. A result for an analyte already recorded on that date replaces it and is " +
-			"listed in replaced; unit_changes lists analytes recorded before in another unit. " + medicalHint,
+			"or from a file). Each value gets a status (in_range, low, high, flagged, no_reference) against the " +
+			"range printed on its report; any value the report marks is never in_range, and a critical mark sets " +
+			"urgent. needs_review lists every value that is not in_range. A result for an analyte already recorded " +
+			"on that date replaces it and is listed in replaced; unit_changes lists analytes stored in another unit " +
+			"on the nearest earlier or later date. Qualitative results (Reagente, Positivo, Presença) are not " +
+			"numbers: do not invent a code, record them with note_add (kind insight) and suggest discussing them " +
+			"with a doctor. " + medicalHint,
 		InputSchema: MustInputSchema[labsRecordIn](map[string][]string{"source": store.LabSources}),
 		Annotations: overwrites,
 	}, m.labsRecord)
@@ -120,8 +132,9 @@ func RegisterMemory(s *mcp.Server, d MemoryDeps) {
 	Register(s, &mcp.Tool{
 		Name: "labs_query",
 		Description: "Returns lab results as one series per analyte (oldest first) with each value's status, " +
-			"the latest point, and mixed_units when the series used different units. Filter by analyte and by " +
-			"a since date; truncated=true means older results were left out. " + medicalHint,
+			"the latest point, and mixed_units when the series used different units. urgent=true means a series' " +
+			"latest value is marked critical on its report. Filter by analyte and by a since date; truncated=true " +
+			"means older results were left out. " + medicalHint,
 		Annotations: readOnly,
 	}, m.labsQuery)
 
@@ -168,7 +181,7 @@ type profileView struct {
 	// AgeYears is computed from birth_date on today's date.
 	AgeYears *int          `json:"age_years,omitempty"`
 	Targets  *store.Target `json:"targets_in_force,omitempty"`
-	// HealthItems are the active and paused items: advice must respect them.
+	// HealthItems are the active and paused items, plus every allergy: advice must respect them.
 	HealthItems []store.HealthItem         `json:"health_items"`
 	Preferences map[string]json.RawMessage `json:"preferences"`
 	Today       coach.LocalDate            `json:"today"`
@@ -198,7 +211,8 @@ func (m memory) profileGet(ctx context.Context, _ *mcp.CallToolRequest, _ profil
 		return profileView{}, err
 	}
 	for _, it := range items {
-		if it.Status != "resolved" {
+		// An allergy marked resolved by mistake must still reach the coach.
+		if it.Status != "resolved" || it.Kind == "allergy" {
 			out.HealthItems = append(out.HealthItems, it)
 		}
 	}
@@ -246,10 +260,20 @@ type profileUpdateIn struct {
 type profileUpdateOut struct {
 	Profile  store.Profile  `json:"profile"`
 	Previous *store.Profile `json:"previous,omitempty"`
+	Notice   string         `json:"notice"`
+}
+
+// emptyAsNil treats "" as not sent: clients send it for unset optional fields,
+// and erasing a stored value takes an explicit clear.
+func emptyAsNil[T ~string](v *T) *T {
+	if v == nil || *v == "" {
+		return nil
+	}
+	return v
 }
 
 func (m memory) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, in profileUpdateIn) (profileUpdateOut, error) {
-	patch := store.ProfilePatch{BirthDate: in.BirthDate, Sex: in.Sex, HeightCm: in.HeightCm, Clear: in.Clear}
+	patch := store.ProfilePatch{BirthDate: emptyAsNil(in.BirthDate), Sex: emptyAsNil(in.Sex), HeightCm: in.HeightCm, Clear: in.Clear}
 	if g := in.Goal; g != nil {
 		patch.Goal = &store.Goal{Type: g.Type, TargetWeightKg: g.TargetWeightKg, TargetBodyFatPct: g.TargetBodyFatPct, Deadline: g.Deadline}
 	}
@@ -257,7 +281,7 @@ func (m memory) profileUpdate(ctx context.Context, _ *mcp.CallToolRequest, in pr
 		patch.Plan = &store.TrainingPlan{Split: p.Split, Notes: p.Notes}
 	}
 	p, prev, err := m.Store.UpdateProfile(ctx, patch)
-	return profileUpdateOut{Profile: p, Previous: prev}, err
+	return profileUpdateOut{Profile: p, Previous: prev, Notice: dataNotice}, err
 }
 
 // --- targets ---
@@ -299,6 +323,7 @@ type healthItemIn struct {
 type healthItemOut struct {
 	Item     store.HealthItem  `json:"item"`
 	Previous *store.HealthItem `json:"previous,omitempty"`
+	Notice   string            `json:"notice"`
 }
 
 func (m memory) healthItemUpsert(ctx context.Context, _ *mcp.CallToolRequest, in healthItemIn) (healthItemOut, error) {
@@ -306,7 +331,7 @@ func (m memory) healthItemUpsert(ctx context.Context, _ *mcp.CallToolRequest, in
 		Kind: in.Kind, Name: in.Name, Status: in.Status, Details: in.Details,
 		StartedOn: in.StartedOn, EndedOn: in.EndedOn, Clear: in.Clear,
 	})
-	return healthItemOut{Item: it, Previous: prev}, err
+	return healthItemOut{Item: it, Previous: prev, Notice: dataNotice}, err
 }
 
 type healthItemsListIn struct {
@@ -335,7 +360,7 @@ type labIn struct {
 	RefLowExclusive  bool     `json:"ref_low_exclusive,omitempty" jsonschema:"true when printed as '> X' (X itself is out of range)"`
 	RefHighExclusive bool     `json:"ref_high_exclusive,omitempty" jsonschema:"true when printed as '< X' (X itself is out of range)"`
 	RefText          string   `json:"ref_text,omitempty" jsonschema:"the reference range exactly as printed"`
-	ReportFlag       string   `json:"report_flag,omitempty" jsonschema:"the lab's own mark next to the value, e.g. H, L, crítico, *"`
+	ReportFlag       string   `json:"report_flag,omitempty" jsonschema:"the lab's own mark next to the value, e.g. H, L, crítico, *; leave empty when the report has no mark"`
 }
 
 type labsRecordIn struct {
@@ -345,30 +370,37 @@ type labsRecordIn struct {
 	Results     []labIn         `json:"results"`
 }
 
-// labFlag is one value outside its range or without one (R3).
+// labFlag is one value that is low, high or flagged by its report (R3).
 type labFlag struct {
-	Analyte       string   `json:"analyte"`
-	Value         float64  `json:"value"`
-	Unit          string   `json:"unit"`
-	RefLow        *float64 `json:"ref_low,omitempty"`
-	RefHigh       *float64 `json:"ref_high,omitempty"`
-	ReportFlag    string   `json:"report_flag,omitempty"`
-	Direction     string   `json:"direction" jsonschema:"low or high"`
-	ReferToDoctor bool     `json:"refer_to_doctor"`
+	Analyte          string   `json:"analyte"`
+	Value            float64  `json:"value"`
+	Unit             string   `json:"unit"`
+	RefLow           *float64 `json:"ref_low,omitempty"`
+	RefHigh          *float64 `json:"ref_high,omitempty"`
+	RefLowExclusive  bool     `json:"ref_low_exclusive,omitempty"`
+	RefHighExclusive bool     `json:"ref_high_exclusive,omitempty"`
+	RefText          string   `json:"ref_text,omitempty" jsonschema:"the range as printed: check it against ref_low and ref_high"`
+	ReportFlag       string   `json:"report_flag,omitempty"`
+	Status           string   `json:"status" jsonschema:"low, high or flagged"`
+	Urgent           bool     `json:"urgent" jsonschema:"the report marks the value critical: medical care today"`
+	ReferToDoctor    bool     `json:"refer_to_doctor"`
 }
 
 type labRecorded struct {
 	store.LabResult
-	Status string `json:"status" jsonschema:"in_range, low, high or no_reference"`
+	Status string `json:"status" jsonschema:"in_range, low, high, flagged or no_reference"`
+	Urgent bool   `json:"urgent,omitempty"`
 }
 
 type labsRecordOut struct {
 	Recorded    []labRecorded          `json:"recorded"`
-	OutOfRange  []labFlag              `json:"out_of_range"`
+	NeedsReview []labFlag              `json:"needs_review" jsonschema:"values that are low, high or flagged by the report"`
 	NoReference []string               `json:"no_reference" jsonschema:"analytes stored without a range: not known to be normal"`
 	Replaced    []store.LabReplacement `json:"replaced"`
 	UnitChanges []store.LabUnitChange  `json:"unit_changes"`
+	Urgent      bool                   `json:"urgent"`
 	Guidance    string                 `json:"guidance,omitempty"`
+	Notice      string                 `json:"notice"`
 }
 
 func (m memory) labsRecord(ctx context.Context, _ *mcp.CallToolRequest, in labsRecordIn) (labsRecordOut, error) {
@@ -388,36 +420,41 @@ func (m memory) labsRecord(ctx context.Context, _ *mcp.CallToolRequest, in labsR
 		return labsRecordOut{}, err
 	}
 	out := labsRecordOut{
-		Recorded: []labRecorded{}, OutOfRange: []labFlag{}, NoReference: []string{},
-		Replaced: batch.Replaced, UnitChanges: batch.UnitChanges,
+		Recorded: []labRecorded{}, NeedsReview: []labFlag{}, NoReference: []string{},
+		Replaced: batch.Replaced, UnitChanges: batch.UnitChanges, Notice: dataNotice,
 	}
 	for _, r := range batch.Results {
-		status := r.Status()
-		out.Recorded = append(out.Recorded, labRecorded{r, status})
+		status, urgent := r.Assess()
+		out.Recorded = append(out.Recorded, labRecorded{r, status, urgent})
+		out.Urgent = out.Urgent || urgent
 		switch status {
-		case store.LabLow, store.LabHigh:
-			out.OutOfRange = append(out.OutOfRange, labFlag{
+		case store.LabLow, store.LabHigh, store.LabFlagged:
+			out.NeedsReview = append(out.NeedsReview, labFlag{
 				Analyte: r.Analyte, Value: r.Value, Unit: r.Unit, RefLow: r.RefLow, RefHigh: r.RefHigh,
-				ReportFlag: r.ReportFlag, Direction: status, ReferToDoctor: true,
+				RefLowExclusive: r.RefLowExclusive, RefHighExclusive: r.RefHighExclusive, RefText: r.RefText,
+				ReportFlag: r.ReportFlag, Status: status, Urgent: urgent, ReferToDoctor: true,
 			})
 		case store.LabNoReference:
 			out.NoReference = append(out.NoReference, r.Analyte)
 		}
 	}
-	if len(out.OutOfRange) > 0 || len(out.NoReference) > 0 {
-		out.Guidance = medicalHint
-	}
-	if len(out.UnitChanges) > 0 {
-		out.Guidance = joinHints(out.Guidance, unitHint)
-	}
+	out.Guidance = labGuidance(len(out.NeedsReview) > 0 || len(out.NoReference) > 0, out.Urgent, len(out.UnitChanges) > 0)
 	return out, nil
 }
 
-func joinHints(a, b string) string {
-	if a == "" {
-		return b
+// labGuidance joins the hints a lab output needs, most urgent first.
+func labGuidance(review, urgent, units bool) string {
+	var hints []string
+	if urgent {
+		hints = append(hints, criticalHint)
 	}
-	return a + " " + b
+	if review { // an urgent value always needs review too
+		hints = append(hints, medicalHint)
+	}
+	if units {
+		hints = append(hints, unitHint)
+	}
+	return strings.Join(hints, " ")
 }
 
 type labsQueryIn struct {
@@ -433,7 +470,8 @@ type labPoint struct {
 	RefHigh     *float64        `json:"ref_high,omitempty"`
 	RefText     string          `json:"ref_text,omitempty"`
 	ReportFlag  string          `json:"report_flag,omitempty"`
-	Status      string          `json:"status" jsonschema:"in_range, low, high or no_reference"`
+	Status      string          `json:"status" jsonschema:"in_range, low, high, flagged or no_reference"`
+	Urgent      bool            `json:"urgent,omitempty"`
 	Lab         string          `json:"lab,omitempty"`
 }
 
@@ -450,7 +488,11 @@ type labSeries struct {
 type labsQueryOut struct {
 	Series    []labSeries `json:"series"`
 	Truncated bool        `json:"truncated"`
-	Guidance  string      `json:"guidance,omitempty"`
+	// Urgent means some series' latest value is marked critical; older
+	// critical values are history, not a reason for care today.
+	Urgent   bool   `json:"urgent"`
+	Guidance string `json:"guidance,omitempty"`
+	Notice   string `json:"notice"`
 }
 
 func (m memory) labsQuery(ctx context.Context, _ *mcp.CallToolRequest, in labsQueryIn) (labsQueryOut, error) {
@@ -458,15 +500,16 @@ func (m memory) labsQuery(ctx context.Context, _ *mcp.CallToolRequest, in labsQu
 	if err != nil {
 		return labsQueryOut{}, err
 	}
-	out := labsQueryOut{Series: []labSeries{}, Truncated: rows.Truncated}
-	needsCare, mixed := false, false
+	out := labsQueryOut{Series: []labSeries{}, Truncated: rows.Truncated, Notice: dataNotice}
+	needsReview, mixed := false, false
 	seenUnits := map[string]map[string]bool{}
 	for _, r := range rows.Results { // ordered by analyte, then date
+		status, urgent := r.Assess()
 		p := labPoint{
 			CollectedOn: r.CollectedOn, Value: r.Value, Unit: r.Unit, RefLow: r.RefLow, RefHigh: r.RefHigh,
-			RefText: r.RefText, ReportFlag: r.ReportFlag, Status: r.Status(), Lab: r.Lab,
+			RefText: r.RefText, ReportFlag: r.ReportFlag, Status: status, Urgent: urgent, Lab: r.Lab,
 		}
-		needsCare = needsCare || p.Status != store.LabInRange
+		needsReview = needsReview || store.NeedsReview(status)
 		if n := len(out.Series); n == 0 || out.Series[n-1].Analyte != r.Analyte {
 			out.Series = append(out.Series, labSeries{Analyte: r.Analyte, Units: []string{}})
 			seenUnits[r.Analyte] = map[string]bool{}
@@ -481,12 +524,10 @@ func (m memory) labsQuery(ctx context.Context, _ *mcp.CallToolRequest, in labsQu
 		cur.MixedUnits = len(cur.Units) > 1
 		mixed = mixed || cur.MixedUnits
 	}
-	if needsCare {
-		out.Guidance = medicalHint
+	for _, sr := range out.Series {
+		out.Urgent = out.Urgent || sr.Latest.Urgent
 	}
-	if mixed {
-		out.Guidance = joinHints(out.Guidance, unitHint)
-	}
+	out.Guidance = labGuidance(needsReview, out.Urgent, mixed)
 	return out, nil
 }
 
@@ -502,6 +543,7 @@ type preferenceOut struct {
 	Key      string          `json:"key"`
 	Value    json.RawMessage `json:"value"`
 	Previous json.RawMessage `json:"previous,omitempty"`
+	Notice   string          `json:"notice"`
 }
 
 func (m memory) preferenceSet(ctx context.Context, _ *mcp.CallToolRequest, in preferenceSetIn) (preferenceOut, error) {
@@ -509,7 +551,7 @@ func (m memory) preferenceSet(ctx context.Context, _ *mcp.CallToolRequest, in pr
 	if err != nil {
 		return preferenceOut{}, err
 	}
-	return preferenceOut{Key: key, Value: in.Value, Previous: prev}, nil
+	return preferenceOut{Key: key, Value: in.Value, Previous: prev, Notice: dataNotice}, nil
 }
 
 type preferencesGetIn struct{}

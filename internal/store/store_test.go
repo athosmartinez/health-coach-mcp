@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
@@ -283,5 +284,102 @@ func TestProfileRejectsCorruptJSON(t *testing.T) {
 		if _, err := s.db.ExecContext(ctx, `UPDATE profile SET `+col+` = NULL`); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestConcurrentFirstOpen(t *testing.T) {
+	// Two MCP clients may each spawn a server on a fresh install.
+	path := filepath.Join(t.TempDir(), "coach.db")
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := Open(ctx, path, fixedClock)
+			if err == nil {
+				err = s.Close()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Open: %v", err)
+		}
+	}
+	s, err := Open(ctx, path, fixedClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("migration applied %d times (%v)", n, err)
+	}
+}
+
+func TestFailedMigrationRollsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coach.db")
+	bad := fstest.MapFS{
+		"migrations/0001_ok.sql":  {Data: []byte(`CREATE TABLE a (x INTEGER);`)},
+		"migrations/0002_bad.sql": {Data: []byte(`CREATE TABLE b (x INTEGER); THIS IS NOT SQL;`)},
+	}
+	if _, err := open(ctx, path, fixedClock, bad); err == nil {
+		t.Fatal("broken migration accepted")
+	}
+	good := fstest.MapFS{"migrations/0001_ok.sql": bad["migrations/0001_ok.sql"]}
+	s, err := open(ctx, path, fixedClock, good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var versions, tableB int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&versions)
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = 'b'`).Scan(&tableB)
+	if versions != 1 || tableB != 0 {
+		t.Errorf("after failed 0002: %d versions recorded, table b exists=%d; want 1 and 0", versions, tableB)
+	}
+}
+
+func TestCorruptTimestampIsReported(t *testing.T) {
+	s, _ := openTest(t)
+	if _, err := s.AddNote(ctx, Note{Kind: "checkin", Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE notes SET created_at = 'yesterday'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SearchNotes(ctx, NoteFilter{}); err == nil {
+		t.Error("corrupt created_at silently read as zero time")
+	}
+	var c stampCol
+	if err := c.Scan(42); err == nil {
+		t.Error("non-text timestamp accepted")
+	}
+}
+
+func TestOpenTightensExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coach.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(ctx, path, fixedClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("existing file perm = %o, want 600", fi.Mode().Perm())
+	}
+}
+
+func TestNotFoundIsWrappedWithContext(t *testing.T) {
+	s, _ := openTest(t)
+	_, err := s.GetMetric(ctx, "2026-10-10", "steps", 1)
+	if !errors.Is(err, ErrNotFound) || err.Error() == ErrNotFound.Error() {
+		t.Errorf("err = %v, want wrapped ErrNotFound with context", err)
 	}
 }

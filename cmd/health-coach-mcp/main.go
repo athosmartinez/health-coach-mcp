@@ -58,6 +58,13 @@ func run(o options) int {
 }
 
 func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) error {
+	// Validate every option before touching disk, so a typo in a flag never
+	// creates the store.
+	exposed, err := validate(cfg, o)
+	if err != nil {
+		return err
+	}
+
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, "coach.db"), time.Now)
 	if err != nil {
 		return err
@@ -69,30 +76,36 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 		return err
 	}
 
-	switch o.transport {
-	case "stdio":
+	if o.transport == "stdio" {
 		// A signal cancels ctx; that is a normal shutdown, not a failure.
 		if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 		return nil
+	}
+	return serveHTTP(ctx, s, cfg, o, exposed, log)
+}
+
+// validate checks the options and reports whether HTTP would be exposed beyond loopback.
+func validate(cfg config.Config, o options) (exposed bool, err error) {
+	if cfg.TimeZone == nil {
+		return false, errors.New("config: TimeZone is required")
+	}
+	switch o.transport {
+	case "stdio":
+		return false, nil
 	case "http":
-		return serveHTTP(ctx, s, cfg, o, log)
+		if (o.tlsCert == "") != (o.tlsKey == "") {
+			return false, errors.New("-tls-cert and -tls-key must be set together")
+		}
+		return server.CheckHTTPBind(o.addr, cfg.HTTPToken)
 	default:
-		return fmt.Errorf("unknown transport %q (want stdio or http)", o.transport)
+		return false, fmt.Errorf("unknown transport %q (want stdio or http)", o.transport)
 	}
 }
 
-func serveHTTP(ctx context.Context, s *mcp.Server, cfg config.Config, o options, log *slog.Logger) error {
-	if (o.tlsCert == "") != (o.tlsKey == "") {
-		return errors.New("-tls-cert and -tls-key must be set together")
-	}
+func serveHTTP(ctx context.Context, s *mcp.Server, cfg config.Config, o options, exposed bool, log *slog.Logger) error {
 	useTLS := o.tlsCert != ""
-
-	exposed, err := server.CheckHTTPBind(o.addr, cfg.HTTPToken)
-	if err != nil {
-		return err
-	}
 	if exposed && !useTLS {
 		log.Warn("serving health data over plain HTTP beyond loopback; the bearer token and responses can be sniffed on the network. Use -tls-cert/-tls-key, a TLS proxy or a private tunnel")
 	}

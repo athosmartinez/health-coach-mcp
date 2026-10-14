@@ -70,10 +70,29 @@ func TestServeFailsWhenStoreCannotOpen(t *testing.T) {
 	}
 }
 
-func TestServeCreatesStore(t *testing.T) {
+func TestServeCreatesStoreOnlyForValidOptions(t *testing.T) {
 	cfg := testConfig(t)
-	// The store opens before the transport is chosen, so an unknown one still creates it.
-	_ = serve(context.Background(), cfg, options{transport: "grpc"}, discard)
+	for _, o := range []options{
+		{transport: "grpc"},
+		{transport: "http", addr: "0.0.0.0:0"},
+		{transport: "http", addr: "127.0.0.1:0", tlsCert: "c.pem"},
+	} {
+		if err := serve(context.Background(), cfg, o, discard); err == nil {
+			t.Fatalf("%+v accepted", o)
+		}
+	}
+	if _, err := os.Stat(cfg.DataDir + "/coach.db"); !os.IsNotExist(err) {
+		t.Fatalf("invalid options created the store (stat err %v)", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, options{transport: "http", addr: "127.0.0.1:0"}, discard) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(cfg.DataDir + "/coach.db"); err != nil {
 		t.Fatalf("coach.db not created in DataDir: %v", err)
 	}

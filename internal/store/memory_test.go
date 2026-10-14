@@ -3,6 +3,9 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"math"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,14 +78,39 @@ func TestTargetsVersioning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 || *all[0].Kcal != 2250 || all[0].WeeklySessions != nil || *all[1].WeeklySessions != 4 {
+	if len(all) != 2 || *all[0].Kcal != 2250 || *all[1].Kcal != 2400 {
 		t.Errorf("versions = %+v", all)
 	}
 
-	for _, bad := range []Target{{EffectiveFrom: "2026-10-01"}, {EffectiveFrom: "bad", Kcal: ptr(1)}} {
-		if _, err := s.SetTarget(ctx, bad); err == nil {
-			t.Errorf("SetTarget(%+v) accepted", bad)
+	for _, bad := range []Target{
+		{EffectiveFrom: "2026-10-01"},
+		{EffectiveFrom: "bad", Kcal: ptr(1)},
+		{EffectiveFrom: "2026-10-01", ProteinG: ptr(-1)},
+	} {
+		if _, err := s.SetTarget(ctx, bad); !isInvalidInput(err) {
+			t.Errorf("SetTarget(%+v) err = %v, want invalid_input", bad, err)
 		}
+	}
+}
+
+func TestPartialTargetCarriesOtherFieldsForward(t *testing.T) {
+	s, _ := openTest(t)
+	if _, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000), ProteinG: ptr(150), WeeklySessions: ptr(4)}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-20", Kcal: ptr(1900)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inForce, _ := s.TargetInForce(ctx, "2026-10-21")
+	for _, tg := range []Target{got, inForce} {
+		if *tg.Kcal != 1900 || tg.ProteinG == nil || *tg.ProteinG != 150 || *tg.WeeklySessions != 4 {
+			t.Errorf("kcal-only change dropped other targets: %+v", tg)
+		}
+	}
+	// The earlier version is untouched.
+	if old, _ := s.TargetInForce(ctx, "2026-10-05"); *old.Kcal != 2000 {
+		t.Errorf("earlier version changed: %+v", old)
 	}
 }
 
@@ -116,11 +144,22 @@ func TestHealthItemsUpsertAndFilter(t *testing.T) {
 		t.Errorf("active = %+v", active)
 	}
 
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "hobby", Name: "x", Status: "active"}); err == nil {
-		t.Error("invalid kind accepted")
+	// Names are trimmed, so a trailing space does not create a second item.
+	if trimmed, _ := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Name: " knee ", Status: "active"}); trimmed.ID != knee.ID {
+		t.Errorf("trimmed name created a new item: %+v", trimmed)
 	}
-	if _, err := s.UpsertHealthItem(ctx, HealthItem{Kind: "injury", Status: "active"}); err == nil {
-		t.Error("empty name accepted")
+
+	bad := []HealthItem{
+		{Kind: "hobby", Name: "x", Status: "active"},
+		{Kind: "injury", Name: "x", Status: "gone"},
+		{Kind: "injury", Name: "  ", Status: "active"},
+		{Kind: "injury", Name: "x", Status: "active", StartedOn: "yesterday"},
+		{Kind: "injury", Name: "x", Status: "active", Details: string(make([]byte, maxDetailsLen+1))},
+	}
+	for _, it := range bad {
+		if _, err := s.UpsertHealthItem(ctx, it); !isInvalidInput(err) {
+			t.Errorf("UpsertHealthItem(%s/%s/%s) err = %v, want invalid_input", it.Kind, it.Name, it.Status, err)
+		}
 	}
 }
 
@@ -142,11 +181,11 @@ func TestPreferences(t *testing.T) {
 	if string(prefs["training_time"]) != `"evening"` || string(prefs["foods_avoid"]) != `["lactose"]` || len(prefs) != 2 {
 		t.Errorf("prefs = %v", prefs)
 	}
-	if err := s.SetPreference(ctx, "x", json.RawMessage(`not json`)); err == nil {
-		t.Error("invalid JSON accepted")
-	}
-	if err := s.SetPreference(ctx, "", json.RawMessage(`1`)); err == nil {
-		t.Error("empty key accepted")
+	big := json.RawMessage(`"` + string(make([]byte, maxPrefValue)) + `"`)
+	for key, v := range map[string]json.RawMessage{"x": json.RawMessage(`not json`), "": json.RawMessage(`1`), "big": big} {
+		if err := s.SetPreference(ctx, key, v); !isInvalidInput(err) {
+			t.Errorf("SetPreference(%q) err = %v, want invalid_input", key, err)
+		}
 	}
 }
 
@@ -198,10 +237,43 @@ func TestLabsUpsertAndQuery(t *testing.T) {
 		{"2026-09-01", "chat", []LabValue{{Analyte: " ", Value: 1, Unit: "mg/dL"}}},
 		{"2026-09-01", "chat", []LabValue{{Analyte: "ldl", Value: 1}}},
 	}
+	nan, inf := math.NaN(), math.Inf(1)
+	bad = append(bad,
+		struct {
+			date   coach.LocalDate
+			source string
+			values []LabValue
+		}{"2026-09-01", "chat", []LabValue{{Analyte: "ldl", Value: nan, Unit: "mg/dL"}}},
+		struct {
+			date   coach.LocalDate
+			source string
+			values []LabValue
+		}{"2026-09-01", "chat", []LabValue{{Analyte: "ldl", Value: 1, Unit: "mg/dL", RefHigh: &inf}}},
+		struct {
+			date   coach.LocalDate
+			source string
+			values []LabValue
+		}{"2026-09-01", "chat", []LabValue{{Analyte: "ldl", Value: 1, Unit: "mg/dL", RefLow: ptr(10.0), RefHigh: ptr(5.0)}}},
+		struct {
+			date   coach.LocalDate
+			source string
+			values []LabValue
+		}{"2026-09-01", "chat", make([]LabValue, maxLabBatch+1)},
+	)
 	for _, b := range bad {
-		if _, err := s.RecordLabs(ctx, b.date, "", b.source, b.values); err == nil {
-			t.Errorf("RecordLabs(%s, %s, %+v) accepted", b.date, b.source, b.values)
+		if _, err := s.RecordLabs(ctx, b.date, "", b.source, b.values); !isInvalidInput(err) {
+			t.Errorf("RecordLabs(%s, %s, %d values) err = %v, want invalid_input", b.date, b.source, len(b.values), err)
 		}
+	}
+	// Errors name the analyte, never the value.
+	_, err = s.RecordLabs(ctx, "2026-09-01", "", "chat", []LabValue{{Analyte: "ldl", Value: 187.25, Unit: "mg/dL", RefLow: ptr(200.0), RefHigh: ptr(100.0)}})
+	if err == nil || strings.Contains(err.Error(), "187") {
+		t.Errorf("err = %v", err)
+	}
+	// The caller's slice is not mutated by normalization.
+	in := []LabValue{{Analyte: "Free T4", Value: 1.1, Unit: "ng/dL"}}
+	if _, err := s.RecordLabs(ctx, "2026-09-02", "", "file", in); err != nil || in[0].Analyte != "Free T4" {
+		t.Errorf("input mutated or rejected: %+v, %v", in, err)
 	}
 	// A rejected batch must not leave partial rows behind.
 	if _, err := s.RecordLabs(ctx, "2026-11-01", "", "chat", []LabValue{{Analyte: "hdl", Value: 50, Unit: "mg/dL"}, {Analyte: "", Value: 1, Unit: "x"}}); err == nil {
@@ -281,12 +353,123 @@ func TestNotesSearch(t *testing.T) {
 		t.Errorf("deleted note still indexed: %+v", hits)
 	}
 
-	if _, err := s.AddNote(ctx, Note{Kind: "checkin", Text: "  "}); err == nil {
-		t.Error("empty note accepted")
+	badNotes := []Note{
+		{Kind: "checkin", Text: "  "},
+		{Kind: "rant", Text: "x"},
+		{Kind: "checkin", Text: string(make([]byte, maxNoteText+1))},
+		{Kind: "checkin", Text: "x", Tags: make([]string, maxTags+1)},
+		{Kind: "checkin", Text: "x", Tags: []string{""}},
+		{Kind: "checkin", Text: "x", RelatedDate: "today"},
 	}
-	if _, err := s.AddNote(ctx, Note{Kind: "rant", Text: "x"}); err == nil {
-		t.Error("invalid kind accepted")
+	for _, n := range badNotes {
+		if _, err := s.AddNote(ctx, n); !isInvalidInput(err) {
+			t.Errorf("AddNote(kind %q, %d bytes, %d tags) err = %v, want invalid_input", n.Kind, len(n.Text), len(n.Tags), err)
+		}
 	}
+	if _, err := s.SearchNotes(ctx, NoteFilter{Query: strings.Repeat("w ", maxQueryWords+1)}); !isInvalidInput(err) {
+		t.Errorf("long query err = %v, want invalid_input", err)
+	}
+	if _, err := s.SearchNotes(ctx, NoteFilter{Query: "knee\x00"}); err != nil {
+		t.Errorf("NUL byte in query: %v", err)
+	}
+}
+
+func TestNotesNewestFirstWithinOneSecond(t *testing.T) {
+	// 12:00:00.0 then 12:00:00.5: variable-width stamps used to sort these backwards.
+	stamps := []time.Time{
+		time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 14, 12, 0, 0, 500_000_000, time.UTC),
+	}
+	i := 0
+	s, err := Open(ctx, t.TempDir()+"/coach.db", func() time.Time { i++; return stamps[min(i-1, 1)] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	i = 0
+	first, _ := s.AddNote(ctx, Note{Kind: "checkin", Text: "first"})
+	second, _ := s.AddNote(ctx, Note{Kind: "checkin", Text: "second"})
+	hits, err := s.SearchNotes(ctx, NoteFilter{})
+	if err != nil || len(hits) != 2 || hits[0].ID != second.ID || hits[1].ID != first.ID {
+		t.Fatalf("order = %+v, %v; want second then first", hits, err)
+	}
+	if !hits[0].CreatedAt.Equal(stamps[1]) {
+		t.Errorf("created_at round trip = %v", hits[0].CreatedAt)
+	}
+	// Since compares created_at as text, which only works with fixed-width stamps.
+	if got, _ := s.SearchNotes(ctx, NoteFilter{Since: "2026-10-14"}); len(got) != 2 {
+		t.Errorf("since = %d notes", len(got))
+	}
+}
+
+func TestProfileClearAndValidation(t *testing.T) {
+	s, _ := openTest(t)
+	h := 180.0
+	p, err := s.UpdateProfile(ctx, ProfilePatch{Sex: ptr("m"), HeightCm: &h, Goal: &Goal{Type: "cut"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = 999 // the stored profile must not alias the caller's value
+	if *p.HeightCm != 180 {
+		t.Errorf("result aliases the patch: %v", *p.HeightCm)
+	}
+	p, err = s.UpdateProfile(ctx, ProfilePatch{Clear: []string{"sex", "goal"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Sex != "" || p.Goal != nil || *p.HeightCm != 180 {
+		t.Errorf("clear = %+v", p)
+	}
+	if got, _ := s.Profile(ctx); got.Sex != "" || got.Goal != nil {
+		t.Errorf("stored after clear = %+v", got)
+	}
+	bad := []ProfilePatch{
+		{Clear: []string{"weight"}},
+		{HeightCm: ptr(-1.0)},
+		{HeightCm: ptr(math.NaN())},
+		{BirthDate: ptr(coach.LocalDate("01/01/1990"))},
+		{Goal: &Goal{TargetWeightKg: ptr(0.0)}},
+		{Goal: &Goal{Deadline: "soon"}},
+		{Plan: &TrainingPlan{Notes: string(make([]byte, maxProfileText+1))}},
+	}
+	for _, patch := range bad {
+		if _, err := s.UpdateProfile(ctx, patch); !isInvalidInput(err) {
+			t.Errorf("UpdateProfile(%+v) err = %v, want invalid_input", patch, err)
+		}
+	}
+}
+
+func TestConcurrentReadThenWriteTransactions(t *testing.T) {
+	// Deferred transactions that read and then write fail with SQLITE_BUSY at
+	// the lock upgrade; _txlock=immediate makes them wait instead.
+	s, _ := openTest(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := range 16 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := s.UpdateProfile(ctx, ProfilePatch{HeightCm: ptr(float64(170 + i))})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := s.SetTarget(ctx, Target{EffectiveFrom: "2026-10-01", Kcal: ptr(2000 + i)})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent read-then-write failed: %v", err)
+		}
+	}
+}
+
+func isInvalidInput(err error) bool {
+	var te coach.ToolError
+	return errors.As(err, &te) && te.Code == coach.CodeInvalidInput
 }
 
 func TestFTSErrorBecomesInvalidInput(t *testing.T) {

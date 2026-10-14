@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
@@ -31,21 +32,23 @@ type Metric struct {
 }
 
 // PutMetric stores or replaces the value for (date, metric).
-func (s *Store) PutMetric(ctx context.Context, m Metric) error {
+func (s *Store) PutMetric(ctx context.Context, m Metric) (err error) {
+	defer wrapErr("put metric", &err)
 	if !slices.Contains(MetricKeys, m.Key) {
-		return fmt.Errorf("metric %q is not in the cacheable list", m.Key)
+		return invalid("metric must be one of %s", strings.Join(MetricKeys, ", "))
 	}
 	if _, err := coach.ParseDate(string(m.Date)); err != nil {
-		return fmt.Errorf("metric date: %w", err)
+		return invalid("metric date must be YYYY-MM-DD")
 	}
-	if math.IsNaN(m.Value) || math.IsInf(m.Value, 0) {
-		return fmt.Errorf("metric %s on %s: value is not finite", m.Key, m.Date)
+	// Never echo the value: it is a health measurement.
+	if !finite(m.Value) {
+		return invalid("metric %s on %s: value is not finite", m.Key, m.Date)
 	}
 	fetched := m.FetchedAt
 	if fetched.IsZero() {
 		fetched = s.now()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO daily_metrics (date, metric, value, n_samples, source, algo_version, fetched_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (date, metric) DO UPDATE SET value = excluded.value, n_samples = excluded.n_samples,
@@ -63,14 +66,15 @@ func (s *Store) GetMetric(ctx context.Context, day coach.LocalDate, key string, 
 		return Metric{}, err
 	}
 	if len(ms) == 0 {
-		return Metric{}, ErrNotFound
+		return Metric{}, fmt.Errorf("metric %s on %s: %w", key, day, ErrNotFound)
 	}
 	return ms[0], nil
 }
 
 // MetricRange returns cached values for key on [from, to], oldest first,
 // skipping rows from another algo_version.
-func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.LocalDate, algoVersion int) ([]Metric, error) {
+func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.LocalDate, algoVersion int) (out []Metric, err error) {
+	defer wrapErr("metric range", &err)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT date, value, n_samples, source, fetched_at FROM daily_metrics
 		WHERE metric = ? AND date >= ? AND date <= ? AND algo_version = ? ORDER BY date`,
@@ -79,25 +83,29 @@ func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.Loca
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Metric{}
+	out = []Metric{}
 	for rows.Next() {
 		var (
-			m          = Metric{Key: key, AlgoVersion: algoVersion}
-			day, stamp string
-			n          sql.NullInt64
-			source     sql.NullString
+			m      = Metric{Key: key, AlgoVersion: algoVersion}
+			day    string
+			stamp  stampCol
+			n      sql.NullInt64
+			source sql.NullString
 		)
 		if err := rows.Scan(&day, &m.Value, &n, &source, &stamp); err != nil {
 			return nil, err
 		}
-		m.Date, m.NSamples, m.Source, m.FetchedAt = coach.LocalDate(day), intPtr(n), source.String, parseStamp(stamp)
+		m.Date, m.NSamples, m.Source, m.FetchedAt = coach.LocalDate(day), intPtr(n), source.String, time.Time(stamp)
 		out = append(out, m)
 	}
 	return out, rows.Err()
 }
 
 // ClearMetrics empties the cache; the source of truth is the API.
-func (s *Store) ClearMetrics(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM daily_metrics`)
+func (s *Store) ClearMetrics(ctx context.Context) (err error) {
+	defer wrapErr("clear metrics", &err)
+	_, err = s.db.ExecContext(ctx, `DELETE FROM daily_metrics`)
 	return err
 }
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }

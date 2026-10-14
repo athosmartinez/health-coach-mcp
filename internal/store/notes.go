@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +18,10 @@ var NoteKinds = []string{"insight", "decision", "checkin", "symptom"}
 const (
 	defaultNoteLimit = 50
 	maxNoteLimit     = 200
+	maxNoteText      = 8 << 10
+	maxTags          = 20
+	maxTagLen        = 64
+	maxQueryWords    = 32
 )
 
 // Note is a free-text coach note.
@@ -30,13 +34,37 @@ type Note struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
-// AddNote stores a note; the FTS index is updated by the notes_ai trigger.
-func (s *Store) AddNote(ctx context.Context, n Note) (Note, error) {
-	if strings.TrimSpace(n.Text) == "" {
-		return Note{}, errors.New("note text is required")
+func (n Note) validate() error {
+	if !slices.Contains(NoteKinds, n.Kind) {
+		return invalid("kind must be one of %s", strings.Join(NoteKinds, ", "))
 	}
+	if strings.TrimSpace(n.Text) == "" || len(n.Text) > maxNoteText {
+		return invalid("note text is required (max %d bytes)", maxNoteText)
+	}
+	if len(n.Tags) > maxTags {
+		return invalid("at most %d tags", maxTags)
+	}
+	for _, t := range n.Tags {
+		if t == "" || len(t) > maxTagLen {
+			return invalid("tags must be 1 to %d characters", maxTagLen)
+		}
+	}
+	if n.RelatedDate != "" {
+		if _, err := coach.ParseDate(string(n.RelatedDate)); err != nil {
+			return invalid("related_date must be YYYY-MM-DD")
+		}
+	}
+	return nil
+}
+
+// AddNote stores a note; the FTS index is updated by the notes_ai trigger.
+func (s *Store) AddNote(ctx context.Context, n Note) (out Note, err error) {
+	defer wrapErr("add note", &err)
 	if n.Tags == nil {
 		n.Tags = []string{}
+	}
+	if err := n.validate(); err != nil {
+		return Note{}, err
 	}
 	tags, err := json.Marshal(n.Tags)
 	if err != nil {
@@ -67,7 +95,8 @@ type NoteFilter struct {
 
 // SearchNotes returns matching notes, newest first. A query FTS5 cannot parse
 // is reported as an invalid_input ToolError.
-func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) ([]Note, error) {
+func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (out []Note, err error) {
+	defer wrapErr("search notes", &err)
 	where := []string{"1 = 1"}
 	var args []any
 	if f.Kind != "" {
@@ -81,13 +110,17 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) ([]Note, error) {
 		}
 		start, _, err := f.Since.Bounds(loc)
 		if err != nil {
-			return nil, err
+			return nil, invalid("since must be YYYY-MM-DD")
 		}
 		where = append(where, "(n.related_date >= ? OR (n.related_date IS NULL AND n.created_at >= ?))")
 		args = append(args, string(f.Since), start.UTC().Format(timeLayout))
 	}
 	from := "notes n"
-	if q := ftsQuery(f.Query); q != "" {
+	q, err := ftsQuery(f.Query)
+	if err != nil {
+		return nil, err
+	}
+	if q != "" {
 		from = "notes n JOIN notes_fts ON notes_fts.rowid = n.id"
 		where = append(where, "notes_fts MATCH ?")
 		args = append(args, q)
@@ -99,19 +132,21 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) ([]Note, error) {
 	limit = min(limit, maxNoteLimit)
 	args = append(args, limit)
 
+	// Only fixed fragments are interpolated; every value is a placeholder.
+	// id is monotonic, so it orders by insertion even within one clock tick.
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT n.id, n.kind, n.text, n.tags, n.related_date, n.created_at FROM %s
-		WHERE %s ORDER BY n.created_at DESC, n.id DESC LIMIT ?`, from, strings.Join(where, " AND ")), args...)
+		WHERE %s ORDER BY n.id DESC LIMIT ?`, from, strings.Join(where, " AND ")), args...)
 	if err != nil {
 		return nil, ftsError(err)
 	}
 	defer rows.Close()
-	out := []Note{}
+	out = []Note{}
 	for rows.Next() {
 		var (
 			n             Note
 			tags, related sql.NullString
-			stamp         string
+			stamp         stampCol
 		)
 		if err := rows.Scan(&n.ID, &n.Kind, &n.Text, &tags, &related, &stamp); err != nil {
 			return nil, ftsError(err)
@@ -119,23 +154,27 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) ([]Note, error) {
 		n.Tags = []string{}
 		if tags.Valid {
 			if err := json.Unmarshal([]byte(tags.String), &n.Tags); err != nil {
-				return nil, fmt.Errorf("note %d tags: %w", n.ID, err)
+				return nil, fmt.Errorf("note %d: tags are corrupt", n.ID)
 			}
 		}
-		n.RelatedDate, n.CreatedAt = coach.LocalDate(related.String), parseStamp(stamp)
+		n.RelatedDate, n.CreatedAt = coach.LocalDate(related.String), time.Time(stamp)
 		out = append(out, n)
 	}
 	return out, ftsError(rows.Err())
 }
 
 // ftsQuery quotes every word as an FTS5 phrase so user text can never be read
-// as query syntax (AND, NEAR, column filters, unbalanced quotes).
-func ftsQuery(q string) string {
-	words := strings.Fields(q)
+// as query syntax (AND, NEAR, column filters, unbalanced quotes). NUL bytes
+// are dropped: SQLite ends the string there and reports a syntax error.
+func ftsQuery(q string) (string, error) {
+	words := strings.Fields(strings.ReplaceAll(q, "\x00", ""))
+	if len(words) > maxQueryWords {
+		return "", invalid("search at most %d words", maxQueryWords)
+	}
 	for i, w := range words {
 		words[i] = `"` + strings.ReplaceAll(w, `"`, `""`) + `"`
 	}
-	return strings.Join(words, " ")
+	return strings.Join(words, " "), nil
 }
 
 func ftsError(err error) error {

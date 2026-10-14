@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/store"
 	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 	"github.com/athosmartinez/health-coach-mcp/internal/version"
 )
@@ -221,5 +223,40 @@ func TestFailureCode(t *testing.T) {
 	}
 	if got := failureCode(context.Background(), errors.New("boom")); got != "protocol_error" {
 		t.Errorf("other → %q", got)
+	}
+}
+
+func toolNames(t *testing.T, cs *mcp.ClientSession) []string {
+	t.Helper()
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	return slices.Sorted(slices.Values(names))
+}
+
+func TestMemoryToolsNeedAStore(t *testing.T) {
+	if got := toolNames(t, connect(t, newServer(t, testDeps()))); !slices.Equal(got, []string{"server_info"}) {
+		t.Errorf("without a store: %v, want only server_info", got)
+	}
+
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	deps := testDeps()
+	deps.Store = st
+	got := toolNames(t, connect(t, newServer(t, deps)))
+	want := slices.Sorted(slices.Values([]string{
+		"server_info", "profile_get", "profile_update", "targets_set", "health_item_upsert", "health_items_list",
+		"labs_record", "labs_query", "preference_set", "preferences_get", "note_add", "notes_search",
+	}))
+	if !slices.Equal(got, want) {
+		t.Errorf("with a store: %v, want %v", got, want)
 	}
 }

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,11 +21,19 @@ type Handler[In, Out any] func(ctx context.Context, req *mcp.CallToolRequest, in
 //   - a panic becomes internal_error instead of killing the process, since the
 //     SDK runs handlers without recover.
 //
-// When t.InputSchema is nil it is inferred with the domain schemas (date pattern).
+// Nil input and output schemas are inferred with the domain schemas (date
+// pattern, raw JSON as any value).
 func Register[In, Out any](s *mcp.Server, t *mcp.Tool, h Handler[In, Out]) {
 	tt := *t
 	if tt.InputSchema == nil {
 		tt.InputSchema = MustInputSchema[In](nil)
+	}
+	if tt.OutputSchema == nil {
+		out, err := OutputSchema[Out]()
+		if err != nil {
+			panic(fmt.Errorf("tool %s: %w", t.Name, err)) // static definition: caught by registration tests
+		}
+		tt.OutputSchema = out
 	}
 	mcp.AddTool(s, &tt, func(ctx context.Context, req *mcp.CallToolRequest, in In) (res *mcp.CallToolResult, out Out, err error) {
 		defer func() {

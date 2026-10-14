@@ -59,6 +59,9 @@ func New(deps Deps) (*mcp.Server, error) {
 	s.AddReceivingMiddleware(logToolCalls(deps.Logger, deps.Now))
 
 	registerServerInfo(s)
+	if deps.Store != nil {
+		tools.RegisterMemory(s, tools.MemoryDeps{Store: deps.Store, Now: deps.Now, Loc: deps.Cfg.TimeZone})
+	}
 
 	return s, nil
 }

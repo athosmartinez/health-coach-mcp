@@ -19,8 +19,9 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   ends), `Envelope[T]` + `Coverage`/`ConfidenceLevel`, `ToolError` codes, `WireError`, `ErrorResult`.
 - `internal/server/` — `Deps` + `New(Deps) (*mcp.Server, error)` (one `registerX` line per feature),
   tool-call logging middleware (name/duration/outcome only), HTTP bind guard, bearer auth, `NewHTTPServer`.
-- `internal/tools/` — tool implementations; `Register` (the only way to add a tool) and
-  `MustInputSchema` (enums, date pattern).
+- `internal/tools/` — tool implementations; `Register` (the only way to add a tool; infers input and
+  output schemas with the domain schemas) and `MustInputSchema` (enums, date pattern). `memory.go`:
+  the 11 coach memory tools (CAPABILITY §4.2), registered by `server.New` when `Deps.Store` is set.
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
@@ -43,6 +44,8 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   any other error or panic becomes `internal_error`. `ToolError` messages must not contain health values.
 - **Schema changes are new migration files**, never edits to an applied one. Notes search quotes
   every word as an FTS5 phrase; user text is never FTS syntax.
+- **No boolean JSON schemas in tool properties.** `{}` serializes as `true`, which zod-based clients
+  (the MCP Inspector) reject; "any JSON" is `tools.anyJSON()`. A test walks every tool schema.
 - **Dates in tool inputs are `coach.LocalDate`**; `Bounds`/`AddDays` return errors, never panic.
 - **Enums** in tool inputs come from `tools.MustInputSchema`; the `jsonschema` tag is description only.
 - **Medical guardrail.** Tool descriptions and outputs must not diagnose or prescribe medication;

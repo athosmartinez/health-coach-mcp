@@ -2,6 +2,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
@@ -20,7 +21,25 @@ var schemaOptions = &jsonschema.ForOptions{
 			Pattern:     coach.DatePattern,
 			Description: "Local calendar day, YYYY-MM-DD",
 		},
+		// Raw JSON and `any` accept any JSON value. Spelled as an object with a
+		// description, not {}: {} serializes as the boolean schema `true`, which
+		// some clients (zod-based, e.g. the MCP Inspector) reject in properties.
+		// Inferred from its Go type, json.RawMessage would be a byte array.
+		reflect.TypeFor[json.RawMessage](): anyJSON(),
+		reflect.TypeFor[any]():             anyJSON(),
 	},
+}
+
+func anyJSON() *jsonschema.Schema { return &jsonschema.Schema{Description: "any JSON value"} }
+
+// OutputSchema infers the schema of a tool result with the same domain
+// schemas as inputs. The SDK's own inference does not know them.
+func OutputSchema[Out any]() (*jsonschema.Schema, error) {
+	s, err := jsonschema.For[Out](schemaOptions)
+	if err != nil {
+		return nil, fmt.Errorf("infer output schema: %w", err)
+	}
+	return s, nil
 }
 
 // InputSchema infers the JSON schema of In and restricts the named top-level

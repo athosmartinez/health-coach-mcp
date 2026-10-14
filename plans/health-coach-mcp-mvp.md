@@ -72,8 +72,8 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | Step | Branch | Depends on | Tier | Status |
 |---|---|---|---|---|
 | 1 Foundation: config, Deps, envelope, errors, middleware | `feat/foundation` | — | strongest | ☑ #1 |
-| 2 SQLite store + migrations | `feat/store` | 1 | default | ◐ PR open |
-| 3 Coach memory tools | `feat/memory-tools` | 1, 2 | default | ☐ |
+| 2 SQLite store + migrations | `feat/store` | 1 | default | ☑ #2 |
+| 3 Coach memory tools | `feat/memory-tools` | 1, 2 | default | ◐ PR open |
 | 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☐ |
 | 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☐ |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☐ |

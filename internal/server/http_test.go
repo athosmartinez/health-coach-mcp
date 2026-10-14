@@ -4,12 +4,16 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 )
 
 var strongToken = strings.Repeat("k", MinTokenLen)
@@ -135,12 +139,11 @@ func TestHTTPServerEndToEnd(t *testing.T) {
 	if srv.ReadHeaderTimeout == 0 || srv.IdleTimeout == 0 || srv.MaxHeaderBytes == 0 {
 		t.Errorf("timeouts not set: %+v", srv)
 	}
-	ts := httptest.NewServer(srv.Handler)
-	defer ts.Close()
+	endpoint := serveReal(t, srv)
 
 	dial := func(token string) (*mcp.ClientSession, error) {
 		transport := &mcp.StreamableClientTransport{
-			Endpoint:   ts.URL,
+			Endpoint:   endpoint,
 			HTTPClient: &http.Client{Transport: authTransport{token}},
 		}
 		return mcp.NewClient(&mcp.Implementation{Name: "c", Version: "test"}, nil).Connect(context.Background(), transport, nil)
@@ -159,5 +162,54 @@ func TestHTTPServerEndToEnd(t *testing.T) {
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "server_info"})
 	if err != nil || res.IsError {
 		t.Fatalf("server_info over HTTP: %v %+v", err, res)
+	}
+}
+
+// serveReal runs srv itself (not just its handler) so its timeouts apply.
+func serveReal(t *testing.T, srv *http.Server) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "http://" + ln.Addr().String()
+}
+
+type slowIn struct {
+	Wait string `json:"wait"`
+}
+
+// TestHTTPServerDoesNotCancelLongToolCalls guards against server timeouts that
+// cancel the request context while a handler is still working (ReadTimeout does
+// this on HTTP/1.1: the background reader hits the deadline mid-handler).
+func TestHTTPServerDoesNotCancelLongToolCalls(t *testing.T) {
+	s := newServer(t, testDeps())
+	tools.Register(s, &mcp.Tool{Name: "slow", Description: "test"}, func(ctx context.Context, _ *mcp.CallToolRequest, in slowIn) (map[string]string, error) {
+		d, _ := time.ParseDuration(in.Wait)
+		select {
+		case <-time.After(d):
+			return map[string]string{"ok": "yes"}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	srv := NewHTTPServer("127.0.0.1:0", s, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Shrink every timeout so a deadline that cuts handlers would fire within the call.
+	for _, d := range []*time.Duration{&srv.ReadTimeout, &srv.ReadHeaderTimeout, &srv.IdleTimeout} {
+		if *d != 0 {
+			*d = 300 * time.Millisecond
+		}
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "test"}, nil).
+		Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: serveReal(t, srv)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "slow", Arguments: map[string]any{"wait": "900ms"}})
+	if err != nil || res.IsError {
+		t.Fatalf("long tool call was cut by a server timeout: %v %+v", err, res)
 	}
 }

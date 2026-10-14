@@ -25,8 +25,8 @@
 
 ### Fixed contracts (defined in Step 1 — do not change in later steps without updating this plan)
 - **Wiring:** `server.New(deps server.Deps) *mcp.Server` with
-  `Deps{Cfg config.Config; Store *store.Store; Health healthdata.Source; Now func() time.Time}`.
-  Fields that don't exist yet are `nil`. Each feature registers through its own `registerX(s, deps)` in
+  `Deps{Cfg config.Config; Now func() time.Time; Logger *slog.Logger}` (Step 1). Each step that creates a
+  package adds its field (`Store *store.Store` in 2/3, `Health healthdata.Source` in 6a/7). Each feature registers through its own `registerX(s, deps)` in
   `internal/tools/<feature>.go` and adds **one line** to `New`. Tools whose dependency is `nil` aren't registered.
 - **`main` wiring (single place, `cmd/health-coach-mcp/main.go`):** `config.Load` → `store.Open` (from Step 2)
   → `googlehealth.New` (from Step 4b) → `healthdata.New` (from Step 6a) → `server.New`. Subcommands
@@ -60,7 +60,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 
 | Step | Branch | Depends on | Tier | Status |
 |---|---|---|---|---|
-| 1 Foundation: config, Deps, envelope, errors, middleware | `feat/foundation` | — | strongest | ☐ |
+| 1 Foundation: config, Deps, envelope, errors, middleware | `feat/foundation` | — | strongest | ◐ PR open |
 | 2 SQLite store + migrations | `feat/store` | 1 | default | ☐ |
 | 3 Coach memory tools | `feat/memory-tools` | 1, 2 | default | ☐ |
 | 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☐ |

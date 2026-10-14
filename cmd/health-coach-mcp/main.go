@@ -16,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/athosmartinez/health-coach-mcp/internal/config"
 	"github.com/athosmartinez/health-coach-mcp/internal/server"
 )
 
@@ -30,21 +31,30 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *transport, *addr, log); err != nil {
+	cfg, err := config.Load(os.Getenv, os.UserHomeDir)
+	if err != nil {
+		log.Error("invalid configuration", "err", err)
+		os.Exit(1)
+	}
+
+	if err := run(ctx, cfg, *transport, *addr, log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, transport, addr string, log *slog.Logger) error {
-	s := server.New()
+func run(ctx context.Context, cfg config.Config, transport, addr string, log *slog.Logger) error {
+	s := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log})
 
 	switch transport {
 	case "stdio":
 		return s.Run(ctx, &mcp.StdioTransport{})
 	case "http":
-		// No auth yet: keep the default loopback bind until an auth layer exists.
-		h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+		if err := server.CheckHTTPBind(addr, cfg.HTTPToken); err != nil {
+			return err
+		}
+		h := server.BearerAuth(cfg.HTTPToken,
+			mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
 		srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
 
 		go func() {

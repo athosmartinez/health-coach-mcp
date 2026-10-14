@@ -65,8 +65,13 @@ Conventions for **every** tool:
   { "data": {…}, "coverage": {"n_days": 6, "confidence": "low"},
     "sources": ["Google Fitbit Air"], "quality_flags": [], "generated_at": "…" }
   ```
-- Errors are tool errors (`IsError`) with a stable `code`: `auth_expired`, `scope_missing`,
-  `upstream_unavailable`, `no_data`, `invalid_input`. `auth_expired` includes the re-login command.
+- Errors are tool errors (`IsError: true`) with a stable `code`: `auth_expired`, `scope_missing`,
+  `upstream_unavailable`, `no_data`, `invalid_input`. The error goes as JSON `{code, message, hint}` in the
+  **text content**, with no `StructuredContent` (so as not to violate the tool's `outputSchema`).
+  `auth_expired` includes the re-login command. Arguments that fail the input schema are rejected by the
+  SDK itself before the handler runs (protocol error), not with `invalid_input`.
+- **Partial days:** today (and any day with incomplete coverage) comes back with `quality_flags: ["partial_day"]`;
+  energy balance and adherence don't count partial days as failure.
 - Baselines: **7d** = last 7 closed days; **28d** = last 28 closed days, excluding the day being analyzed.
 
 ### 4.1 Coach moments (computed, read-only)
@@ -113,17 +118,17 @@ hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories); `granula
 | Tool | Input | Output / effect |
 |---|---|---|
 | `profile_get()` | — | Profile + targets in force + preferences |
-| `profile_update(patch)` | partial fields: `birth_date`, `sex`, `height_cm`, `goal` {type, target_weight_kg, target_body_fat_pct, deadline}, `training_plan` {split, weekly_sessions_target} | Updated profile |
-| `targets_set(effective_from, kcal?, protein_g?, weekly_sessions?)` | new version (I6) | Version created; previous ones preserved |
+| `profile_update(patch)` | partial fields: `birth_date`, `sex`, `height_cm`, `goal` {type, target_weight_kg, target_body_fat_pct, deadline}, `training_plan` {split, notes} | Updated profile |
+| `targets_set(effective_from, kcal?, protein_g?, weekly_sessions?)` | new version (I6); **sole source** of the weekly sessions target | Version created; previous ones preserved |
 | `health_item_upsert(kind, name, status, details?, started_on?, ended_on?)` | `kind` ∈ condition, medication, supplement, injury, allergy, restriction | Item created/updated |
 | `health_items_list(kind?, status?)` | filters | List |
-| `labs_record(collected_on, lab?, results[])` | `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; `out_of_range[]` flagged (R3) |
+| `labs_record(collected_on, source, lab?, results[])` | `source` ∈ pdf, chat, file (default `chat`); `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; same (`collected_on`, `analyte`) **replaces** the value (correction); `out_of_range[]` flagged (R3) |
 | `labs_query(analyte?, since?)` | filters | Series per analyte with the reference |
 | `preference_set(key, value)` / `preferences_get()` | free key-value (e.g. `foods_avoid`, `training_time`) | — |
 | `note_add(kind, text, tags?, related_date?)` | `kind` ∈ insight, decision, checkin, symptom | Note created |
 | `notes_search(kind?, since?, query?)` | filters + text | List |
 
-Idempotency: `labs_record` deduplicates by (`collected_on`, `analyte`); `health_item_upsert` by
+Idempotency: `labs_record` upserts by (`collected_on`, `analyte`); `health_item_upsert` by
 (`kind`, `name`). Deletion only through explicit `*_delete` tools (phase 2) — the MVP doesn't delete.
 
 ### 4.3 MCP prompts and resources
@@ -149,7 +154,7 @@ CREATE TABLE profile (
   id          INTEGER PRIMARY KEY CHECK (id = 1),          -- singleton (R1)
   birth_date  TEXT, sex TEXT, height_cm REAL,
   goal_json   TEXT,          -- {type, target_weight_kg, target_body_fat_pct, deadline}
-  plan_json   TEXT,          -- {split, weekly_sessions_target}
+  plan_json   TEXT,          -- {split, notes}; weekly target lives only in `targets`
   updated_at  TEXT NOT NULL
 );
 
@@ -182,21 +187,40 @@ CREATE TABLE preferences (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, update
 CREATE TABLE notes (
   id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('insight','decision','checkin','symptom')),
-  text TEXT NOT NULL, tags TEXT, related_date TEXT, created_at TEXT NOT NULL
+  text TEXT NOT NULL,
+  tags TEXT,                 -- JSON array of strings
+  related_date TEXT, created_at TEXT NOT NULL
 );
 CREATE VIRTUAL TABLE notes_fts USING fts5(text, content='notes', content_rowid='id');
+-- external-content FTS5 is only populated via triggers
+CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
+  INSERT INTO notes_fts(rowid, text) VALUES (new.id, new.text); END;
+CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, text) VALUES ('delete', old.id, old.text); END;
+CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, text) VALUES ('delete', old.id, old.text);
+  INSERT INTO notes_fts(rowid, text) VALUES (new.id, new.text); END;
 
 CREATE TABLE daily_metrics (                                 -- cache (5.3)
-  date TEXT NOT NULL, metric TEXT NOT NULL,
-  value REAL, n_samples INTEGER, source TEXT,
+  date TEXT NOT NULL, metric TEXT NOT NULL,                  -- metric from the closed list in 5.3
+  value REAL NOT NULL, n_samples INTEGER, source TEXT,
+  algo_version INTEGER NOT NULL,                             -- bump when the derivation changes
   fetched_at TEXT NOT NULL,
   PRIMARY KEY (date, metric)
 );
 ```
 
 ### 5.3 Cache
-- Only **closed days** (≥ 3 days ago) are cached in `daily_metrics`. The last 3 days are always
+- Only **settled days** (≥ 3 days ago) are cached in `daily_metrics`. The last 3 days are always
   fetched live, because the band syncs late and nutrition is logged after the fact.
+- **Never cache** a missing value (`null`) or a day with partial coverage — it gets fetched again next time.
+- A row with `algo_version` different from the code's is ignored and recomputed.
+- Closed list of keys (scalars per day): `sleep_asleep_min`, `sleep_awake_min`, `sleep_in_bed_min`,
+  `sleep_deep_min`, `sleep_light_min`, `sleep_rem_min`, `sleep_start_min_of_day`, `hrv_rmssd_ms`,
+  `resting_hr_bpm`, `steps`, `azm_min`, `total_calories_kcal`, `weight_kg`, `body_fat_pct`.
+  Exercises and nutrition (lists of items) aren't cached in the MVP.
+- "Closed day" for **baselines** ≠ "settled day" for the **cache**: a baseline uses every day before the
+  analyzed day (live or cached); the cache only decides where the value comes from.
 - The cache is disposable: deleting `daily_metrics` doesn't lose anything (source of truth = API).
 
 ### 5.4 Retention and deletion
@@ -228,7 +252,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 ### Decided (2026-10-13)
 | # | Decision |
 |---|---|
-| Q1 | **Readiness:** `red` if HRV z < −1.5 **or** resting HR ≥ +5 bpm vs 28d **or** sleep < 6h; `yellow` if HRV z < −0.5 **or** resting HR ≥ +3 **or** sleep < 7h; otherwise `green`. `confidence: low` until 7 nights. Thresholds live in a single constant so they can be tuned. |
+| Q1 | **Readiness:** `red` if HRV z < −1.5 **or** resting HR ≥ +5 bpm vs 28d **or** `asleep_min` < 360; `yellow` if HRV z < −0.5 **or** resting HR ≥ +3 **or** `asleep_min` < 420; otherwise `green`. A missing signal **doesn't count** (neither red nor green): it's left out and listed in `reasons` as `missing:<signal>`; with no signal at all → `level: unknown`. z-score only with ≥ 7 nights of baseline. `confidence: low` until 7 nights. Thresholds live in a single constant so they can be tuned. |
 | Q2 | **Token in its own directory** `~/.config/health-coach-mcp/` (0600), with its own login `health-coach-mcp auth login`. Independent from ghealth. |
 | Q3 | **Targets set by Athos** (or a nutritionist) via `targets_set`. The coach can suggest, but only saves after explicit confirmation in chat. |
 | Q4 | **Week Monday–Sunday** (ISO). |

@@ -57,7 +57,7 @@ func run(o options) int {
 	return 0
 }
 
-func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) error {
+func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) (err error) {
 	// Validate every option before touching disk, so a typo in a flag never
 	// creates the store.
 	exposed, err := validate(cfg, o)
@@ -66,10 +66,18 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 	}
 
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, "coach.db"), time.Now)
+	if errors.Is(err, context.Canceled) {
+		return nil // a signal during startup is a normal shutdown
+	}
 	if err != nil {
 		return err
 	}
-	defer func() { _ = st.Close() }()
+	defer func() {
+		// The last close checkpoints the WAL; a failure there must not be silent.
+		if cerr := st.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close store: %w", cerr))
+		}
+	}()
 
 	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st})
 	if err != nil {
@@ -90,6 +98,9 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 func validate(cfg config.Config, o options) (exposed bool, err error) {
 	if cfg.TimeZone == nil {
 		return false, errors.New("config: TimeZone is required")
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		return false, fmt.Errorf("config: DataDir %q must be an absolute path", cfg.DataDir)
 	}
 	switch o.transport {
 	case "stdio":
@@ -130,8 +141,13 @@ func serveHTTP(ctx context.Context, s *mcp.Server, cfg config.Config, o options,
 	// Wait for in-flight requests; long-lived SSE streams are cut at the deadline.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		// Streams still open at the deadline are cut so no handler outlives the store.
+		log.Warn("shutdown deadline reached; closing remaining connections")
+		_ = srv.Close()
 	}
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		return err

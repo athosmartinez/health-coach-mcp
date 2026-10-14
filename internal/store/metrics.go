@@ -5,12 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 )
+
+// maxRangeDays bounds one MetricRange call (a year of baselines plus slack).
+const maxRangeDays = 400
 
 // MetricKeys is the closed list of cacheable daily scalars (CAPABILITY §5.3).
 var MetricKeys = []string{
@@ -34,11 +35,11 @@ type Metric struct {
 // PutMetric stores or replaces the value for (date, metric).
 func (s *Store) PutMetric(ctx context.Context, m Metric) (err error) {
 	defer wrapErr("put metric", &err)
-	if !slices.Contains(MetricKeys, m.Key) {
-		return invalid("metric must be one of %s", strings.Join(MetricKeys, ", "))
+	if err := oneOf("metric", m.Key, MetricKeys, false); err != nil {
+		return err
 	}
-	if _, err := coach.ParseDate(string(m.Date)); err != nil {
-		return invalid("metric date must be YYYY-MM-DD")
+	if err := validDate("metric date", m.Date, false); err != nil {
+		return err
 	}
 	// Never echo the value: it is a health measurement.
 	if !finite(m.Value) {
@@ -46,7 +47,7 @@ func (s *Store) PutMetric(ctx context.Context, m Metric) (err error) {
 	}
 	fetched := m.FetchedAt
 	if fetched.IsZero() {
-		fetched = s.now()
+		_, fetched = s.stamp()
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO daily_metrics (date, metric, value, n_samples, source, algo_version, fetched_at)
@@ -75,6 +76,21 @@ func (s *Store) GetMetric(ctx context.Context, day coach.LocalDate, key string, 
 // skipping rows from another algo_version.
 func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.LocalDate, algoVersion int) (out []Metric, err error) {
 	defer wrapErr("metric range", &err)
+	if err := oneOf("metric", key, MetricKeys, false); err != nil {
+		return nil, err
+	}
+	if err := validDate("from", from, false); err != nil {
+		return nil, err
+	}
+	if err := validDate("to", to, false); err != nil {
+		return nil, err
+	}
+	if to < from {
+		return nil, invalid("to is before from")
+	}
+	if last, _ := from.AddDays(maxRangeDays - 1); to > last {
+		return nil, invalid("a metric range spans at most %d days", maxRangeDays)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT date, value, n_samples, source, fetched_at FROM daily_metrics
 		WHERE metric = ? AND date >= ? AND date <= ? AND algo_version = ? ORDER BY date`,
@@ -98,7 +114,7 @@ func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.Loca
 		m.Date, m.NSamples, m.Source, m.FetchedAt = coach.LocalDate(day), intPtr(n), source.String, time.Time(stamp)
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return rowsResult(out, rows.Err())
 }
 
 // ClearMetrics empties the cache; the source of truth is the API.

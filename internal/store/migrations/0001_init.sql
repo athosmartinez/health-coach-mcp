@@ -19,7 +19,8 @@ CREATE TABLE targets (
 CREATE TABLE health_items (
   id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('condition','medication','supplement','injury','allergy','restriction')),
-  name TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('active','resolved','paused')),
+  name TEXT NOT NULL COLLATE NOCASE,   -- "Knee" and "knee" are the same item
+  status TEXT NOT NULL CHECK (status IN ('active','resolved','paused')),
   details TEXT, started_on TEXT, ended_on TEXT, updated_at TEXT NOT NULL,
   UNIQUE (kind, name)
 );
@@ -37,7 +38,7 @@ CREATE TABLE lab_results (
 CREATE TABLE preferences (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 
 CREATE TABLE notes (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reused: ids order notes and key the FTS index
   kind TEXT NOT NULL CHECK (kind IN ('insight','decision','checkin','symptom')),
   text TEXT NOT NULL,
   tags TEXT,                 -- JSON array of strings

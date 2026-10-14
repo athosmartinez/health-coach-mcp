@@ -128,7 +128,7 @@ target lives **only** in `targets`.
 - `internal/store.Open(path)`: DSN with per-connection pragmas —
   `file:<path>?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)`;
   `os.MkdirAll(dir, 0700)` (protects the `-wal`/`-shm` files too); migrations in `embed.FS`
-  (`migrations/0001_init.sql`, a verbatim copy of §5.2) recorded in `schema_migrations`.
+  (`migrations/0001_init.sql`, §5.2 except `schema_migrations`, which the migrator creates first) recorded in `schema_migrations`.
 - Repository: `Profile{Get, Upsert}`, `Targets{Set, InForce(date), List}`, `HealthItems{Upsert, List}`,
   `Labs{Record(batch, source) upsert, Query}`, `Preferences{Set, All}`, `Notes{Add(tags []string), Search}`,
   `DailyMetrics{Get(date, metric, algoVersion), Put, Range}`.

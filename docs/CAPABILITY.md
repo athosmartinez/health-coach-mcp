@@ -120,18 +120,20 @@ hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories); `granula
 |---|---|---|
 | `profile_get()` | — | Profile + targets in force + preferences |
 | `profile_update(patch)` | partial fields: `birth_date`, `sex`, `height_cm`, `goal` {type, target_weight_kg, target_body_fat_pct, deadline}, `training_plan` {split, notes} | Updated profile |
-| `targets_set(effective_from, kcal?, protein_g?, weekly_sessions?)` | new version (I6); **sole source** of the weekly sessions target; omitted fields are carried forward from the version in force | Version created; previous ones preserved |
-| `health_item_upsert(kind, name, status, details?, started_on?, ended_on?)` | `kind` ∈ condition, medication, supplement, injury, allergy, restriction | Item created/updated |
+| `targets_set(effective_from, kcal?, protein_g?, weekly_sessions?, clear[]?)` | new version (I6); **sole source** of the weekly sessions target; omitted fields are carried forward from the version in force (the same date's row when correcting it), `clear[]` drops them | Version created; previous ones preserved |
+| `health_item_upsert(kind, name, status, details?, started_on?, ended_on?, clear[]?)` | `kind` ∈ condition, medication, supplement, injury, allergy, restriction; `name` trimmed, case-insensitive | Item created/updated; on update omitted details/dates are kept (`clear[]` erases them), so a status change never wipes history |
 | `health_items_list(kind?, status?)` | filters | List |
 | `labs_record(collected_on, source, lab?, results[])` | `source` ∈ pdf, chat, file (default `chat`); `results[]` = {analyte, value, unit, ref_low?, ref_high?} | Batch stored; same (`collected_on`, `analyte`) **replaces** the value (correction); `out_of_range[]` flagged (R3) |
 | `labs_query(analyte?, since?)` | filters | Series per analyte with the reference |
 | `preference_set(key, value)` / `preferences_get()` | free key-value (e.g. `foods_avoid`, `training_time`) | — |
 | `note_add(kind, text, tags?, related_date?)` | `kind` ∈ insight, decision, checkin, symptom | Note created |
-| `notes_search(kind?, since?, query?)` | filters + text | List |
+| `notes_search(kind?, since?, query?, limit?)` | filters + text (every word must appear; no prefix match; accents folded) | `{notes, more}` — `more` = older matches exist beyond the limit |
 
 `profile_update` takes a `clear[]` list (`birth_date`, `sex`, `height_cm`, `goal`, `training_plan`) to unset
 fields; omitted fields stay unchanged. Store limits (rejected as `invalid_input`): 200 lab results per batch,
-note text 8 KB, 20 tags of ≤64 chars, preference value 16 KB, details 4 KB, 32 search words, 200 notes per search.
+note text 8 KB, 20 tags of ≤64 chars, 200 preferences of ≤16 KB, 500 health items (details ≤4 KB), 32 search
+words, 200 notes per search, 2000 lab rows per query, 400-day metric ranges. Filters are validated too (an unknown
+`kind` is `invalid_input`, not an empty list). A miss (no profile, no target in force, cache miss) is `no_data`.
 
 Idempotency: `labs_record` upserts by (`collected_on`, `analyte`); `health_item_upsert` by
 (`kind`, `name`). Deletion only through explicit `*_delete` tools (phase 2) — the MVP doesn't delete.

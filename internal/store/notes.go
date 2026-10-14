@@ -70,14 +70,14 @@ func (s *Store) AddNote(ctx context.Context, n Note) (out Note, err error) {
 	if err != nil {
 		return Note{}, err
 	}
-	stamp := s.stamp()
+	stamp, at := s.stamp()
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO notes (kind, text, tags, related_date, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id`,
 		n.Kind, n.Text, string(tags), nullString(string(n.RelatedDate)), stamp).Scan(&n.ID)
 	if err != nil {
 		return Note{}, err
 	}
-	n.CreatedAt = parseStamp(stamp)
+	n.CreatedAt = at
 	return n, nil
 }
 
@@ -93,10 +93,19 @@ type NoteFilter struct {
 	Limit int
 }
 
-// SearchNotes returns matching notes, newest first. A query FTS5 cannot parse
-// is reported as an invalid_input ToolError.
-func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (out []Note, err error) {
+// NoteResults is one page of notes. More reports that older matches exist
+// beyond the limit, so the model knows the list is not exhaustive.
+type NoteResults struct {
+	Notes []Note `json:"notes"`
+	More  bool   `json:"more"`
+}
+
+// SearchNotes returns matching notes, newest first.
+func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (res NoteResults, err error) {
 	defer wrapErr("search notes", &err)
+	if err := oneOf("kind", f.Kind, NoteKinds, true); err != nil {
+		return NoteResults{}, err
+	}
 	where := []string{"1 = 1"}
 	var args []any
 	if f.Kind != "" {
@@ -110,17 +119,17 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (out []Note, err 
 		}
 		start, _, err := f.Since.Bounds(loc)
 		if err != nil {
-			return nil, invalid("since must be YYYY-MM-DD")
+			return NoteResults{}, invalid("since must be YYYY-MM-DD")
 		}
 		where = append(where, "(n.related_date >= ? OR (n.related_date IS NULL AND n.created_at >= ?))")
 		args = append(args, string(f.Since), start.UTC().Format(timeLayout))
 	}
 	from := "notes n"
-	q, err := ftsQuery(f.Query)
-	if err != nil {
-		return nil, err
-	}
-	if q != "" {
+	if f.Query != "" {
+		q, err := ftsQuery(f.Query)
+		if err != nil {
+			return NoteResults{}, err
+		}
 		from = "notes n JOIN notes_fts ON notes_fts.rowid = n.id"
 		where = append(where, "notes_fts MATCH ?")
 		args = append(args, q)
@@ -130,18 +139,18 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (out []Note, err 
 		limit = defaultNoteLimit
 	}
 	limit = min(limit, maxNoteLimit)
-	args = append(args, limit)
+	args = append(args, limit+1) // one extra row tells whether more exist
 
 	// Only fixed fragments are interpolated; every value is a placeholder.
-	// id is monotonic, so it orders by insertion even within one clock tick.
+	// ids are AUTOINCREMENT, so they order by insertion even within one clock tick.
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT n.id, n.kind, n.text, n.tags, n.related_date, n.created_at FROM %s
 		WHERE %s ORDER BY n.id DESC LIMIT ?`, from, strings.Join(where, " AND ")), args...)
 	if err != nil {
-		return nil, ftsError(err)
+		return NoteResults{}, ftsSyntaxError(err)
 	}
 	defer rows.Close()
-	out = []Note{}
+	notes := []Note{}
 	for rows.Next() {
 		var (
 			n             Note
@@ -149,25 +158,35 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (out []Note, err 
 			stamp         stampCol
 		)
 		if err := rows.Scan(&n.ID, &n.Kind, &n.Text, &tags, &related, &stamp); err != nil {
-			return nil, ftsError(err)
+			return NoteResults{}, err
 		}
 		n.Tags = []string{}
 		if tags.Valid {
 			if err := json.Unmarshal([]byte(tags.String), &n.Tags); err != nil {
-				return nil, fmt.Errorf("note %d: tags are corrupt", n.ID)
+				return NoteResults{}, fmt.Errorf("note %d: tags are corrupt: %w", n.ID, err)
 			}
 		}
 		n.RelatedDate, n.CreatedAt = coach.LocalDate(related.String), time.Time(stamp)
-		out = append(out, n)
+		notes = append(notes, n)
 	}
-	return out, ftsError(rows.Err())
+	if err := rows.Err(); err != nil {
+		return NoteResults{}, ftsSyntaxError(err)
+	}
+	if len(notes) > limit {
+		return NoteResults{Notes: notes[:limit], More: true}, nil
+	}
+	return NoteResults{Notes: notes}, nil
 }
 
 // ftsQuery quotes every word as an FTS5 phrase so user text can never be read
 // as query syntax (AND, NEAR, column filters, unbalanced quotes). NUL bytes
-// are dropped: SQLite ends the string there and reports a syntax error.
+// are dropped: SQLite ends the string there and reports a syntax error. A
+// query with no words left is rejected rather than silently matching everything.
 func ftsQuery(q string) (string, error) {
 	words := strings.Fields(strings.ReplaceAll(q, "\x00", ""))
+	if len(words) == 0 {
+		return "", invalid("query has no words; omit it to list notes")
+	}
 	if len(words) > maxQueryWords {
 		return "", invalid("search at most %d words", maxQueryWords)
 	}
@@ -177,8 +196,11 @@ func ftsQuery(q string) (string, error) {
 	return strings.Join(words, " "), nil
 }
 
-func ftsError(err error) error {
-	if err != nil && strings.Contains(err.Error(), "fts5") {
+// ftsSyntaxError maps only an FTS5 syntax error to invalid_input. Quoting makes
+// it unreachable from user text, so anything else from FTS5 (a corrupt index,
+// a missing content row) is a real fault and passes through unchanged.
+func ftsSyntaxError(err error) error {
+	if err != nil && strings.Contains(err.Error(), "fts5: syntax error") {
 		return coach.ToolError{Code: coach.CodeInvalidInput, Message: "the search text could not be parsed", Hint: "use plain words"}
 	}
 	return err

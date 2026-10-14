@@ -41,13 +41,24 @@ func TestServeRequiresTimeZone(t *testing.T) {
 	}
 }
 
-func TestServeHTTPShutsDownCleanly(t *testing.T) {
+// waitFor polls until cond holds, instead of sleeping a fixed time.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 10s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func runUntilCancelled(t *testing.T, cfg config.Config, o options, cancelWhen func() bool) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	cfg := testConfig(t)
-	go func() { done <- serve(ctx, cfg, options{transport: "http", addr: "127.0.0.1:0"}, discard) }()
-
-	time.Sleep(100 * time.Millisecond)
+	go func() { done <- serve(ctx, cfg, o, discard) }()
+	waitFor(t, cancelWhen)
 	cancel()
 	select {
 	case err := <-done:
@@ -56,6 +67,26 @@ func TestServeHTTPShutsDownCleanly(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return after cancel")
+	}
+}
+
+func TestServeHTTPShutsDownCleanly(t *testing.T) {
+	cfg := testConfig(t)
+	runUntilCancelled(t, cfg, options{transport: "http", addr: "127.0.0.1:0"}, func() bool {
+		_, err := os.Stat(cfg.DataDir + "/coach.db")
+		return err == nil
+	})
+}
+
+func TestSignalDuringStartupIsCleanShutdown(t *testing.T) {
+	// Cancelled before the store finishes opening: still exit 0, not an error.
+	runUntilCancelled(t, testConfig(t), options{transport: "http", addr: "127.0.0.1:0"}, func() bool { return true })
+}
+
+func TestServeRejectsRelativeDataDir(t *testing.T) {
+	err := serve(context.Background(), config.Config{TimeZone: time.UTC, DataDir: "data"}, options{transport: "stdio"}, discard)
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("err = %v, want absolute DataDir required", err)
 	}
 }
 
@@ -85,15 +116,12 @@ func TestServeCreatesStoreOnlyForValidOptions(t *testing.T) {
 		t.Fatalf("invalid options created the store (stat err %v)", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, cfg, options{transport: "http", addr: "127.0.0.1:0"}, discard) }()
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	created := func() bool {
+		_, err := os.Stat(cfg.DataDir + "/coach.db")
+		return err == nil
 	}
-	if _, err := os.Stat(cfg.DataDir + "/coach.db"); err != nil {
-		t.Fatalf("coach.db not created in DataDir: %v", err)
+	runUntilCancelled(t, cfg, options{transport: "http", addr: "127.0.0.1:0"}, created)
+	if !created() {
+		t.Fatal("coach.db not created in DataDir")
 	}
 }

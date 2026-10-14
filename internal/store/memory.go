@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -12,13 +13,21 @@ import (
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 )
 
-// Size limits keep one bad tool call from bloating the store or the context.
+// Size and count limits keep one bad tool call (or a loop) from bloating the
+// store or flooding the model's context.
 const (
-	maxNameLen     = 200
-	maxDetailsLen  = 4 << 10
-	maxPrefKeyLen  = 100
-	maxPrefValue   = 16 << 10
-	maxProfileText = 2 << 10
+	maxNameLen        = 200
+	maxDetailsLen     = 4 << 10
+	maxPrefKeyLen     = 100
+	maxPrefValue      = 16 << 10
+	maxPreferences    = 200
+	maxProfileText    = 2 << 10
+	maxHealthItems    = 500
+	maxKcal           = 10_000
+	maxProteinG       = 1_000
+	maxWeeklySessions = 21
+	minHeightCm       = 50
+	maxHeightCm       = 280
 )
 
 // Goal is the body-composition goal stored as profile.goal_json.
@@ -60,17 +69,52 @@ type ProfilePatch struct {
 	Clear     []string
 }
 
+// replaces reports whether the patch overwrites or clears field, so a corrupt
+// stored value for it does not block the update.
+func (p ProfilePatch) replaces(field string) bool {
+	switch {
+	case slices.Contains(p.Clear, field):
+		return true
+	case field == "goal":
+		return p.Goal != nil
+	case field == "training_plan":
+		return p.Plan != nil
+	}
+	return false
+}
+
 // Profile returns the profile, or an ErrNotFound error before the first update.
 func (s *Store) Profile(ctx context.Context) (p Profile, err error) {
 	defer wrapErr("profile", &err)
-	return getProfile(ctx, s.db)
+	p, corrupt, err := getProfile(ctx, s.db)
+	if err != nil {
+		return Profile{}, err
+	}
+	if len(corrupt) > 0 {
+		return Profile{}, corrupt[0]
+	}
+	return p, nil
 }
 
 type querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func getProfile(ctx context.Context, q querier) (Profile, error) {
+// corruptField is a JSON column that no longer decodes.
+type corruptField struct {
+	field string
+	err   error
+}
+
+func (c corruptField) Error() string {
+	return fmt.Sprintf("stored %s is corrupt (set or clear it to repair): %v", c.field, c.err)
+}
+
+func (c corruptField) Unwrap() error { return c.err }
+
+// getProfile reads the profile. JSON columns that fail to decode are reported
+// separately so UpdateProfile can still overwrite them.
+func getProfile(ctx context.Context, q querier) (Profile, []corruptField, error) {
 	var (
 		p                    Profile
 		birth, sex, goal, pl sql.NullString
@@ -81,57 +125,68 @@ func getProfile(ctx context.Context, q querier) (Profile, error) {
 		`SELECT birth_date, sex, height_cm, goal_json, plan_json, updated_at FROM profile WHERE id = 1`).
 		Scan(&birth, &sex, &height, &goal, &pl, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Profile{}, ErrNotFound
+		return Profile{}, nil, ErrNotFound
 	}
 	if err != nil {
-		return Profile{}, err
+		return Profile{}, nil, err
 	}
 	p.BirthDate, p.Sex, p.HeightCm, p.UpdatedAt = coach.LocalDate(birth.String), sex.String, floatPtr(height), time.Time(updated)
+	var corrupt []corruptField
 	if goal.Valid {
 		p.Goal = &Goal{}
 		if err := json.Unmarshal([]byte(goal.String), p.Goal); err != nil {
-			return Profile{}, errors.New("goal_json is corrupt")
+			p.Goal = nil
+			corrupt = append(corrupt, corruptField{"goal", err})
 		}
 	}
 	if pl.Valid {
 		p.Plan = &TrainingPlan{}
 		if err := json.Unmarshal([]byte(pl.String), p.Plan); err != nil {
-			return Profile{}, errors.New("plan_json is corrupt")
+			p.Plan = nil
+			corrupt = append(corrupt, corruptField{"training_plan", err})
 		}
 	}
-	return p, nil
+	return p, corrupt, nil
 }
 
-func (p ProfilePatch) validate() error {
+type numField struct {
+	name     string
+	v        *float64
+	min, max float64
+}
+
+func (p ProfilePatch) validate(today coach.LocalDate) error {
 	for _, f := range p.Clear {
 		if !slices.Contains(ProfileFields, f) {
 			return invalid("cannot clear %q; fields are %s", f, strings.Join(ProfileFields, ", "))
 		}
 	}
 	if p.BirthDate != nil {
-		if _, err := coach.ParseDate(string(*p.BirthDate)); err != nil {
-			return invalid("birth_date must be YYYY-MM-DD")
+		if err := validDate("birth_date", *p.BirthDate, false); err != nil {
+			return err
+		}
+		if *p.BirthDate < "1900-01-01" || *p.BirthDate > today {
+			return invalid("birth_date must be between 1900-01-01 and today")
 		}
 	}
 	if p.Sex != nil && len(*p.Sex) > maxNameLen {
 		return invalid("sex is too long")
 	}
-	if p.HeightCm != nil && (!finite(*p.HeightCm) || *p.HeightCm <= 0) {
-		return invalid("height_cm must be a positive number")
-	}
+	nums := []numField{{"height_cm", p.HeightCm, minHeightCm, maxHeightCm}}
 	if g := p.Goal; g != nil {
 		if len(g.Type) > maxNameLen {
 			return invalid("goal type is too long")
 		}
-		for name, v := range map[string]*float64{"target_weight_kg": g.TargetWeightKg, "target_body_fat_pct": g.TargetBodyFatPct} {
-			if v != nil && (!finite(*v) || *v <= 0) {
-				return invalid("goal %s must be a positive number", name)
-			}
+		nums = append(nums,
+			numField{"goal target_weight_kg", g.TargetWeightKg, 20, 400},
+			numField{"goal target_body_fat_pct", g.TargetBodyFatPct, 2, 70})
+		if err := validDate("goal deadline", g.Deadline, true); err != nil {
+			return err
 		}
-		if g.Deadline != "" {
-			if _, err := coach.ParseDate(string(g.Deadline)); err != nil {
-				return invalid("goal deadline must be YYYY-MM-DD")
-			}
+	}
+	for _, n := range nums {
+		if n.v != nil && (!finite(*n.v) || *n.v < n.min || *n.v > n.max) {
+			return invalid("%s must be between %g and %g", n.name, n.min, n.max)
 		}
 	}
 	if pl := p.Plan; pl != nil && (len(pl.Split) > maxNameLen || len(pl.Notes) > maxProfileText) {
@@ -141,9 +196,14 @@ func (p ProfilePatch) validate() error {
 }
 
 // UpdateProfile merges patch into the stored profile (creating it if needed).
+// A stored goal or plan that no longer decodes blocks the update unless the
+// patch sets or clears it, which is how it gets repaired.
 func (s *Store) UpdateProfile(ctx context.Context, patch ProfilePatch) (p Profile, err error) {
 	defer wrapErr("update profile", &err)
-	if err := patch.validate(); err != nil {
+	stamp, at := s.stamp()
+	// One day of slack: "today" in UTC can be yesterday in the user's zone.
+	tomorrow, _ := coach.DateOf(at, time.UTC).AddDays(1)
+	if err := patch.validate(tomorrow); err != nil {
 		return Profile{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -152,9 +212,14 @@ func (s *Store) UpdateProfile(ctx context.Context, patch ProfilePatch) (p Profil
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	p, err = getProfile(ctx, tx)
+	p, corrupt, err := getProfile(ctx, tx)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return Profile{}, err
+	}
+	for _, c := range corrupt {
+		if !patch.replaces(c.field) {
+			return Profile{}, c
+		}
 	}
 	if patch.BirthDate != nil {
 		p.BirthDate = *patch.BirthDate
@@ -196,7 +261,6 @@ func (s *Store) UpdateProfile(ctx context.Context, patch ProfilePatch) (p Profil
 	if err != nil {
 		return Profile{}, err
 	}
-	stamp := s.stamp()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO profile (id, birth_date, sex, height_cm, goal_json, plan_json, updated_at)
 		VALUES (1, ?, ?, ?, ?, ?, ?)
@@ -209,7 +273,7 @@ func (s *Store) UpdateProfile(ctx context.Context, patch ProfilePatch) (p Profil
 	if err := tx.Commit(); err != nil {
 		return Profile{}, err
 	}
-	p.UpdatedAt = parseStamp(stamp)
+	p.UpdatedAt = at
 	return p, nil
 }
 
@@ -224,6 +288,9 @@ func jsonOrNull[T any](v *T) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
+// TargetFields are the names accepted by Target.Clear.
+var TargetFields = []string{"kcal", "protein_g", "weekly_sessions"}
+
 // Target is one version of the user's targets (I6): a new version starts on
 // EffectiveFrom and earlier versions are kept for history.
 type Target struct {
@@ -232,24 +299,47 @@ type Target struct {
 	ProteinG       *int            `json:"protein_g,omitempty"`
 	WeeklySessions *int            `json:"weekly_sessions,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
+	// Clear names fields to drop instead of carrying them forward (input only).
+	Clear []string `json:"-"`
+}
+
+type intField struct {
+	name string
+	v    *int
+	max  int
+}
+
+func (t Target) validate() error {
+	if err := validDate("effective_from", t.EffectiveFrom, false); err != nil {
+		return err
+	}
+	for _, f := range t.Clear {
+		if !slices.Contains(TargetFields, f) {
+			return invalid("cannot clear %q; fields are %s", f, strings.Join(TargetFields, ", "))
+		}
+	}
+	if t.Kcal == nil && t.ProteinG == nil && t.WeeklySessions == nil && len(t.Clear) == 0 {
+		return invalid("set or clear at least one of %s", strings.Join(TargetFields, ", "))
+	}
+	for _, f := range []intField{
+		{"kcal", t.Kcal, maxKcal}, {"protein_g", t.ProteinG, maxProteinG}, {"weekly_sessions", t.WeeklySessions, maxWeeklySessions},
+	} {
+		if f.v != nil && (*f.v < 0 || *f.v > f.max) {
+			return invalid("%s must be between 0 and %d", f.name, f.max)
+		}
+	}
+	return nil
 }
 
 // SetTarget stores a target version. Fields left nil are carried forward from
-// the version in force on EffectiveFrom, so changing only kcal keeps the
-// protein and sessions targets. Setting the same EffectiveFrom again replaces
-// that version (a correction), never an earlier one.
+// the version in force on EffectiveFrom (the same date's row when correcting
+// it), so changing only kcal keeps the protein and sessions targets; fields in
+// Clear are dropped instead. Setting the same EffectiveFrom again replaces that
+// version, never an earlier or later one.
 func (s *Store) SetTarget(ctx context.Context, t Target) (out Target, err error) {
 	defer wrapErr("set target", &err)
-	if _, err := coach.ParseDate(string(t.EffectiveFrom)); err != nil {
-		return Target{}, invalid("effective_from must be YYYY-MM-DD")
-	}
-	if t.Kcal == nil && t.ProteinG == nil && t.WeeklySessions == nil {
-		return Target{}, invalid("set at least one of kcal, protein_g, weekly_sessions")
-	}
-	for name, v := range map[string]*int{"kcal": t.Kcal, "protein_g": t.ProteinG, "weekly_sessions": t.WeeklySessions} {
-		if v != nil && *v < 0 {
-			return Target{}, invalid("%s must not be negative", name)
-		}
+	if err := t.validate(); err != nil {
+		return Target{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -266,7 +356,18 @@ func (s *Store) SetTarget(ctx context.Context, t Target) (out Target, err error)
 		t.ProteinG = cmpOr(t.ProteinG, prev[0].ProteinG)
 		t.WeeklySessions = cmpOr(t.WeeklySessions, prev[0].WeeklySessions)
 	}
-	stamp := s.stamp()
+	for _, f := range t.Clear {
+		switch f {
+		case "kcal":
+			t.Kcal = nil
+		case "protein_g":
+			t.ProteinG = nil
+		case "weekly_sessions":
+			t.WeeklySessions = nil
+		}
+	}
+	t.Clear = nil
+	stamp, at := s.stamp()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO targets (effective_from, kcal, protein_g, weekly_sessions, created_at) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (effective_from) DO UPDATE SET kcal = excluded.kcal, protein_g = excluded.protein_g,
@@ -277,7 +378,7 @@ func (s *Store) SetTarget(ctx context.Context, t Target) (out Target, err error)
 	if err := tx.Commit(); err != nil {
 		return Target{}, err
 	}
-	t.CreatedAt = parseStamp(stamp)
+	t.CreatedAt = at
 	return t, nil
 }
 
@@ -294,13 +395,16 @@ const targetInForceSQL = `
 
 // TargetInForce returns the latest version that started on or before day.
 func (s *Store) TargetInForce(ctx context.Context, day coach.LocalDate) (t Target, err error) {
-	defer wrapErr("target in force on "+string(day), &err)
+	defer wrapErr("target in force", &err)
+	if err := validDate("day", day, false); err != nil {
+		return Target{}, err
+	}
 	ts, err := scanTargets(s.db.QueryContext(ctx, targetInForceSQL, string(day)))
 	if err != nil {
 		return Target{}, err
 	}
 	if len(ts) == 0 {
-		return Target{}, ErrNotFound
+		return Target{}, fmt.Errorf("no target on or before %s: %w", day, ErrNotFound)
 	}
 	return ts[0], nil
 }
@@ -332,16 +436,19 @@ func scanTargets(rows *sql.Rows, err error) ([]Target, error) {
 			coach.LocalDate(from), intPtr(kcal), intPtr(protein), intPtr(sessions), time.Time(created)
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return rowsResult(out, rows.Err())
 }
 
 // Health item kinds and statuses, mirrored by the schema CHECK constraints.
 var (
 	HealthItemKinds    = []string{"condition", "medication", "supplement", "injury", "allergy", "restriction"}
 	HealthItemStatuses = []string{"active", "resolved", "paused"}
+	// HealthItemFields are the names accepted by HealthItem.Clear.
+	HealthItemFields = []string{"details", "started_on", "ended_on"}
 )
 
-// HealthItem is one entry of the health history, unique by (Kind, Name).
+// HealthItem is one entry of the health history, unique by (Kind, Name), with
+// Name compared case-insensitively.
 type HealthItem struct {
 	ID        int64           `json:"id"`
 	Kind      string          `json:"kind"`
@@ -351,14 +458,16 @@ type HealthItem struct {
 	StartedOn coach.LocalDate `json:"started_on,omitempty"`
 	EndedOn   coach.LocalDate `json:"ended_on,omitempty"`
 	UpdatedAt time.Time       `json:"updated_at"`
+	// Clear names optional fields to erase on update (input only).
+	Clear []string `json:"-"`
 }
 
 func (it HealthItem) validate() error {
-	if !slices.Contains(HealthItemKinds, it.Kind) {
-		return invalid("kind must be one of %s", strings.Join(HealthItemKinds, ", "))
+	if err := oneOf("kind", it.Kind, HealthItemKinds, false); err != nil {
+		return err
 	}
-	if !slices.Contains(HealthItemStatuses, it.Status) {
-		return invalid("status must be one of %s", strings.Join(HealthItemStatuses, ", "))
+	if err := oneOf("status", it.Status, HealthItemStatuses, false); err != nil {
+		return err
 	}
 	if it.Name == "" || len(it.Name) > maxNameLen {
 		return invalid("name is required (max %d characters)", maxNameLen)
@@ -366,47 +475,92 @@ func (it HealthItem) validate() error {
 	if len(it.Details) > maxDetailsLen {
 		return invalid("details exceed %d bytes", maxDetailsLen)
 	}
-	for name, d := range map[string]coach.LocalDate{"started_on": it.StartedOn, "ended_on": it.EndedOn} {
-		if d != "" {
-			if _, err := coach.ParseDate(string(d)); err != nil {
-				return invalid("%s must be YYYY-MM-DD", name)
-			}
+	for _, f := range it.Clear {
+		if !slices.Contains(HealthItemFields, f) {
+			return invalid("cannot clear %q; fields are %s", f, strings.Join(HealthItemFields, ", "))
 		}
+	}
+	if err := validDate("started_on", it.StartedOn, true); err != nil {
+		return err
+	}
+	if err := validDate("ended_on", it.EndedOn, true); err != nil {
+		return err
+	}
+	if it.StartedOn != "" && it.EndedOn != "" && it.EndedOn < it.StartedOn {
+		return invalid("ended_on is before started_on")
 	}
 	return nil
 }
 
-// UpsertHealthItem creates the item or replaces the one with the same kind and
-// name. The name is trimmed so "knee " and "knee" are the same item.
+// UpsertHealthItem creates the item or updates the one with the same kind and
+// name (trimmed, case-insensitive). On update, status always changes but
+// details and dates keep their stored value unless given or listed in Clear,
+// so marking an injury resolved does not erase its history.
 func (s *Store) UpsertHealthItem(ctx context.Context, it HealthItem) (out HealthItem, err error) {
 	defer wrapErr("upsert health item", &err)
 	it.Name = strings.TrimSpace(it.Name)
 	if err := it.validate(); err != nil {
 		return HealthItem{}, err
 	}
-	stamp := s.stamp()
-	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO health_items (kind, name, status, details, started_on, ended_on, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (kind, name) DO UPDATE SET status = excluded.status, details = excluded.details,
-			started_on = excluded.started_on, ended_on = excluded.ended_on, updated_at = excluded.updated_at
-		RETURNING id`,
-		it.Kind, it.Name, it.Status, nullString(it.Details), nullString(string(it.StartedOn)),
-		nullString(string(it.EndedOn)), stamp).Scan(&it.ID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return HealthItem{}, err
 	}
-	it.UpdatedAt = parseStamp(stamp)
+	defer func() { _ = tx.Rollback() }()
+
+	var exists, count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FILTER (WHERE kind = ? AND name = ?), COUNT(*) FROM health_items`, it.Kind, it.Name).Scan(&exists, &count); err != nil {
+		return HealthItem{}, err
+	}
+	if exists == 0 && count >= maxHealthItems {
+		return HealthItem{}, invalid("health history is full (%d items); resolve or merge old items first", maxHealthItems)
+	}
+
+	clear := func(f string) bool { return slices.Contains(it.Clear, f) }
+	stamp, at := s.stamp()
+	var details, started, ended sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO health_items (kind, name, status, details, started_on, ended_on, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (kind, name) DO UPDATE SET status = excluded.status,
+			details    = CASE WHEN ? THEN NULL ELSE COALESCE(excluded.details, details) END,
+			started_on = CASE WHEN ? THEN NULL ELSE COALESCE(excluded.started_on, started_on) END,
+			ended_on   = CASE WHEN ? THEN NULL ELSE COALESCE(excluded.ended_on, ended_on) END,
+			updated_at = excluded.updated_at
+		RETURNING id, name, details, started_on, ended_on`,
+		it.Kind, it.Name, it.Status, nullString(it.Details), nullString(string(it.StartedOn)),
+		nullString(string(it.EndedOn)), stamp, clear("details"), clear("started_on"), clear("ended_on")).
+		Scan(&it.ID, &it.Name, &details, &started, &ended)
+	if err != nil {
+		return HealthItem{}, err
+	}
+	it.Details, it.StartedOn, it.EndedOn = details.String, coach.LocalDate(started.String), coach.LocalDate(ended.String)
+	if it.StartedOn != "" && it.EndedOn != "" && it.EndedOn < it.StartedOn {
+		// The merged row is inconsistent (e.g. a new ended_on before the stored
+		// started_on); returning before Commit rolls the upsert back.
+		return HealthItem{}, invalid("ended_on is before the stored started_on")
+	}
+	if err := tx.Commit(); err != nil {
+		return HealthItem{}, err
+	}
+	it.UpdatedAt, it.Clear = at, nil
 	return it, nil
 }
 
 // HealthItems lists items, optionally filtered by kind and status ("" = any).
 func (s *Store) HealthItems(ctx context.Context, kind, status string) (out []HealthItem, err error) {
 	defer wrapErr("health items", &err)
+	if err := oneOf("kind", kind, HealthItemKinds, true); err != nil {
+		return nil, err
+	}
+	if err := oneOf("status", status, HealthItemStatuses, true); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, name, status, details, started_on, ended_on, updated_at FROM health_items
-		WHERE (? = '' OR kind = ?) AND (? = '' OR status = ?) ORDER BY kind, name`,
-		kind, kind, status, status)
+		WHERE (? = '' OR kind = ?) AND (? = '' OR status = ?) ORDER BY kind, name LIMIT ?`,
+		kind, kind, status, status, maxHealthItems)
 	if err != nil {
 		return nil, err
 	}
@@ -425,10 +579,10 @@ func (s *Store) HealthItems(ctx context.Context, kind, status string) (out []Hea
 			details.String, coach.LocalDate(started.String), coach.LocalDate(ended.String), time.Time(updated)
 		out = append(out, it)
 	}
-	return out, rows.Err()
+	return rowsResult(out, rows.Err())
 }
 
-// SetPreference stores a free-form JSON value under key.
+// SetPreference stores a free-form JSON value under key (trimmed).
 func (s *Store) SetPreference(ctx context.Context, key string, value json.RawMessage) (err error) {
 	defer wrapErr("set preference", &err)
 	key = strings.TrimSpace(key)
@@ -441,17 +595,33 @@ func (s *Store) SetPreference(ctx context.Context, key string, value json.RawMes
 	if !json.Valid(value) {
 		return invalid("preference %q: value is not valid JSON", key)
 	}
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var exists, count int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FILTER (WHERE key = ?), COUNT(*) FROM preferences`, key).Scan(&exists, &count); err != nil {
+		return err
+	}
+	if exists == 0 && count >= maxPreferences {
+		return invalid("at most %d preferences; reuse or overwrite an existing key", maxPreferences)
+	}
+	stamp, _ := s.stamp()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
-		key, string(value), s.stamp())
-	return err
+		key, string(value), stamp); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// Preferences returns every preference by key.
+// Preferences returns every preference by key (at most maxPreferences exist).
 func (s *Store) Preferences(ctx context.Context) (out map[string]json.RawMessage, err error) {
 	defer wrapErr("preferences", &err)
-	rows, err := s.db.QueryContext(ctx, `SELECT key, value_json FROM preferences ORDER BY key`)
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value_json FROM preferences ORDER BY key LIMIT ?`, maxPreferences)
 	if err != nil {
 		return nil, err
 	}
@@ -464,5 +634,8 @@ func (s *Store) Preferences(ctx context.Context) (out map[string]json.RawMessage
 		}
 		out[k] = json.RawMessage(v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

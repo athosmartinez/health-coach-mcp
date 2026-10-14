@@ -13,8 +13,12 @@ import (
 // LabSources is where a lab result came from, mirrored by the schema CHECK.
 var LabSources = []string{"pdf", "chat", "file"}
 
-// maxLabBatch bounds one report; a full panel is well under this.
-const maxLabBatch = 200
+const (
+	// maxLabBatch bounds one report; a full panel is well under this.
+	maxLabBatch = 200
+	// maxLabRows bounds one query result (years of panels for every analyte).
+	maxLabRows = 2000
+)
 
 // LabValue is one analyte measurement with its reference range.
 type LabValue struct {
@@ -51,19 +55,19 @@ func (v LabValue) validate(i int) error {
 		return invalid("result %d: analyte is required (max %d characters)", i, maxNameLen)
 	}
 	if v.Unit == "" || len(v.Unit) > maxNameLen {
-		return invalid("result %d (%s): unit is required", i, v.Analyte)
+		return invalid("result %d (%q): unit is required", i, v.Analyte)
 	}
 	// Error messages name the analyte, never its value.
 	if !finite(v.Value) {
-		return invalid("result %d (%s): value must be a finite number", i, v.Analyte)
+		return invalid("result %d (%q): value must be a finite number", i, v.Analyte)
 	}
 	for _, ref := range []*float64{v.RefLow, v.RefHigh} {
 		if ref != nil && !finite(*ref) {
-			return invalid("result %d (%s): reference range must be finite", i, v.Analyte)
+			return invalid("result %d (%q): reference range must be finite", i, v.Analyte)
 		}
 	}
 	if v.RefLow != nil && v.RefHigh != nil && *v.RefLow > *v.RefHigh {
-		return invalid("result %d (%s): ref_low is above ref_high", i, v.Analyte)
+		return invalid("result %d (%q): ref_low is above ref_high", i, v.Analyte)
 	}
 	return nil
 }
@@ -93,6 +97,14 @@ func (s *Store) RecordLabs(ctx context.Context, collectedOn coach.LocalDate, lab
 			return nil, err
 		}
 	}
+	// Two values for one analyte on one date would silently overwrite each other.
+	seen := map[string]int{}
+	for i, v := range values {
+		if j, dup := seen[v.Analyte]; dup {
+			return nil, invalid("results %d and %d are both %q on %s; send one value per analyte", j, i, v.Analyte, collectedOn)
+		}
+		seen[v.Analyte] = i
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -100,10 +112,10 @@ func (s *Store) RecordLabs(ctx context.Context, collectedOn coach.LocalDate, lab
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stamp := s.stamp()
+	stamp, at := s.stamp()
 	out = make([]LabResult, 0, len(values))
 	for _, v := range values {
-		r := LabResult{CollectedOn: collectedOn, Lab: lab, LabValue: v, Source: source, CreatedAt: parseStamp(stamp)}
+		r := LabResult{CollectedOn: collectedOn, Lab: lab, LabValue: v, Source: source, CreatedAt: at}
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO lab_results (collected_on, lab, analyte, value, unit, ref_low, ref_high, source, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -128,12 +140,15 @@ func (s *Store) RecordLabs(ctx context.Context, collectedOn coach.LocalDate, lab
 // since "" means no lower bound.
 func (s *Store) QueryLabs(ctx context.Context, analyte string, since coach.LocalDate) (out []LabResult, err error) {
 	defer wrapErr("query labs", &err)
+	if err := validDate("since", since, true); err != nil {
+		return nil, err
+	}
 	analyte = NormalizeAnalyte(analyte)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, collected_on, lab, analyte, value, unit, ref_low, ref_high, source, created_at FROM lab_results
 		WHERE (? = '' OR analyte = ?) AND (? = '' OR collected_on >= ?)
-		ORDER BY analyte, collected_on`,
-		analyte, analyte, string(since), string(since))
+		ORDER BY analyte, collected_on LIMIT ?`,
+		analyte, analyte, string(since), string(since), maxLabRows)
 	if err != nil {
 		return nil, err
 	}
@@ -154,5 +169,5 @@ func (s *Store) QueryLabs(ctx context.Context, analyte string, since coach.Local
 			coach.LocalDate(collected), lab.String, floatPtr(low), floatPtr(high), time.Time(stamp)
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return rowsResult(out, rows.Err())
 }

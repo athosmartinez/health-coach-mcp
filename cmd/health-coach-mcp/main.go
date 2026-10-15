@@ -28,6 +28,10 @@ type options struct {
 }
 
 func main() {
+	// Subcommands come before the server flags, which they do not accept.
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		os.Exit(authMain(os.Args[2:]))
+	}
 	var o options
 	flag.StringVar(&o.transport, "transport", "stdio", "stdio | http")
 	flag.StringVar(&o.addr, "addr", "127.0.0.1:8787", "listen address for -transport=http")

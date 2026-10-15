@@ -2,9 +2,11 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -20,7 +22,25 @@ var schemaOptions = &jsonschema.ForOptions{
 			Pattern:     coach.DatePattern,
 			Description: "Local calendar day, YYYY-MM-DD",
 		},
+		// Raw JSON and `any` accept any JSON value. Spelled as an object with a
+		// description, not {}: {} serializes as the boolean schema `true`, which
+		// some clients (zod-based, e.g. the MCP Inspector) reject in properties.
+		// Inferred from its Go type, json.RawMessage would be a byte array.
+		reflect.TypeFor[json.RawMessage](): anyJSON(),
+		reflect.TypeFor[any]():             anyJSON(),
 	},
+}
+
+func anyJSON() *jsonschema.Schema { return &jsonschema.Schema{Description: "any JSON value"} }
+
+// OutputSchema infers the schema of a tool result with the same domain
+// schemas as inputs. The SDK's own inference does not know them.
+func OutputSchema[Out any]() (*jsonschema.Schema, error) {
+	s, err := jsonschema.For[Out](schemaOptions)
+	if err != nil {
+		return nil, fmt.Errorf("infer output schema: %w", err)
+	}
+	return s, nil
 }
 
 // InputSchema infers the JSON schema of In and restricts the named top-level
@@ -45,7 +65,38 @@ func InputSchema[In any](enums map[string][]string) (*jsonschema.Schema, error) 
 			return nil, fmt.Errorf("enum for %q: %w", prop, err)
 		}
 	}
+	relaxOptional(s)
 	return s, nil
+}
+
+// relaxOptional lets every optional property be null, and optional strings
+// (plain, enum or patterned) also "" (LLM clients often send those for "not
+// set"). Numbers, booleans and objects accept null but not "". Handlers treat
+// both as omitted: Go decodes them to the zero value, and pointer fields where
+// "" would mean something map it to nil. Required properties stay strict.
+func relaxOptional(obj *jsonschema.Schema) {
+	for name, ps := range obj.Properties {
+		if slices.Contains(obj.Required, name) || ps == nil {
+			continue
+		}
+		if ps.Type != "" {
+			ps.Types, ps.Type = []string{"null", ps.Type}, ""
+		}
+		isString := slices.Contains(ps.Types, "string")
+		if ps.Enum != nil {
+			for _, extra := range []any{nil, ""} {
+				if (extra == nil || isString) && !slices.Contains(ps.Enum, extra) {
+					ps.Enum = append(ps.Enum, extra)
+				}
+			}
+		}
+		if isString && strings.HasPrefix(ps.Pattern, "^") && strings.HasSuffix(ps.Pattern, "$") {
+			ps.Pattern = "^(?:" + ps.Pattern[1:len(ps.Pattern)-1] + ")?$"
+		}
+		if slices.Contains(ps.Types, "object") {
+			relaxOptional(ps)
+		}
+	}
 }
 
 func applyEnum(ps *jsonschema.Schema, values []string) error {

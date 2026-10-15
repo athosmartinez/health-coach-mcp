@@ -5,18 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/store"
 	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 	"github.com/athosmartinez/health-coach-mcp/internal/version"
 )
@@ -145,7 +149,9 @@ func leakTool(_ context.Context, _ *mcp.CallToolRequest, in leakIn) (map[string]
 	case "tool_error":
 		return nil, coach.ToolError{Code: coach.CodeAuthExpired, Message: sentinel, Hint: sentinel}
 	case "raw_error":
-		return nil, errors.New(sentinel)
+		return nil, fmt.Errorf("wrapped: %w", errors.New(sentinel))
+	case "panic":
+		panic(sentinel)
 	}
 	return map[string]string{"value": sentinel}, nil
 }
@@ -169,7 +175,8 @@ func TestToolCallLogShapeAndNoLeaks(t *testing.T) {
 		{map[string]any{"mode": "ok", "probe": sentinel}, false, ""},
 		{map[string]any{"mode": "tool_error", "probe": sentinel}, true, "auth_expired"},
 		{map[string]any{"mode": "raw_error"}, true, "internal_error"},
-		{map[string]any{"mode": "ok", "unexpected": sentinel}, true, "sdk_error"},
+		{map[string]any{"mode": "panic"}, true, "internal_error"},
+		{map[string]any{"mode": "ok", "unexpected": sentinel}, true, "invalid_input"}, // SDK schema error, mapped
 	}
 	for _, c := range cases {
 		if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "leak", Arguments: c.args}); err != nil {
@@ -181,10 +188,24 @@ func TestToolCallLogShapeAndNoLeaks(t *testing.T) {
 	}
 
 	var calls []map[string]any
+	faults := map[string]map[string]any{}
 	for _, rec := range logs.records(t) {
-		if rec["msg"] == "tool_call" {
+		switch rec["msg"] {
+		case "tool_call":
 			calls = append(calls, rec)
+		case "tool_internal_error", "tool_panic":
+			faults[rec["msg"].(string)] = rec
 		}
+	}
+	// Internal faults are logged with where they happened, never what they said.
+	if f := faults["tool_internal_error"]; f == nil || f["tool"] != "leak" || f["error_types"] != "*fmt.wrapError > *errors.errorString" {
+		t.Errorf("internal error log = %v", f)
+	}
+	if f := faults["tool_panic"]; f == nil || f["panic_type"] != "string" || !strings.Contains(fmt.Sprint(f["stack"]), "leakTool") {
+		t.Errorf("panic log = %v", f)
+	}
+	if len(faults) != 2 {
+		t.Errorf("only internal faults are logged as errors: %v", faults)
 	}
 	if len(calls) != len(cases) {
 		t.Fatalf("got %d tool_call records, want %d (tools/list must not log)", len(calls), len(cases))
@@ -221,5 +242,100 @@ func TestFailureCode(t *testing.T) {
 	}
 	if got := failureCode(context.Background(), errors.New("boom")); got != "protocol_error" {
 		t.Errorf("other → %q", got)
+	}
+}
+
+func toolNames(t *testing.T, cs *mcp.ClientSession) []string {
+	t.Helper()
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	return slices.Sorted(slices.Values(names))
+}
+
+func TestMemoryToolsNeedAStore(t *testing.T) {
+	if got := toolNames(t, connect(t, newServer(t, testDeps()))); !slices.Equal(got, []string{"server_info"}) {
+		t.Errorf("without a store: %v, want only server_info", got)
+	}
+
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	deps := testDeps()
+	deps.Store = st
+	got := toolNames(t, connect(t, newServer(t, deps)))
+	want := slices.Sorted(slices.Values([]string{
+		"server_info", "profile_get", "profile_update", "targets_set", "health_item_upsert", "health_items_list",
+		"labs_record", "labs_query", "preference_set", "preferences_get", "note_add", "notes_search",
+	}))
+	if !slices.Equal(got, want) {
+		t.Errorf("with a store: %v, want %v", got, want)
+	}
+}
+
+func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	deps := testDeps()
+	deps.Store = st
+	cs := connect(t, newServer(t, deps))
+
+	cases := []map[string]any{
+		{"name": "targets_set", "args": map[string]any{"kcal": 2000}},                                    // missing required field
+		{"name": "note_add", "args": map[string]any{"kind": "rant", "text": "x"}},                        // enum
+		{"name": "targets_set", "args": map[string]any{"effective_from": "2026-02-30", "kcal": 1}},       // decode
+		{"name": "preference_set", "args": map[string]any{"key": strings.Repeat("k", 5000), "value": 1}}, // store
+	}
+	for _, c := range cases {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c["name"].(string), Arguments: c["args"]})
+		if err != nil {
+			t.Fatalf("%v: %v", c, err)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		var te coach.ToolError
+		if !res.IsError || json.Unmarshal([]byte(text), &te) != nil || te.Code != coach.CodeInvalidInput || te.Hint == "" {
+			t.Errorf("%s: %s, want the invalid_input JSON contract", c["name"], text)
+		}
+		if len(te.Message) > maxEchoedError+len("…") || !utf8.ValidString(te.Message) {
+			t.Errorf("%s: message not bounded or split a rune (%d bytes)", c["name"], len(te.Message))
+		}
+	}
+
+	// An SDK error quoting a long accented argument is cut, at a rune boundary.
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "note_add",
+		Arguments: map[string]any{"kind": strings.Repeat("é", 3000), "text": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var te coach.ToolError
+	if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &te); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(te.Message, "…") || len(te.Message) > maxEchoedError+len("…") || !utf8.ValidString(te.Message) ||
+		te.Hint != "check the tool's input schema and retry" {
+		t.Errorf("long SDK error = %d bytes, %+v", len(te.Message), te)
+	}
+}
+
+func TestCapEchoedKeepsRunesWhole(t *testing.T) {
+	for _, prefix := range []string{"", "a"} { // both parities of the cut
+		msg := prefix + strings.Repeat("é", maxEchoedError)
+		got := capEchoed(msg)
+		if !utf8.ValidString(got) || !strings.HasSuffix(got, "…") || len(got) > maxEchoedError+len("…") {
+			t.Errorf("prefix %q: capEchoed = %d bytes, valid=%v", prefix, len(got), utf8.ValidString(got))
+		}
+	}
+	if got := capEchoed("short"); got != "short" {
+		t.Errorf("short message changed: %q", got)
 	}
 }

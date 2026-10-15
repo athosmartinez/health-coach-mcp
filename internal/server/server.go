@@ -56,9 +56,13 @@ func New(deps Deps) (*mcp.Server, error) {
 		return nil, err
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: Name, Version: version.Version}, nil)
-	s.AddReceivingMiddleware(logToolCalls(deps.Logger, deps.Now))
+	// Applied right to left: the contract fixes errors before logging sees their code.
+	s.AddReceivingMiddleware(logToolCalls(deps.Logger, deps.Now), toolErrorContract())
 
 	registerServerInfo(s)
+	if deps.Store != nil {
+		tools.RegisterMemory(s, tools.MemoryDeps{Store: deps.Store, Now: deps.Now, Loc: deps.Cfg.TimeZone})
+	}
 
 	return s, nil
 }

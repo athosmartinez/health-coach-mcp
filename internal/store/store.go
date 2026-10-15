@@ -283,7 +283,7 @@ var ErrNotFound error = coach.ToolError{Code: coach.CodeNoData, Message: "nothin
 // invalid builds the error a tool shows the model for a rejected value. The
 // message names fields and allowed values, never stored health values.
 func invalid(format string, args ...any) error {
-	return coach.ToolError{Code: coach.CodeInvalidInput, Message: fmt.Sprintf(format, args...)}
+	return coach.ToolError{Code: coach.CodeInvalidInput, Message: fmt.Sprintf(format, args...), Hint: "fix the value named in the message and retry"}
 }
 
 // wrapErr prefixes err with the operation, keeping it matchable with errors.Is/As.

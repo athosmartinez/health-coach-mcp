@@ -18,9 +18,11 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - `internal/coach/` — shared domain: `LocalDate` (validated on decode; DST-safe `Bounds`; sleep → day it
   ends), `Envelope[T]` + `Coverage`/`ConfidenceLevel`, `ToolError` codes, `WireError`, `ErrorResult`.
 - `internal/server/` — `Deps` + `New(Deps) (*mcp.Server, error)` (one `registerX` line per feature),
-  tool-call logging middleware (name/duration/outcome only), HTTP bind guard, bearer auth, `NewHTTPServer`.
-- `internal/tools/` — tool implementations; `Register` (the only way to add a tool) and
-  `MustInputSchema` (enums, date pattern).
+  tool-call logging middleware (name/duration/outcome only; it hands the logger to tools via
+  `tools.WithLogger`), HTTP bind guard, bearer auth, `NewHTTPServer`.
+- `internal/tools/` — tool implementations; `Register` (the only way to add a tool; infers input and
+  output schemas with the domain schemas) and `MustInputSchema` (enums, date pattern). `memory.go`:
+  the 11 coach memory tools (CAPABILITY §4.2), registered by `server.New` when `Deps.Store` is set.
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
@@ -41,12 +43,22 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - **Register tools with `tools.Register`, never `mcp.AddTool`.** Handlers return `(Out, error)`; a
   `coach.ToolError` reaches the client as JSON `{code,message,hint}` text (never `StructuredContent`),
   any other error or panic becomes `internal_error`. `ToolError` messages must not contain health values.
+  Internal errors are logged with the tool name and the error's type chain, panics with the panic type and
+  stack — never an error message or panic value, which may quote health data.
 - **Schema changes are new migration files**, never edits to an applied one. Notes search quotes
   every word as an FTS5 phrase; user text is never FTS syntax.
+- **No boolean JSON schemas in tool properties.** `{}` serializes as `true`, which zod-based clients
+  (the MCP Inspector) reject; "any JSON" is `tools.anyJSON()`. A test walks every tool schema.
 - **Dates in tool inputs are `coach.LocalDate`**; `Bounds`/`AddDays` return errors, never panic.
 - **Enums** in tool inputs come from `tools.MustInputSchema`; the `jsonschema` tag is description only.
-- **Medical guardrail.** Tool descriptions and outputs must not diagnose or prescribe medication;
-  flag out-of-range values and point to a doctor.
+- **Medical guardrail.** Tool descriptions and outputs must not diagnose or suggest starting,
+  stopping or dosing any medication or supplement; flag out-of-range values (a value without a range is
+  `no_reference`, never "normal") and point to a doctor. The lab's own mark wins over the computed range
+  (`store.LabValue.Assess`: `flagged`, and `urgent` for critical marks). The texts live in `tools/memory.go`
+  (`medicalHint`, `criticalHint`, `unitHint`, `noAdvice`, `dataNotice`) and travel in the outputs; tests pin
+  literal phrases of each. Every output that returns stored free text carries `notice: dataNotice`.
+- **Annotations:** a tool that can replace or erase stored data is `DestructiveHint: true`; every tool
+  is `OpenWorldHint: false` (local store only).
 - Code reused from `ghealth` (Google-Health-API/google-health-cli, Apache-2.0) is copied with
   its license header and noted in `NOTICE`; its module path (`ghealth`) is not importable.
 - Every tool gets an in-memory transport test (`mcp.NewInMemoryTransports`).

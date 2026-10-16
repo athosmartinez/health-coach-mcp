@@ -27,9 +27,16 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
   `daily_metrics` cache (closed key list, `algo_version` mismatch = miss).
+- `internal/googlehealth/auth/` — OAuth Desktop sign-in (`Login`: loopback on `127.0.0.1:0`, PKCE,
+  `access_type=offline` + `prompt=consent`), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
+  `TokenSource` (renews and saves, keeps the old refresh token when Google omits it, reloads the file when
+  another process signs in and lets that login win over a renewal in flight; `invalid_grant` → `auth_expired`,
+  408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
+  (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
+  `auth login|status` subcommands, dispatched before the server flags.
 - `internal/version/` — version injected via `-ldflags`.
-- Planned (see `plans/health-coach-mcp-mvp.md`): `internal/googlehealth/`, `internal/metrics/`,
-  `internal/healthdata/`.
+- Planned (see `plans/health-coach-mcp-mvp.md`): the `internal/googlehealth/` API client,
+  `internal/metrics/`, `internal/healthdata/`.
 
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,
@@ -38,6 +45,8 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - **stdout is the JSON-RPC channel in stdio mode.** Log only via `slog` to stderr; never `fmt.Print`.
 - **No health data or secrets in git.** OAuth client JSON, tokens, `*.db` and exports stay out
   (see `.gitignore`). Tests use synthetic fixtures only.
+- **Tokens never leave `credentials.json`:** not in logs, errors, `auth status` or tool output. Decode errors
+  for the client or credentials file name the path only (the JSON error could quote a secret).
 - **HTTP beyond loopback requires `HCM_HTTP_TOKEN`** (bearer auth, ≥32 chars); startup fails otherwise.
   Without `-tls-cert/-tls-key` it is plain HTTP: use a TLS proxy or private tunnel (Tailscale) on a LAN.
 - **Register tools with `tools.Register`, never `mcp.AddTool`.** Handlers return `(Out, error)`; a
@@ -65,4 +74,4 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 
 ## Stack
 Go 1.27 · `github.com/modelcontextprotocol/go-sdk` · `modernc.org/sqlite` (pure Go, keeps
-cross-compiling cgo-free) · planned: `golang.org/x/oauth2`.
+cross-compiling cgo-free) · `golang.org/x/oauth2` (core only, not `oauth2/google`, which pulls the GCE metadata client).

@@ -113,6 +113,55 @@ func TestZScoreConstantBaseline(t *testing.T) {
 	if z := ZScore(f(60), b); z != nil {
 		t.Errorf("z against a flat baseline = %v (sd %g), want nil", *z, b.SD)
 	}
+	if z := ZScore(f(60), Stats{Mean: 60, SD: 0, N: 10}); z != nil {
+		t.Errorf("z with sd exactly 0 = %v, want nil", *z)
+	}
+	// A small but real spread still gives a z-score.
+	if z := ZScore(f(60.001), Stats{Mean: 60, SD: 1e-3, N: 10}); !near(z, 1) {
+		t.Errorf("z with sd 1e-3 = %v, want 1", show(z))
+	}
+	for name, b := range map[string]Stats{
+		"NaN sd":   {Mean: 60, SD: math.NaN(), N: 10},
+		"Inf mean": {Mean: math.Inf(1), SD: 2, N: 10},
+	} {
+		if z := ZScore(f(60), b); z != nil {
+			t.Errorf("%s: z = %v, want nil", name, *z)
+		}
+	}
+	if z := ZScore(f(math.NaN()), Stats{Mean: 60, SD: 2, N: 10}); z != nil {
+		t.Errorf("z of NaN = %v, want nil", *z)
+	}
+}
+
+func TestBaselineEndToEnd(t *testing.T) {
+	// Exactly 7 nights present in a 28-day window across a month boundary.
+	before := coach.LocalDate("2026-11-03")
+	var s []Point
+	for i, v := range []float64{50, 52, 54, 56, 58, 60, 62} {
+		d, _ := before.AddDays(-4 * (i + 1))
+		s = append(s, Point{d, f(v)})
+	}
+	b, err := Baseline(s, before, 28)
+	if err != nil || b.N != 7 || b.Mean != 56 {
+		t.Fatalf("Baseline = %+v, %v", b, err)
+	}
+	if z := ZScore(f(56+b.SD), b); !near(z, 1) {
+		t.Errorf("z one sd above = %v", show(z))
+	}
+	// A 1-day window is just the day before (2026-10-30, the first value).
+	if b, err := Baseline(s, "2026-10-31", 1); err != nil || b.N != 1 || b.Mean != 50 {
+		t.Errorf("1-day window = %+v, %v", b, err)
+	}
+}
+
+func TestBaselineIgnoresBadRowsOutsideTheWindow(t *testing.T) {
+	s := []Point{
+		{day(t, -200), f(math.NaN())}, {day(t, -200), f(1)}, // corrupt, but long ago
+		{day(t, 3), f(60)},
+	}
+	if b, err := Baseline(s, day(t, 9), 28); err != nil || b.N != 1 {
+		t.Errorf("Baseline = %+v, %v; old rows must not fail it", b, err)
+	}
 }
 
 func TestDelta(t *testing.T) {
@@ -122,6 +171,13 @@ func TestDelta(t *testing.T) {
 	}
 	if d := DeltaPct(f(63.8), b); !near(d, 10) {
 		t.Errorf("DeltaPct = %v", show(d))
+	}
+	// A rise is positive even when the mean is negative.
+	if d := DeltaPct(f(-9), Stats{Mean: -10, N: 3}); !near(d, 10) {
+		t.Errorf("DeltaPct with a negative mean = %v", show(d))
+	}
+	if d := Delta(f(math.NaN()), b); d != nil {
+		t.Errorf("Delta of NaN = %v", *d)
 	}
 	for name, d := range map[string]*float64{
 		"missing value":     Delta(nil, b),
@@ -179,6 +235,11 @@ func TestEWMAErrors(t *testing.T) {
 	if got, err := EWMA(nil, 1); err != nil || len(got) != 0 {
 		t.Errorf("empty series = %v, %v", got, err)
 	}
+	// alpha 1 keeps only the newest value: the series comes back unchanged.
+	got, err := EWMA([]Point{{day(t, 0), f(3)}, {day(t, 1), f(7)}}, 1)
+	if err != nil || *got[0].Value != 3 || *got[1].Value != 7 {
+		t.Errorf("alpha 1 = %v, %v", got, err)
+	}
 }
 
 func TestSlopePerWeekUsesDates(t *testing.T) {
@@ -211,11 +272,20 @@ func TestTrend(t *testing.T) {
 		{f(70.2), f(70.0), 0.3, TrendFlat},
 		{f(70.0), f(70.0), 0, TrendFlat}, // no change is flat even with no threshold
 		{f(70.1), f(70.0), 0, TrendUp},
+		{f(1e6 + 0.3), f(1e6), 0.3, TrendUp}, // the rounding allowance scales with magnitude
+		{f(1e6 + 0.2), f(1e6), 0.3, TrendFlat},
 		{nil, f(70), 0.3, TrendUnknown},
 		{f(70), nil, 0.3, TrendUnknown},
+		{f(math.NaN()), f(70), 0.3, TrendUnknown},
+		{f(70), f(math.Inf(1)), 0.3, TrendUnknown},
 	} {
-		if got := Trend(tc.this, tc.prev, tc.min); got != tc.want {
-			t.Errorf("Trend(%v, %v, %v) = %s, want %s", show(tc.this), show(tc.prev), tc.min, got, tc.want)
+		if got, err := Trend(tc.this, tc.prev, tc.min); err != nil || got != tc.want {
+			t.Errorf("Trend(%v, %v, %v) = %s, %v; want %s", show(tc.this), show(tc.prev), tc.min, got, err, tc.want)
+		}
+	}
+	for _, bad := range []float64{-0.3, math.NaN(), math.Inf(1)} {
+		if _, err := Trend(f(1), f(0), bad); err == nil {
+			t.Errorf("threshold %v accepted", bad)
 		}
 	}
 }
@@ -229,6 +299,10 @@ func TestSleepOnsetConsistency(t *testing.T) {
 		"wide across midnight": {[]int{22 * 60, 2 * 60}, 120},
 		"same side":            {[]int{23 * 60, 23*60 + 20, 23*60 + 40}, math.Sqrt(800.0 / 3)},
 		"identical":            {[]int{60, 60, 60}, 0},
+		// Three nights around midnight: mean 23:58:20, deviations −18:20, −3:20, +21:40.
+		"three across midnight": {[]int{23*60 + 40, 23*60 + 55, 20}, math.Sqrt((18.333333333333332*18.333333333333332 + 3.3333333333333335*3.3333333333333335 + 21.666666666666668*21.666666666666668) / 3)},
+		// The first night is not at the mean, so the reference must come from the circle.
+		"first night off the mean": {[]int{2 * 60, 0, 1 * 60}, math.Sqrt(2.0 / 3 * 3600)},
 		// Opposite times have no mean direction; the answer is the same from either side.
 		"opposite": {[]int{0, 12 * 60}, 6 * 60},
 	} {
@@ -278,11 +352,36 @@ func TestAdherenceAtLeast(t *testing.T) {
 		{day(t, 1), f(139.9), f(140), false},
 		{day(t, 2), f(200), f(140), false},
 		{day(t, 3), f(10), f(140), true},
+		{day(t, 4), f(0), f(0), false}, // a zero target is no target: not a free hit
 	}
-	if a := AdherenceAtLeast(days); a.Hit != 2 || a.N != 3 || !near(a.Pct, 200.0/3) {
-		t.Errorf("AdherenceAtLeast = %+v (pct %v)", a, show(a.Pct))
+	if a, err := AdherenceAtLeast(days); err != nil || a.Hit != 2 || a.N != 3 || !near(a.Pct, 200.0/3) {
+		t.Errorf("AdherenceAtLeast = %+v (pct %v), %v", a, show(a.Pct), err)
 	}
-	if a := AdherenceAtLeast(nil); a.N != 0 || a.Pct != nil {
-		t.Errorf("empty = %+v", a)
+	if a, err := AdherenceAtLeast(nil); err != nil || a.N != 0 || a.Pct != nil {
+		t.Errorf("empty = %+v, %v", a, err)
+	}
+}
+
+func TestAdherenceRejectsBadData(t *testing.T) {
+	for name, days := range map[string][]TargetDay{
+		"NaN value":       {{day(t, 0), f(math.NaN()), f(140), false}},
+		"infinite target": {{day(t, 0), f(140), f(math.Inf(1)), false}},
+		"negative value":  {{day(t, 0), f(-5), f(140), false}},
+		"duplicate date":  {{day(t, 0), f(140), f(140), false}, {day(t, 0), f(150), f(140), false}},
+		"invalid date":    {{"2026-02-30", f(140), f(140), false}},
+	} {
+		if _, err := AdherenceAtLeast(days); err == nil {
+			t.Errorf("AdherenceAtLeast accepted %s", name)
+		}
+		if _, err := AdherenceWithin(days, 0.1); err == nil {
+			t.Errorf("AdherenceWithin accepted %s", name)
+		}
+	}
+}
+
+func TestAdherenceWithinZeroTolerance(t *testing.T) {
+	days := []TargetDay{{day(t, 0), f(2000), f(2000), false}, {day(t, 1), f(2001), f(2000), false}}
+	if a, err := AdherenceWithin(days, 0); err != nil || a.Hit != 1 || a.N != 2 {
+		t.Errorf("zero tolerance = %+v, %v", a, err)
 	}
 }

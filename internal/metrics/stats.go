@@ -44,7 +44,9 @@ type Stats struct {
 }
 
 // Baseline summarizes the days [before − days, before − 1]: the day being judged
-// is never part of its own baseline. Missing days are skipped.
+// is never part of its own baseline. Missing days are skipped. Only the points in
+// the window are checked for duplicates and non-finite values, so a bad row
+// outside it does not fail today's baseline.
 func Baseline(series []Point, before coach.LocalDate, days int) (Stats, error) {
 	if days <= 0 {
 		return Stats{}, fmt.Errorf("baseline needs at least 1 day, got %d days", days)
@@ -53,13 +55,22 @@ func Baseline(series []Point, before coach.LocalDate, days int) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
-	pts, err := sorted(series)
+	var window []Point
+	for _, p := range series {
+		if _, err := coach.ParseDate(string(p.Date)); err != nil {
+			return Stats{}, err
+		}
+		if p.Date >= first && p.Date < before {
+			window = append(window, p)
+		}
+	}
+	pts, err := sorted(window)
 	if err != nil {
 		return Stats{}, err
 	}
 	var vals []float64
 	for _, p := range pts {
-		if p.Value != nil && p.Date >= first && p.Date < before {
+		if p.Value != nil {
 			vals = append(vals, *p.Value)
 		}
 	}
@@ -92,31 +103,36 @@ func describe(vals []float64, ddof int) Stats {
 // has fewer than MinBaselineNights values or no spread. A flat baseline of a
 // non-round value leaves a rounding residue instead of an exact 0 sd, so a
 // spread below float precision counts as none.
+//
+// The guard is scaled for values of order 1 or larger (ms, bpm, minutes, kg).
 func ZScore(value *float64, b Stats) *float64 {
-	if value == nil || b.N < MinBaselineNights || b.SD <= relTol*math.Max(1, math.Abs(b.Mean)) {
+	if !finite(value) || !finite(&b.Mean) || !finite(&b.SD) || b.N < MinBaselineNights ||
+		b.SD <= relTol*math.Max(1, math.Abs(b.Mean)) {
 		return nil
 	}
 	z := (*value - b.Mean) / b.SD
 	return &z
 }
 
-// Delta is value − mean, or nil when the value is missing or the baseline empty.
+// Delta is value − mean, or nil when the value is missing or not finite or the
+// baseline is empty. A short baseline still gives a delta: callers that judge it
+// (AssessReadiness) pass the baseline size along.
 func Delta(value *float64, b Stats) *float64 {
-	if value == nil || b.N == 0 {
+	if !finite(value) || !finite(&b.Mean) || b.N == 0 {
 		return nil
 	}
 	d := *value - b.Mean
 	return &d
 }
 
-// DeltaPct is the change from the mean in percent, or nil when Delta is nil or
-// the mean is 0.
+// DeltaPct is the change from the mean in percent of |mean| (so a rise is
+// positive whatever the sign), or nil when Delta is nil or the mean is 0.
 func DeltaPct(value *float64, b Stats) *float64 {
 	d := Delta(value, b)
 	if d == nil || b.Mean == 0 {
 		return nil
 	}
-	pct := *d / b.Mean * 100
+	pct := *d / math.Abs(b.Mean) * 100
 	return &pct
 }
 
@@ -189,21 +205,24 @@ const (
 )
 
 // Trend is up or down when this − prev reaches minChange (inclusive, within float
-// rounding) and is not zero, flat otherwise, and unknown when either is missing.
-func Trend(this, prev *float64, minChange float64) TrendDirection {
-	if this == nil || prev == nil {
-		return TrendUnknown
+// rounding) and is not zero, flat otherwise, and unknown when either value is
+// missing or not finite. minChange must be a finite number ≥ 0.
+func Trend(this, prev *float64, minChange float64) (TrendDirection, error) {
+	if !(minChange >= 0) || math.IsInf(minChange, 0) {
+		return TrendUnknown, fmt.Errorf("trend threshold must be a finite number ≥ 0, got %v", minChange)
+	}
+	if !finite(this) || !finite(prev) {
+		return TrendUnknown, nil
 	}
 	d := *this - *prev
 	tol := relTol * math.Max(1, math.Max(math.Abs(*this), math.Abs(*prev)))
-	need := math.Abs(minChange)
 	switch {
-	case d > tol && d >= need-tol:
-		return TrendUp
-	case d < -tol && d <= -need+tol:
-		return TrendDown
+	case d > tol && d >= minChange-tol:
+		return TrendUp, nil
+	case d < -tol && d <= -minChange+tol:
+		return TrendDown, nil
 	default:
-		return TrendFlat
+		return TrendFlat, nil
 	}
 }
 
@@ -215,9 +234,10 @@ func Trend(this, prev *float64, minChange float64) TrendDirection {
 func SleepOnsetConsistency(startMinutes []int) (*float64, error) {
 	const day = 24 * 60
 	var sin, cos float64
-	for _, m := range startMinutes {
+	for i, m := range startMinutes {
 		if m < 0 || m >= day {
-			return nil, fmt.Errorf("sleep start %d is not a minute of the day (0–%d)", m, day-1)
+			// The index, not the value: errors never carry health data.
+			return nil, fmt.Errorf("sleep start #%d is not a minute of the day (0–%d)", i, day-1)
 		}
 		a := 2 * math.Pi * float64(m) / day
 		sin, cos = sin+math.Sin(a), cos+math.Cos(a)
@@ -247,7 +267,8 @@ func SleepOnsetConsistency(startMinutes []int) (*float64, error) {
 }
 
 // TargetDay is one day of a value against the target in force that day (targets
-// are versioned, so they can differ between days). Partial days are skipped.
+// are versioned, so they can differ between days). Partial days, missing values
+// and days without a positive target (none in force) are skipped.
 type TargetDay struct {
 	Date          coach.LocalDate
 	Value, Target *float64
@@ -263,35 +284,46 @@ type Adherence struct {
 }
 
 // AdherenceWithin counts days within ±tolerance of the target (0.10 = ±10%),
-// boundaries included. Days with a target ≤ 0 are skipped.
+// boundaries included.
 func AdherenceWithin(days []TargetDay, tolerance float64) (Adherence, error) {
 	if !(tolerance >= 0 && tolerance < 1) {
 		return Adherence{}, fmt.Errorf("tolerance must be in [0, 1), got %v", tolerance)
 	}
-	return adherence(days, func(v, t float64) (bool, bool) {
-		return t > 0, math.Abs(v-t) <= tolerance*t+relTol*t
-	}), nil
+	return adherence(days, func(v, t float64) bool { return math.Abs(v-t) <= tolerance*t+relTol*t })
 }
 
 // AdherenceAtLeast counts days at or above the target.
-func AdherenceAtLeast(days []TargetDay) Adherence {
-	return adherence(days, func(v, t float64) (bool, bool) {
-		return true, v >= t-relTol*math.Max(1, math.Abs(t))
-	})
+func AdherenceAtLeast(days []TargetDay) (Adherence, error) {
+	return adherence(days, func(v, t float64) bool { return v >= t-relTol*t })
 }
 
-func adherence(days []TargetDay, judge func(v, t float64) (eligible, hit bool)) Adherence {
+// adherence rejects data that would skew the percentage instead of being skipped:
+// an invalid or repeated date, or a value or target that is not a finite number,
+// or a negative value.
+func adherence(days []TargetDay, hit func(v, t float64) bool) (Adherence, error) {
+	seen := make(map[coach.LocalDate]bool, len(days))
 	var a Adherence
 	for _, d := range days {
-		if d.Partial || d.Value == nil || d.Target == nil {
-			continue
+		if _, err := coach.ParseDate(string(d.Date)); err != nil {
+			return Adherence{}, err
 		}
-		eligible, hit := judge(*d.Value, *d.Target)
-		if !eligible {
+		if seen[d.Date] {
+			return Adherence{}, fmt.Errorf("date %s appears twice", d.Date)
+		}
+		seen[d.Date] = true
+		for _, v := range []*float64{d.Value, d.Target} {
+			if v != nil && !finite(v) {
+				return Adherence{}, fmt.Errorf("value on %s is not a finite number", d.Date)
+			}
+		}
+		if d.Value != nil && *d.Value < 0 {
+			return Adherence{}, fmt.Errorf("value on %s is negative", d.Date)
+		}
+		if d.Partial || d.Value == nil || d.Target == nil || *d.Target <= 0 {
 			continue
 		}
 		a.N++
-		if hit {
+		if hit(*d.Value, *d.Target) {
 			a.Hit++
 		}
 	}
@@ -299,7 +331,7 @@ func adherence(days []TargetDay, judge func(v, t float64) (eligible, hit bool)) 
 		pct := float64(a.Hit) / float64(a.N) * 100
 		a.Pct = &pct
 	}
-	return a
+	return a, nil
 }
 
 // sorted returns a date-ordered copy of series, rejecting invalid dates, a date
@@ -309,7 +341,7 @@ func sorted(series []Point) ([]Point, error) {
 		if _, err := coach.ParseDate(string(p.Date)); err != nil {
 			return nil, err
 		}
-		if p.Value != nil && (math.IsNaN(*p.Value) || math.IsInf(*p.Value, 0)) {
+		if p.Value != nil && !finite(p.Value) {
 			return nil, fmt.Errorf("value on %s is not a finite number", p.Date)
 		}
 	}
@@ -329,4 +361,9 @@ func sorted(series []Point) ([]Point, error) {
 func dayNumber(d coach.LocalDate) int {
 	t, _ := time.Parse(time.DateOnly, string(d))
 	return int(t.Unix() / 86400)
+}
+
+// finite reports whether p is present and a finite number.
+func finite(p *float64) bool {
+	return p != nil && !math.IsNaN(*p) && !math.IsInf(*p, 0)
 }

@@ -34,9 +34,15 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
   (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
   `auth login|status` subcommands, dispatched before the server flags.
+- `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped): `Baseline` (window
+  `[before−days, before−1]`, sample sd), `ZScore` (nil below 7 nights or with no spread), `Delta`/`DeltaPct`, `EWMA`
+  (over logged values; a missing day stays nil), `SlopePerWeek` (x = real day gaps), `Trend`, `AdherenceWithin`/
+  `AdherenceAtLeast` (per-day versioned target, partial days skipped, nil pct with no eligible day),
+  `SleepOnsetConsistency` (circular, population sd), `AssessReadiness` (lines in `Thresholds`, reason codes) and
+  quality flags. `AlgoVersion` keys the `daily_metrics` cache: bump it when a stored value's math changes.
 - `internal/version/` — version injected via `-ldflags`.
 - Planned (see `plans/health-coach-mcp-mvp.md`): the `internal/googlehealth/` API client,
-  `internal/metrics/`, `internal/healthdata/`.
+  `internal/healthdata/`.
 
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -28,10 +29,11 @@ type TokenSource struct {
 	conf *oauth2.Config
 	ctx  context.Context // carries the HTTP client used for renewals
 	log  *slog.Logger
+	now  func() time.Time
 
 	mu    sync.Mutex
 	creds Credentials
-	file  os.FileInfo // of the file creds were read from or last written to; nil = not loaded
+	file  os.FileInfo // version of the file creds were read from or written to; nil = not loaded
 }
 
 // NewTokenSource reads credentials lazily, on the first Token call. ctx is
@@ -44,7 +46,7 @@ func NewTokenSource(ctx context.Context, path string, conf *oauth2.Config, log *
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &TokenSource{path: path, conf: conf, ctx: ctx, log: log}
+	return &TokenSource{path: path, conf: conf, ctx: ctx, log: log, now: time.Now}
 }
 
 // Token returns a valid access token. Errors are coach.ToolErrors: auth_expired
@@ -61,12 +63,18 @@ func (s *TokenSource) Token() (*oauth2.Token, error) {
 		return tok, nil
 	}
 	tok.Expiry = time.Unix(1, 0) // a zero expiry means "never expires" to oauth2; force the renewal
-	fresh, err := s.conf.TokenSource(s.ctx, tok).Token()
+	// The deadline holds even when the caller's HTTP client has no timeout.
+	ctx, cancel := context.WithTimeout(s.ctx, refreshTimeout)
+	defer cancel()
+	fresh, err := s.conf.TokenSource(ctx, tok).Token()
 	if err != nil {
 		return nil, renewalError(err)
 	}
 	next := s.creds
 	next.AccessToken, next.Expiry = fresh.AccessToken, fresh.Expiry
+	if next.Expiry.IsZero() {
+		next.Expiry = s.now().Add(assumedTokenLifetime)
+	}
 	if fresh.TokenType != "" {
 		next.TokenType = fresh.TokenType
 	}
@@ -74,14 +82,25 @@ func (s *TokenSource) Token() (*oauth2.Token, error) {
 	if fresh.RefreshToken != "" {
 		next.RefreshToken = fresh.RefreshToken
 	}
+
+	// auth login (another process) may have replaced the file during the
+	// renewal. The new login wins: saving now would bring back the old sign-in.
+	if s.replacedOnDisk() {
+		if err := s.reload(); err != nil {
+			return nil, err
+		}
+		if tok := s.creds.token(); tok.Valid() {
+			return tok, nil
+		}
+		return next.token(), nil // valid for this call; the new file is left as written
+	}
 	s.creds = next
 	s.save()
 	return next.token(), nil
 }
 
-// reload reads credentials.json when it is not loaded yet or was replaced
-// (another process ran auth login). The file is opened once, so the stat and
-// the content always describe the same version.
+// reload reads credentials.json when it is not loaded yet or was replaced.
+// The file is opened once, so the stat and the content describe the same version.
 func (s *TokenSource) reload() error {
 	f, err := os.Open(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -109,19 +128,22 @@ func (s *TokenSource) reload() error {
 	return nil
 }
 
+// replacedOnDisk reports whether the file is no longer the version s.creds
+// came from (a stat failure counts as replaced, so reload decides).
+func (s *TokenSource) replacedOnDisk() bool {
+	fi, err := os.Stat(s.path)
+	return err != nil || s.file == nil || !sameVersion(s.file, fi)
+}
+
 // save persists a renewal. A failure keeps the token in memory (the file still
 // holds a valid refresh token), so it is logged rather than failing the call.
 func (s *TokenSource) save() {
-	if err := WriteCredentials(s.path, s.creds); err != nil {
-		s.log.Warn("could not save the renewed Google token; it is kept in memory", "err", err)
+	fi, err := WriteCredentials(s.path, s.creds)
+	if err != nil {
+		s.log.Warn("could not save the renewed Google token; it is kept in memory", "path", s.path, "err", err)
 		return
 	}
-	if fi, err := os.Stat(s.path); err == nil {
-		s.file = fi
-	} else {
-		// The next call re-reads the file, which holds the renewal just written.
-		s.file = nil
-	}
+	s.file = fi
 }
 
 // sameVersion reports whether a and b describe the same credentials file. An
@@ -131,35 +153,80 @@ func sameVersion(a, b os.FileInfo) bool {
 	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
-// renewalError maps a failed renewal to a stable code. The token endpoint's
-// response body never reaches the message.
-func renewalError(err error) error {
-	var re *oauth2.RetrieveError
-	if errors.As(err, &re) {
-		switch {
-		case re.ErrorCode == "invalid_grant":
-			return fmt.Errorf("%w: %w", coach.ToolError{
-				Code:    coach.CodeAuthExpired,
-				Message: "the Google sign-in expired or was revoked",
-				Hint:    "run " + LoginCommand + " (in Testing mode Google expires it about 7 days after sign-in)",
-			}, err)
-		case re.Response != nil && re.Response.StatusCode >= 500:
-			return fmt.Errorf("%w: %w", unavailable(), err)
-		default:
-			return fmt.Errorf("%w: %w", coach.ToolError{
-				Code:    coach.CodeAuthExpired,
-				Message: "Google rejected the token renewal",
-				Hint:    "check " + ClientSecretFile + " is the Desktop client used to sign in, then run " + LoginCommand,
-			}, err)
-		}
-	}
-	return fmt.Errorf("%w: %w", unavailable(), err)
+// endpointError stands in for an *oauth2.RetrieveError, whose text quotes the
+// token endpoint's response body. It keeps only the error code and status.
+type endpointError struct {
+	Code   string
+	Status int
 }
 
-func unavailable() coach.ToolError {
-	return coach.ToolError{
-		Code:    coach.CodeUpstreamUnavailable,
-		Message: "Google's token service could not be reached",
-		Hint:    "try again in a few minutes",
+func (e *endpointError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("token endpoint replied HTTP %d", e.Status)
 	}
+	return fmt.Sprintf("token endpoint replied HTTP %d (%s)", e.Status, e.Code)
+}
+
+// redact replaces a RetrieveError in err with an endpointError; other errors
+// (network, timeout) are returned as they are.
+func redact(err error) (error, *endpointError) {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) {
+		return err, nil
+	}
+	ee := &endpointError{Code: safeCode(re.ErrorCode)}
+	if re.Response != nil {
+		ee.Status = re.Response.StatusCode
+	}
+	return ee, ee
+}
+
+// safeCode keeps an OAuth error code only when it looks like one (RFC 6749
+// codes are short ASCII words), so arbitrary response text never gets through.
+func safeCode(code string) string {
+	if len(code) > 64 {
+		return ""
+	}
+	for _, r := range code {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' && r != '.' {
+			return ""
+		}
+	}
+	return code
+}
+
+// renewalError maps a failed renewal to a stable code; the endpoint's
+// response body is dropped (see redact).
+func renewalError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("token renewal cancelled: %w", err)
+	}
+	cause, ee := redact(err)
+	if ee == nil {
+		var ne net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+			return fmt.Errorf("%w: %w", unavailable("Google's token service did not answer in time"), cause)
+		}
+		return fmt.Errorf("%w: %w", unavailable("Google's token service could not be reached"), cause)
+	}
+	switch {
+	case ee.Code == "invalid_grant":
+		return fmt.Errorf("%w: %w", coach.ToolError{
+			Code:    coach.CodeAuthExpired,
+			Message: "the Google sign-in expired or was revoked",
+			Hint:    "run " + LoginCommand + " (in Testing mode Google expires it about 7 days after sign-in)",
+		}, cause)
+	case ee.Status == http.StatusRequestTimeout || ee.Status == http.StatusTooManyRequests || ee.Status >= 500:
+		return fmt.Errorf("%w: %w", unavailable("Google's token service is unavailable ("+ee.Error()+")"), cause)
+	default:
+		return fmt.Errorf("%w: %w", coach.ToolError{
+			Code:    coach.CodeAuthExpired,
+			Message: "Google rejected the token renewal (" + ee.Error() + ")",
+			Hint:    "check " + ClientSecretFile + " is the Desktop client used to sign in, then run " + LoginCommand,
+		}, cause)
+	}
+}
+
+func unavailable(msg string) coach.ToolError {
+	return coach.ToolError{Code: coach.CodeUpstreamUnavailable, Message: msg, Hint: "try again in a few minutes"}
 }

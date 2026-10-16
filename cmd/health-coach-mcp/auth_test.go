@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,9 +55,11 @@ func fakeTokenEndpoint(t *testing.T, scopes []string) oauth2.Endpoint {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "at-cli-synthetic", "refresh_token": "rt-cli-synthetic", "expires_in": 3600, "scope": strings.Join(scopes, " "),
-		})
+		resp := map[string]any{"access_token": "at-cli-synthetic", "refresh_token": "rt-cli-synthetic", "expires_in": 3600}
+		if scopes != nil { // nil: Google omits the scope list
+			resp["scope"] = strings.Join(scopes, " ")
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(srv.Close)
 	return oauth2.Endpoint{AuthURL: "https://accounts.invalid/auth", TokenURL: srv.URL, AuthStyle: oauth2.AuthStyleInParams}
@@ -64,20 +67,27 @@ func fakeTokenEndpoint(t *testing.T, scopes []string) oauth2.Endpoint {
 
 // approve plays the user granting consent in the browser.
 func approve(t *testing.T) func(string) error {
+	return answer(t, url.Values{"code": {"code-synthetic"}})
+}
+
+// answer plays the browser returning query to the loopback redirect. The test
+// waits for the request, so nothing reports after it ends; a failed request is
+// visible through Login's own result.
+func answer(t *testing.T, query url.Values) func(string) error {
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
 	return func(consent string) error {
 		u, err := url.Parse(consent)
 		if err != nil {
 			return err
 		}
 		q := u.Query()
-		go func() {
-			resp, err := http.Get(q.Get("redirect_uri") + "?" + url.Values{"code": {"code-synthetic"}, "state": {q.Get("state")}}.Encode())
-			if err != nil {
-				t.Errorf("redirect: %v", err)
-				return
+		query.Set("state", q.Get("state"))
+		wg.Go(func() {
+			if resp, err := http.Get(q.Get("redirect_uri") + "?" + query.Encode()); err == nil {
+				resp.Body.Close()
 			}
-			resp.Body.Close()
-		}()
+		})
 		return nil
 	}
 }
@@ -152,7 +162,7 @@ func TestAuthStatusEdgeCases(t *testing.T) {
 	}
 	path := filepath.Join(cfg.ConfigDir, auth.CredentialsFile)
 	// A valid access token, shown in the configured zone.
-	if err := auth.WriteCredentials(path, auth.Credentials{
+	if _, err := auth.WriteCredentials(path, auth.Credentials{
 		AccessToken: "at-synthetic", RefreshToken: "rt-synthetic", Expiry: authNow.Add(time.Hour), Scopes: auth.Scopes, LoginAt: authNow,
 	}); err != nil {
 		t.Fatal(err)
@@ -161,7 +171,7 @@ func TestAuthStatusEdgeCases(t *testing.T) {
 		t.Errorf("valid token status:\n%s", r.stdout)
 	}
 	// An expired access token, no login time and no client secret.
-	if err := auth.WriteCredentials(path, auth.Credentials{
+	if _, err := auth.WriteCredentials(path, auth.Credentials{
 		AccessToken: "at-synthetic", RefreshToken: "rt-synthetic", Expiry: authNow.Add(-time.Minute), Scopes: auth.Scopes,
 	}); err != nil {
 		t.Fatal(err)
@@ -190,5 +200,51 @@ func TestAuthCommandErrors(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.ConfigDir, auth.CredentialsFile)); !os.IsNotExist(err) {
 		t.Errorf("a failed login wrote credentials: %v", err)
+	}
+}
+
+func TestAuthLoginWithoutAScopeList(t *testing.T) {
+	cfg := authConfig(t)
+	writeClientSecret(t, cfg)
+	env := authEnv{endpoint: fakeTokenEndpoint(t, nil), open: approve(t)}
+	if r := runAuthTest(t, cfg, env, "login"); r.code != 0 || !strings.Contains(r.stdout, "did not say which scopes") {
+		t.Fatalf("login = %+v", r)
+	}
+	if r := runAuthTest(t, cfg, env, "status"); !strings.Contains(r.stdout, "Scopes:        unknown") || strings.Contains(r.stdout, "of 9 granted") {
+		t.Errorf("status claims scopes it does not know:\n%s", r.stdout)
+	}
+}
+
+func TestAuthLoginConsentDenied(t *testing.T) {
+	cfg := authConfig(t)
+	writeClientSecret(t, cfg)
+	env := authEnv{endpoint: fakeTokenEndpoint(t, auth.Scopes), open: answer(t, url.Values{"error": {"access_denied"}})}
+	r := runAuthTest(t, cfg, env, "login")
+	if r.code != 1 || !strings.Contains(r.stderr, "access_denied") {
+		t.Errorf("login = %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.ConfigDir, auth.CredentialsFile)); !os.IsNotExist(err) {
+		t.Errorf("a denied login wrote credentials: %v", err)
+	}
+}
+
+func TestAuthStatusUnreadableClientSecret(t *testing.T) {
+	cfg := authConfig(t)
+	if _, err := auth.WriteCredentials(filepath.Join(cfg.ConfigDir, auth.CredentialsFile), auth.Credentials{
+		AccessToken: "at-synthetic", RefreshToken: "rt-synthetic", Expiry: authNow.Add(time.Hour), Scopes: auth.Scopes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink loop: the file is there but cannot be read (ELOOP, not ENOENT).
+	loop := filepath.Join(cfg.ConfigDir, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(loop, filepath.Join(cfg.ConfigDir, auth.ClientSecretFile)); err != nil {
+		t.Fatal(err)
+	}
+	r := runAuthTest(t, cfg, authEnv{}, "status")
+	if !strings.Contains(r.stdout, "cannot read client_secret.json") || strings.Contains(r.stdout, "missing client_secret.json") {
+		t.Errorf("status:\n%s", r.stdout)
 	}
 }

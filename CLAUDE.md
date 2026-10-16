@@ -30,7 +30,9 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - `internal/googlehealth/auth/` — OAuth Desktop sign-in (`Login`: loopback on `127.0.0.1:0`, PKCE,
   `access_type=offline` + `prompt=consent`), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
   `TokenSource` (renews and saves, keeps the old refresh token when Google omits it, reloads the file when
-  another process signs in; `invalid_grant` → `auth_expired`). `cmd/health-coach-mcp/auth.go`: the
+  another process signs in and lets that login win over a renewal in flight; `invalid_grant` → `auth_expired`,
+  408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
+  (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
   `auth login|status` subcommands, dispatched before the server flags.
 - `internal/version/` — version injected via `-ldflags`.
 - Planned (see `plans/health-coach-mcp-mvp.md`): the `internal/googlehealth/` API client,

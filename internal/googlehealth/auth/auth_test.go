@@ -89,7 +89,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func saved(t *testing.T, dir string, c Credentials) string {
 	t.Helper()
 	path := filepath.Join(dir, CredentialsFile)
-	if err := WriteCredentials(path, c); err != nil {
+	if _, err := WriteCredentials(path, c); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -197,12 +197,131 @@ func TestWriteCredentials(t *testing.T) {
 func TestNewCredentialsUsesGrantedScopes(t *testing.T) {
 	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
 	tok := (&oauth2.Token{AccessToken: "a", RefreshToken: "r"}).WithExtra(map[string]any{"scope": Scopes[0] + " " + Scopes[2]})
-	c := NewCredentials(tok, Scopes, now)
-	if len(c.Scopes) != 2 || c.Scopes[1] != Scopes[2] || !c.LoginAt.Equal(now) || c.RefreshToken != "r" {
+	tok.Expiry = now.Add(30 * time.Minute)
+	c := NewCredentials(tok, now)
+	if len(c.Scopes) != 2 || c.Scopes[1] != Scopes[2] || !c.LoginAt.Equal(now) || c.RefreshToken != "r" || !c.Expiry.Equal(tok.Expiry) {
 		t.Errorf("credentials = %+v", c)
 	}
-	if c := NewCredentials(&oauth2.Token{AccessToken: "a", RefreshToken: "r"}, Scopes, now); len(c.Scopes) != len(Scopes) {
-		t.Errorf("without a scope list, scopes = %v", c.Scopes)
+	// No scope list: unknown, never assumed granted. No expiry: an hour, never "forever".
+	c = NewCredentials(&oauth2.Token{AccessToken: "a", RefreshToken: "r"}, now)
+	if c.Scopes != nil || !c.Expiry.Equal(now.Add(time.Hour)) {
+		t.Errorf("without scope list and expiry: %+v", c)
+	}
+}
+
+func TestWriteCredentialsTightensExistingModes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "config")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, CredentialsFile)
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := WriteCredentials(path, expired())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, mode := range map[string]fs.FileMode{dir: 0o700, path: 0o600} {
+		if got, _ := os.Stat(p); got.Mode().Perm() != mode {
+			t.Errorf("%s mode = %v, want %v", p, got.Mode().Perm(), mode)
+		}
+	}
+	// The returned version is the file now at path.
+	if now, _ := os.Stat(path); !sameVersion(fi, now) {
+		t.Error("WriteCredentials returned a different version than the one on disk")
+	}
+}
+
+func TestTokenSourceReloadsAnInPlaceEdit(t *testing.T) {
+	g := newFakeGoogle(t)
+	dir := t.TempDir()
+	c := expired()
+	c.Expiry = time.Now().Add(time.Hour)
+	path := saved(t, dir, c)
+	ts := NewTokenSource(context.Background(), path, g.config(), nil)
+	if _, err := ts.Token(); err != nil {
+		t.Fatal(err)
+	}
+	edit := func(access string, mtime time.Time) {
+		t.Helper()
+		c.AccessToken = access
+		data, _ := json.Marshal(c)
+		if err := os.WriteFile(path, data, 0o600); err != nil { // same inode
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Same inode and a different size.
+	edit("at-edited-longer", time.Now().Add(time.Minute))
+	if tok, _ := ts.Token(); tok.AccessToken != "at-edited-longer" {
+		t.Errorf("after an in-place edit, Token = %q", tok.AccessToken)
+	}
+	// Same inode and same size: only the mtime tells.
+	edit("at-edited-LONGER", time.Now().Add(2*time.Minute))
+	if tok, _ := ts.Token(); tok.AccessToken != "at-edited-LONGER" {
+		t.Errorf("after a same-size edit, Token = %q", tok.AccessToken)
+	}
+}
+
+func TestTokenSourceSendsTheRotatedRefreshTokenNextTime(t *testing.T) {
+	g := newFakeGoogle(t)
+	// expires_in 1 is inside oauth2's expiry margin, so every call renews.
+	g.setRespond(func(w http.ResponseWriter, _ url.Values) {
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": "at-new", "refresh_token": "rt-rotated", "expires_in": 1})
+	})
+	ts := NewTokenSource(context.Background(), saved(t, t.TempDir(), expired()), g.config(), nil)
+	for range 2 {
+		if _, err := ts.Token(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g.requests.Load() != 2 || g.lastForm().Get("refresh_token") != "rt-rotated" {
+		t.Errorf("after %d renewals the last one sent %q, want rt-rotated", g.requests.Load(), g.lastForm().Get("refresh_token"))
+	}
+}
+
+func TestTokenSourceAssumesAnHourWithoutExpiresIn(t *testing.T) {
+	g := newFakeGoogle(t)
+	g.setRespond(func(w http.ResponseWriter, _ url.Values) {
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": "at-new"})
+	})
+	path := saved(t, t.TempDir(), expired())
+	if _, err := NewTokenSource(context.Background(), path, g.config(), nil).Token(); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := ReadCredentials(path)
+	if left := time.Until(c.Expiry); left < 55*time.Minute || left > time.Hour {
+		t.Errorf("saved expiry is %v away, want about an hour", left)
+	}
+}
+
+func TestTokenSourceLetsALoginDuringTheRenewalWin(t *testing.T) {
+	g := newFakeGoogle(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, CredentialsFile)
+	relogin := expired()
+	relogin.AccessToken, relogin.RefreshToken, relogin.Expiry = "at-relogin", "rt-relogin", time.Now().Add(time.Hour)
+	relogin.LoginAt = time.Date(2026, 10, 15, 21, 0, 0, 0, time.UTC)
+	g.setRespond(func(w http.ResponseWriter, _ url.Values) {
+		// auth login finishes while the renewal is in flight.
+		if _, err := WriteCredentials(path, relogin); err != nil {
+			t.Error(err)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": "at-renewed", "expires_in": 3600})
+	})
+	saved(t, dir, expired())
+	ts := NewTokenSource(context.Background(), path, g.config(), nil)
+
+	tok, err := ts.Token()
+	if err != nil || tok.AccessToken != "at-relogin" {
+		t.Fatalf("Token = %+v, %v; want the new login's token", tok, err)
+	}
+	c, _ := ReadCredentials(path)
+	if c.RefreshToken != "rt-relogin" || !c.LoginAt.Equal(relogin.LoginAt) {
+		t.Errorf("the renewal overwrote the new login: %+v", c)
 	}
 }
 
@@ -265,21 +384,31 @@ func TestTokenSourceSavesARotatedRefreshToken(t *testing.T) {
 }
 
 func TestTokenSourceRenewalErrors(t *testing.T) {
+	const secretBody = "body-text-that-must-not-leak"
 	cases := []struct {
 		name    string
 		status  int
-		body    map[string]any
+		body    string
 		want    coach.Code
 		wantMsg string
 	}{
-		{"invalid_grant", http.StatusBadRequest, map[string]any{"error": "invalid_grant", "error_description": "Token has been expired or revoked."}, coach.CodeAuthExpired, "expired or was revoked"},
-		{"invalid_client", http.StatusUnauthorized, map[string]any{"error": "invalid_client"}, coach.CodeAuthExpired, "rejected the token renewal"},
-		{"server error", http.StatusServiceUnavailable, map[string]any{"error": "backend_error"}, coach.CodeUpstreamUnavailable, "could not be reached"},
+		{"invalid_grant", http.StatusBadRequest, `{"error": "invalid_grant", "error_description": "` + secretBody + `"}`, coach.CodeAuthExpired, "expired or was revoked"},
+		{"invalid_client", http.StatusUnauthorized, `{"error": "invalid_client", "error_description": "` + secretBody + `"}`, coach.CodeAuthExpired, "rejected the token renewal (token endpoint replied HTTP 401 (invalid_client))"},
+		{"invalid_request", http.StatusBadRequest, `{"error": "invalid_request"}`, coach.CodeAuthExpired, "HTTP 400 (invalid_request)"},
+		{"odd error code", http.StatusBadRequest, `{"error": "<script>` + secretBody + `"}`, coach.CodeAuthExpired, "replied HTTP 400)"},
+		{"rate limited", http.StatusTooManyRequests, `{"error": "rate_limit_exceeded"}`, coach.CodeUpstreamUnavailable, "unavailable (token endpoint replied HTTP 429 (rate_limit_exceeded))"},
+		{"request timeout", http.StatusRequestTimeout, `{}`, coach.CodeUpstreamUnavailable, "HTTP 408"},
+		{"server error", http.StatusServiceUnavailable, `{"error": "backend_error"}`, coach.CodeUpstreamUnavailable, "HTTP 503"},
+		{"html 502", http.StatusBadGateway, `<html>` + secretBody + `</html>`, coach.CodeUpstreamUnavailable, "HTTP 502"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			g := newFakeGoogle(t)
-			g.setRespond(func(w http.ResponseWriter, _ url.Values) { writeJSON(w, c.status, c.body) })
+			g.setRespond(func(w http.ResponseWriter, _ url.Values) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(c.status)
+				_, _ = w.Write([]byte(c.body))
+			})
 			_, err := NewTokenSource(context.Background(), saved(t, t.TempDir(), expired()), g.config(), nil).Token()
 			te := coach.AsToolError(err)
 			if te.Code != c.want || !strings.Contains(te.Message, c.wantMsg) {
@@ -288,8 +417,9 @@ func TestTokenSourceRenewalErrors(t *testing.T) {
 			if c.want == coach.CodeAuthExpired && !strings.Contains(te.Hint, LoginCommand) {
 				t.Errorf("hint %q does not name the login command", te.Hint)
 			}
-			if strings.Contains(te.Message+te.Hint, "rt-synthetic") || strings.Contains(te.Message, "revoked.") {
-				t.Errorf("the message carries a token or the endpoint's body: %+v", te)
+			// The whole error, not just the ToolError, is what a caller may log.
+			if strings.Contains(err.Error(), "rt-synthetic") || strings.Contains(err.Error(), secretBody) {
+				t.Errorf("the error carries a token or the endpoint's body: %v", err)
 			}
 			// A fixed AuthStyle means one request, not a probe and a retry.
 			if n := g.requests.Load(); n != 1 {
@@ -402,5 +532,67 @@ func TestTokenSourceKeepsTheRenewalWhenSavingFails(t *testing.T) {
 	// The unchanged file is not reloaded over the renewal kept in memory.
 	if tok, err := ts.Token(); err != nil || tok.AccessToken != "at-1" || g.requests.Load() != 1 {
 		t.Errorf("second Token = %+v, %v after %d requests", tok, err, g.requests.Load())
+	}
+}
+
+func TestTokenSourceTimeoutAndCancellation(t *testing.T) {
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(release); hang.Close() })
+	conf := &oauth2.Config{ClientID: "c", Endpoint: oauth2.Endpoint{TokenURL: hang.URL, AuthStyle: oauth2.AuthStyleInParams}}
+
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Timeout: 50 * time.Millisecond})
+	_, err := NewTokenSource(ctx, saved(t, t.TempDir(), expired()), conf, nil).Token()
+	if te := coach.AsToolError(err); te.Code != coach.CodeUpstreamUnavailable || !strings.Contains(te.Message, "in time") {
+		t.Errorf("timeout: %+v (%v)", te, err)
+	}
+
+	// A cancelled server context is a shutdown, not an outage at Google.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = NewTokenSource(cancelled, saved(t, t.TempDir(), expired()), conf, nil).Token()
+	if !errors.Is(err, context.Canceled) || toolCode(err) != coach.CodeInternal {
+		t.Errorf("cancelled: err = %v, code %s", err, toolCode(err))
+	}
+}
+
+func TestTokenSourceAfterAFailedSaveANewLoginStillWins(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	g := newFakeGoogle(t)
+	dir := t.TempDir()
+	path := saved(t, dir, expired())
+	ts := NewTokenSource(context.Background(), path, g.config(), nil)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := ts.Token(); err != nil || tok.AccessToken != "at-1" {
+		t.Fatalf("Token = %+v, %v", tok, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	relogin := expired()
+	relogin.AccessToken, relogin.Expiry = "at-relogin", time.Now().Add(time.Hour)
+	saved(t, dir, relogin)
+	if tok, err := ts.Token(); err != nil || tok.AccessToken != "at-relogin" || g.requests.Load() != 1 {
+		t.Errorf("Token = %+v, %v after %d requests; want the new login without a renewal", tok, err, g.requests.Load())
+	}
+}
+
+func TestSafeCode(t *testing.T) {
+	for in, want := range map[string]string{
+		"invalid_grant": "invalid_grant", "rate-limit.v2": "rate-limit.v2", "": "",
+		"<b>x</b>": "", "has space": "", strings.Repeat("a", 65): "",
+	} {
+		if got := safeCode(in); got != want {
+			t.Errorf("safeCode(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

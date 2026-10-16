@@ -14,7 +14,9 @@
 //
 // Adapted from google-health-cli pkg/auth/auth.go (InteractiveLogin). Changes:
 // PKCE on the loopback flow, prompt=consent, stray requests ignored instead of
-// aborting, context timeout, no refresh token treated as a failed login.
+// aborting, context timeout and cancellation, graceful shutdown so the browser
+// gets its page, redacted token endpoint errors, no refresh token treated as a
+// failed login.
 
 package auth
 
@@ -46,6 +48,9 @@ type LoginOptions struct {
 const (
 	defaultLoginTimeout = 5 * time.Minute
 	exchangeTimeout     = 30 * time.Second
+	// shutdownGrace lets the callback finish writing its page before the
+	// listener closes; without it the tab can show a connection reset.
+	shutdownGrace = 2 * time.Second
 )
 
 type callback struct {
@@ -78,16 +83,31 @@ func Login(ctx context.Context, conf *oauth2.Config, opts LoginOptions) (*oauth2
 	state := rand.Text()
 	verifier := oauth2.GenerateVerifier()
 	results := make(chan callback, 1)
-	srv := &http.Server{Handler: callbackHandler(state, results), ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = srv.Serve(ln) }() // returns ErrServerClosed once Close runs
-	defer srv.Close()
+	var once sync.Once
+	deliver := func(r callback) (first bool) {
+		once.Do(func() { results <- r; first = true })
+		return first
+	}
+	srv := &http.Server{Handler: callbackHandler(state, deliver), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+			deliver(callback{err: fmt.Errorf("loopback server stopped: %w", err)})
+		}
+	}()
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if srv.Shutdown(sctx) != nil {
+			_ = srv.Close() // the grace period ran out; drop what is left
+		}
+	}()
 
 	url := c.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"),
 		oauth2.S256ChallengeOption(verifier))
 	fmt.Fprintf(out, "Open this URL in your browser to sign in to Google Health:\n\n  %s\n\nWaiting for the browser (up to %s)...\n", url, timeout)
 	if opts.Open != nil {
 		if err := opts.Open(url); err != nil {
-			fmt.Fprintln(out, "Could not open a browser; open the URL above by hand.")
+			fmt.Fprintf(out, "Could not open a browser (%v); open the URL above by hand.\n", err)
 		}
 	}
 
@@ -101,14 +121,18 @@ func Login(ctx context.Context, conf *oauth2.Config, opts LoginOptions) (*oauth2
 		}
 		code = r.code
 	case <-wait.Done():
-		return nil, fmt.Errorf("no answer from the browser: %w", wait.Err())
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("sign-in cancelled: %w", err)
+		}
+		return nil, fmt.Errorf("no answer from the browser within %s: %w", timeout, wait.Err())
 	}
 
 	exchange, cancelExchange := context.WithTimeout(ctx, exchangeTimeout)
 	defer cancelExchange()
 	tok, err := c.Exchange(exchange, code, oauth2.VerifierOption(verifier))
 	if err != nil {
-		return nil, fmt.Errorf("exchange the authorization code: %w", err)
+		cause, _ := redact(err)
+		return nil, fmt.Errorf("exchange the authorization code: %w", cause)
 	}
 	if tok.RefreshToken == "" {
 		return nil, errors.New("google returned no refresh token; remove the app at https://myaccount.google.com/permissions and sign in again")
@@ -116,11 +140,10 @@ func Login(ctx context.Context, conf *oauth2.Config, opts LoginOptions) (*oauth2
 	return tok, nil
 }
 
-// callbackHandler accepts the first redirect that carries the right state.
-// Other requests (a favicon fetch, a stale tab, another local process) get an
-// error page and do not end the login.
-func callbackHandler(state string, results chan<- callback) http.Handler {
-	var once sync.Once
+// callbackHandler hands the first redirect that carries the right state to
+// deliver. Other requests (a favicon fetch, a stale tab, another local
+// process) get an error page and do not end the login.
+func callbackHandler(state string, deliver func(callback) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -140,13 +163,15 @@ func callbackHandler(state string, results chan<- callback) http.Handler {
 		default:
 			res.code = q.Get("code")
 		}
-		once.Do(func() { results <- res })
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if res.err != nil {
+		switch {
+		case !deliver(res):
+			fmt.Fprintln(w, "This sign-in already finished. You can close this tab.")
+		case res.err != nil:
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintln(w, "Sign-in failed. See the terminal for details.")
-			return
+		default:
+			fmt.Fprintln(w, "Signed in to health-coach-mcp. You can close this tab.")
 		}
-		fmt.Fprintln(w, "Signed in to health-coach-mcp. You can close this tab.")
 	})
 }

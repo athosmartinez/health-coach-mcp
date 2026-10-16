@@ -84,13 +84,16 @@ func authLogin(ctx context.Context, cfg config.Config, env authEnv) error {
 	if err != nil {
 		return err
 	}
-	creds := auth.NewCredentials(tok, conf.Scopes, env.now())
+	creds := auth.NewCredentials(tok, env.now())
 	path := filepath.Join(cfg.ConfigDir, auth.CredentialsFile)
-	if err := auth.WriteCredentials(path, creds); err != nil {
+	if _, err := auth.WriteCredentials(path, creds); err != nil {
 		return err
 	}
 	fmt.Fprintf(env.stdout, "Signed in. Credentials saved to %s.\n", path)
-	if missing := auth.MissingScopes(creds.Scopes); len(missing) > 0 {
+	if len(creds.Scopes) == 0 {
+		fmt.Fprintf(env.stdout, "Google did not say which scopes it granted. If a tool returns scope_missing, run %s again and tick every box.\n",
+			auth.LoginCommand)
+	} else if missing := auth.MissingScopes(creds.Scopes); len(missing) > 0 {
 		fmt.Fprintf(env.stdout, "Google did not grant %s. Tools that need them return scope_missing; run %s again and tick every box.\n",
 			strings.Join(shortScopes(missing), ", "), auth.LoginCommand)
 	}
@@ -110,20 +113,26 @@ func authStatus(cfg config.Config, env authEnv) error {
 	w := env.stdout
 
 	fmt.Fprintf(w, "Credentials:   %s\n", path)
-	if _, err := os.Stat(filepath.Join(cfg.ConfigDir, auth.ClientSecretFile)); err != nil {
+	if _, err := os.Stat(filepath.Join(cfg.ConfigDir, auth.ClientSecretFile)); errors.Is(err, fs.ErrNotExist) {
 		fmt.Fprintf(w, "OAuth client:  missing %s (renewals will fail)\n", auth.ClientSecretFile)
+	} else if err != nil {
+		fmt.Fprintf(w, "OAuth client:  cannot read %s: %v (renewals will fail)\n", auth.ClientSecretFile, err)
 	}
 	if c.LoginAt.IsZero() {
 		fmt.Fprintln(w, "Signed in:     unknown")
 	} else {
 		fmt.Fprintf(w, "Signed in:     %s\n", at(c.LoginAt))
 	}
-	missing := auth.MissingScopes(c.Scopes)
-	fmt.Fprintf(w, "Scopes:        %d of %d granted", len(auth.Scopes)-len(missing), len(auth.Scopes))
-	if len(missing) > 0 {
-		fmt.Fprintf(w, " (missing: %s)", strings.Join(shortScopes(missing), ", "))
+	if len(c.Scopes) == 0 {
+		fmt.Fprintln(w, "Scopes:        unknown (Google did not list them at sign-in)")
+	} else {
+		missing := auth.MissingScopes(c.Scopes)
+		fmt.Fprintf(w, "Scopes:        %d of %d granted", len(auth.Scopes)-len(missing), len(auth.Scopes))
+		if len(missing) > 0 {
+			fmt.Fprintf(w, " (missing: %s)", strings.Join(shortScopes(missing), ", "))
+		}
+		fmt.Fprintln(w)
 	}
-	fmt.Fprintln(w)
 	if c.Expiry.After(env.now()) {
 		fmt.Fprintf(w, "Access token:  valid until %s (renewed automatically)\n", at(c.Expiry))
 	} else {

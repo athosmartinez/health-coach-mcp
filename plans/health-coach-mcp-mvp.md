@@ -74,7 +74,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 1 Foundation: config, Deps, envelope, errors, middleware | `feat/foundation` | — | strongest | ☑ #1 |
 | 2 SQLite store + migrations | `feat/store` | 1 | default | ☑ #2 |
 | 3 Coach memory tools | `feat/memory-tools` | 1, 2 | default | ☑ #3 |
-| 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☐ |
+| 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☑ #4 |
 | 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☐ |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☐ |
 | 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☐ |
@@ -231,7 +231,7 @@ only the token endpoint.
 - `Baseline(series, before LocalDate, days)` → `{mean, sd, n}` ignoring `nil`; `ZScore` → `nil` if n < 7 or sd = 0;
   `Delta`; `EWMA(alpha = 0.25)` (≈ 7-day window); `Slope` (least squares, kg/week); `Trend(this, prev, minThreshold)`;
   `Adherence(values, target, tolerance)` ignoring days flagged partial.
-- `Readiness(hrvZ, rhrDelta, asleepMin *float64, nNights int)` → `{level, reasons[], confidence}`; thresholds in a single `var Thresholds`.
+- `AssessReadiness(th, hrvZ, rhrDelta Signal{Value, Nights}, asleepMin *float64)` → `{level, reasons[], confidence}`; thresholds in one place (`DefaultThresholds()`); a signal with a baseline under 7 nights counts as missing.
 - `QualityFlags`: `low_hr_for_activity` (vigorous types — JIU_JITSU, RUNNING, STRENGTH_TRAINING, HIIT… — with average HR < 100 bpm over ≥ 30 min), `no_hr_data`, `manual_entry`, `partial_day`, `likely_incomplete_nutrition`.
 - `SleepOnsetConsistency(startMinutesOfDay []int)` → sd in minutes with midnight wraparound.
 
@@ -283,6 +283,8 @@ not cached; changing `algoVersion` forces a refetch; deleting the table → iden
 `Exercises(range)` (with average HR, **max HR** via `heart-rate` in the window if the summary doesn't have it,
 zones, `manual_entry` if there's no HR), `Nutrition(date)` (items + totals; totals with partial coverage
 flagged — e.g. protein present in only some items), `Weight(range)`, `BodyFat(range)`.
+Check the low-HR list (`metrics.IsVigorous`) against the `exerciseType` values the API really returns (only
+`JIU_JITSU` is confirmed), and `metrics.IsMainMeal` against the real `mealType` values.
 
 **Verification.** Fake API: steps from 2 sources not doubled; exercise without HR → `manual_entry`;
 average HR 81 in 60 min of JIU_JITSU → `low_hr_for_activity`; today with `partial_day`; nutrition with protein

@@ -73,8 +73,10 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 	}
 
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, "coach.db"), time.Now)
-	if errors.Is(err, context.Canceled) {
-		return nil // a signal during startup is a normal shutdown
+	if err != nil && ctx.Err() != nil {
+		// A signal during startup is a normal shutdown. SQLite may report the
+		// interrupted migration as its own error rather than context.Canceled.
+		return nil
 	}
 	if err != nil {
 		return err

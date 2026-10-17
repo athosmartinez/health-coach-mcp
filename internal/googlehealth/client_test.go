@@ -51,13 +51,15 @@ func (f *fakeTokens) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: fmt.Sprintf("at-%d", f.n)}, nil
 }
 
-func (f *fakeTokens) Invalidate(rejected string) {
+func (f *fakeTokens) Invalidate(rejected string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.invalidated = append(f.invalidated, rejected)
 	if rejected == fmt.Sprintf("at-%d", f.n) {
 		f.stale = true
+		return true
 	}
+	return false
 }
 
 type request struct {
@@ -563,7 +565,7 @@ func TestPageCap(t *testing.T) {
 	c.maxPages = 4
 	_, err := c.List(context.Background(), Steps, day("2026-10-01"), day("2026-10-01"))
 	// More pages than allowed is an error, never a silently short result.
-	if err == nil || coach.AsToolError(err).Code != coach.CodeInternal || len(api.requests()) != 4 {
+	if te := coach.AsToolError(err); te.Code != coach.CodeInvalidInput || !strings.Contains(te.Hint, "shorter") || len(api.requests()) != 4 {
 		t.Errorf("err = %v after %d requests", err, len(api.requests()))
 	}
 }
@@ -617,8 +619,8 @@ func TestRetryAfter(t *testing.T) {
 		"-5":                            0,
 		"soon":                          0,
 		"Fri, 16 Oct 2026 12:00:04 GMT": 4 * time.Second,
-		"Fri, 16 Oct 2026 11:00:00 GMT": 0, // already past
-		"99999999999999999999":          0, // not an int: unparseable
+		"Fri, 16 Oct 2026 11:00:00 GMT": 0,                           // already past
+		"99999999999999999999":          maxRetryAfter + time.Second, // too large for an int: too long to wait
 		"9999999999":                    86400 * time.Second,
 	} {
 		h := http.Header{}
@@ -635,7 +637,7 @@ func TestOversizedResponse(t *testing.T) {
 	})
 	c, waits := newTestClient(t, api, &fakeTokens{})
 	_, err := c.List(context.Background(), Steps, day("2026-10-01"), day("2026-10-01"))
-	if coach.AsToolError(err).Code != coach.CodeUpstreamUnavailable || len(*waits) != 0 || len(api.requests()) != 1 {
+	if coach.AsToolError(err).Code != coach.CodeInvalidInput || len(*waits) != 0 || len(api.requests()) != 1 {
 		t.Errorf("err = %v, waits %v", err, *waits)
 	}
 }

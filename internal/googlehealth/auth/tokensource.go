@@ -103,13 +103,15 @@ func (s *TokenSource) Token() (*oauth2.Token, error) {
 // Token call renews it even when its local expiry is still ahead (revoked, or
 // within the clock skew oauth2 allows). A rejection of a token that has
 // already been replaced is ignored: concurrent requests that saw the same 401
-// share one renewal.
-func (s *TokenSource) Invalidate(rejected string) {
+// share one renewal. It reports whether the token was marked.
+func (s *TokenSource) Invalidate(rejected string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.file != nil && rejected != "" && s.creds.AccessToken == rejected {
-		s.creds.Expiry = time.Unix(1, 0)
+	if s.file == nil || rejected == "" || s.creds.AccessToken != rejected {
+		return false
 	}
+	s.creds.Expiry = time.Unix(1, 0)
+	return true
 }
 
 // reload reads credentials.json when it is not loaded yet or was replaced.

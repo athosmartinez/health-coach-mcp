@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 	"github.com/athosmartinez/health-coach-mcp/internal/version"
@@ -27,6 +28,9 @@ type Deps struct {
 	Logger *slog.Logger
 	// Store holds the coach memory and metrics cache; memory tools need it.
 	Store *store.Store
+	// Health reads Google Health data through the cache; the coach-moment
+	// tools need it.
+	Health healthdata.Source
 }
 
 func (d Deps) withDefaults() Deps {

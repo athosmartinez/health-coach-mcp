@@ -23,13 +23,18 @@ var MetricKeys = []string{
 // Metric is one cached daily value. The cache is disposable: deciding what to
 // cache (settled days only, never null or partial) is the caller's job.
 type Metric struct {
-	Date        coach.LocalDate `json:"date"`
-	Key         string          `json:"metric"`
-	Value       float64         `json:"value"`
-	NSamples    *int            `json:"n_samples,omitempty"`
-	Source      string          `json:"source,omitempty"`
-	AlgoVersion int             `json:"algo_version"`
-	FetchedAt   time.Time       `json:"fetched_at"`
+	Date  coach.LocalDate `json:"date"`
+	Key   string          `json:"metric"`
+	Value float64         `json:"value"`
+	// NSamples is an optional count stored with the value; for hrv_rmssd_ms
+	// it is the number of 5-minute slots holding a sample.
+	NSamples *int   `json:"n_samples,omitempty"`
+	Source   string `json:"source,omitempty"`
+	// Zone is the IANA time zone the value was computed in (healthdata always
+	// sets it and treats another zone, or none, as a miss).
+	Zone        string    `json:"zone,omitempty"`
+	AlgoVersion int       `json:"algo_version"`
+	FetchedAt   time.Time `json:"fetched_at"`
 }
 
 // PutMetric stores or replaces the value for (date, metric).
@@ -50,11 +55,12 @@ func (s *Store) PutMetric(ctx context.Context, m Metric) (err error) {
 		_, fetched = s.stamp()
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO daily_metrics (date, metric, value, n_samples, source, algo_version, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO daily_metrics (date, metric, value, n_samples, source, zone, algo_version, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (date, metric) DO UPDATE SET value = excluded.value, n_samples = excluded.n_samples,
-			source = excluded.source, algo_version = excluded.algo_version, fetched_at = excluded.fetched_at`,
-		string(m.Date), m.Key, m.Value, nullInt(m.NSamples), nullString(m.Source), m.AlgoVersion,
+			source = excluded.source, zone = excluded.zone, algo_version = excluded.algo_version,
+			fetched_at = excluded.fetched_at`,
+		string(m.Date), m.Key, m.Value, nullInt(m.NSamples), nullString(m.Source), nullString(m.Zone), m.AlgoVersion,
 		fetched.UTC().Format(timeLayout))
 	return err
 }
@@ -92,7 +98,7 @@ func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.Loca
 		return nil, invalid("a metric range spans at most %d days", maxRangeDays)
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT date, value, n_samples, source, fetched_at FROM daily_metrics
+		SELECT date, value, n_samples, source, zone, fetched_at FROM daily_metrics
 		WHERE metric = ? AND date >= ? AND date <= ? AND algo_version = ? ORDER BY date`,
 		key, string(from), string(to), algoVersion)
 	if err != nil {
@@ -107,14 +113,28 @@ func (s *Store) MetricRange(ctx context.Context, key string, from, to coach.Loca
 			stamp  stampCol
 			n      sql.NullInt64
 			source sql.NullString
+			zone   sql.NullString
 		)
-		if err := rows.Scan(&day, &m.Value, &n, &source, &stamp); err != nil {
+		if err := rows.Scan(&day, &m.Value, &n, &source, &zone, &stamp); err != nil {
 			return nil, err
 		}
-		m.Date, m.NSamples, m.Source, m.FetchedAt = coach.LocalDate(day), intPtr(n), source.String, time.Time(stamp)
+		m.Date, m.NSamples, m.Source, m.Zone, m.FetchedAt = coach.LocalDate(day), intPtr(n), source.String, zone.String, time.Time(stamp)
 		out = append(out, m)
 	}
 	return rowsResult(out, rows.Err())
+}
+
+// DeleteMetric removes the value for (date, metric), if any.
+func (s *Store) DeleteMetric(ctx context.Context, day coach.LocalDate, key string) (err error) {
+	defer wrapErr("delete metric", &err)
+	if err := oneOf("metric", key, MetricKeys, false); err != nil {
+		return err
+	}
+	if err := validDate("metric date", day, false); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM daily_metrics WHERE date = ? AND metric = ?`, string(day), key)
+	return err
 }
 
 // ClearMetrics empties the cache; the source of truth is the API.

@@ -2,12 +2,10 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"runtime/debug"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -55,7 +53,7 @@ func Register[In, Out any](s *mcp.Server, t *mcp.Tool, h Handler[In, Out]) {
 		if err != nil {
 			wire := coach.ToWire(err)
 			if wire.Code == coach.CodeInternal {
-				loggerFrom(ctx).ErrorContext(ctx, "tool_internal_error", "tool", tt.Name, "error_types", errorTypes(err))
+				loggerFrom(ctx).ErrorContext(ctx, "tool_internal_error", "tool", tt.Name, "error_types", coach.ErrorTypes(err))
 			}
 			var zero Out
 			return nil, zero, wire
@@ -79,24 +77,4 @@ func loggerFrom(ctx context.Context) *slog.Logger {
 		return l
 	}
 	return discardLogger
-}
-
-// errorTypes names the types along an error chain ("*fmt.wrapError > *sqlite.Error"):
-// enough to tell a database fault from a bug without logging any message text.
-func errorTypes(err error) string {
-	var types []string
-	for err != nil && len(types) < 8 {
-		types = append(types, fmt.Sprintf("%T", err))
-		switch u := err.(type) {
-		case interface{ Unwrap() []error }:
-			if errs := u.Unwrap(); len(errs) > 0 {
-				err = errs[0]
-				continue
-			}
-			err = nil
-		default:
-			err = errors.Unwrap(err)
-		}
-	}
-	return strings.Join(types, " > ")
 }

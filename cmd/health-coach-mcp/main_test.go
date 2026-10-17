@@ -5,18 +5,21 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
 
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // testConfig keeps the store in a temp dir, never in the working directory.
 func testConfig(t *testing.T) config.Config {
-	return config.Config{TimeZone: time.UTC, DataDir: t.TempDir()}
+	return config.Config{TimeZone: time.UTC, DataDir: t.TempDir(), ConfigDir: t.TempDir()}
 }
 
 func TestServeRejectsBadOptions(t *testing.T) {
@@ -35,7 +38,7 @@ func TestServeRejectsBadOptions(t *testing.T) {
 }
 
 func TestServeRequiresTimeZone(t *testing.T) {
-	err := serve(context.Background(), config.Config{DataDir: t.TempDir()}, options{transport: "stdio"}, discard)
+	err := serve(context.Background(), config.Config{DataDir: t.TempDir(), ConfigDir: t.TempDir()}, options{transport: "stdio"}, discard)
 	if err == nil || !strings.Contains(err.Error(), "TimeZone") {
 		t.Fatalf("err = %v, want missing TimeZone", err)
 	}
@@ -83,8 +86,43 @@ func TestSignalDuringStartupIsCleanShutdown(t *testing.T) {
 	runUntilCancelled(t, testConfig(t), options{transport: "http", addr: "127.0.0.1:0"}, func() bool { return true })
 }
 
+func TestServeRejectsRelativeConfigDir(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ConfigDir = "config"
+	if err := serve(context.Background(), cfg, options{transport: "stdio"}, discard); err == nil || !strings.Contains(err.Error(), "ConfigDir") {
+		t.Fatalf("err = %v, want absolute ConfigDir required", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "coach.db")); !os.IsNotExist(err) {
+		t.Errorf("the store was created before the options were checked: %v", err)
+	}
+}
+
+// Health calls reach the lazy token source: without client_secret.json they
+// fail as auth_expired instead of at startup.
+func TestNewHealthWiresTheLazySignIn(t *testing.T) {
+	cfg := testConfig(t)
+	sp, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.TimeZone = sp
+	st, err := store.Open(context.Background(), filepath.Join(cfg.DataDir, "coach.db"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	h, err := newHealth(context.Background(), cfg, st, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.Recovery(context.Background(), "2026-10-10", "2026-10-12")
+	if te := coach.AsToolError(err); te.Code != coach.CodeAuthExpired {
+		t.Fatalf("Recovery without setup: %v, want auth_expired", err)
+	}
+}
+
 func TestServeRejectsRelativeDataDir(t *testing.T) {
-	err := serve(context.Background(), config.Config{TimeZone: time.UTC, DataDir: "data"}, options{transport: "stdio"}, discard)
+	err := serve(context.Background(), config.Config{TimeZone: time.UTC, DataDir: "data", ConfigDir: t.TempDir()}, options{transport: "stdio"}, discard)
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("err = %v, want absolute DataDir required", err)
 	}
@@ -95,7 +133,7 @@ func TestServeFailsWhenStoreCannotOpen(t *testing.T) {
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{TimeZone: time.UTC, DataDir: blocker}
+	cfg := config.Config{TimeZone: time.UTC, DataDir: blocker, ConfigDir: t.TempDir()}
 	if err := serve(context.Background(), cfg, options{transport: "stdio"}, discard); err == nil {
 		t.Fatal("serve must fail when the store cannot be opened")
 	}

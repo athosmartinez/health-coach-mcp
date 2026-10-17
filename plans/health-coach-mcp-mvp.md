@@ -75,7 +75,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 2 SQLite store + migrations | `feat/store` | 1 | default | ☑ #2 |
 | 3 Coach memory tools | `feat/memory-tools` | 1, 2 | default | ☑ #3 |
 | 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☑ #4 |
-| 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☐ |
+| 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☑ #6 |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☑ #5 |
 | 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☐ |
 | 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☐ |
@@ -258,14 +258,32 @@ EWMA against values computed by hand.
 - `daily-resting-heart-rate`: `{date, beatsPerMinute:"57" (string), dailyRestingHeartRateMetadata{calculationMethod}}`.
 Cache rules in CAPABILITY §5.3 (settled ≥ 3 days, never `null`/partial, `algo_version`, closed list of keys).
 
+**Tasks — first, the client fixes from the PR #6 review** (in `internal/googlehealth`, before building on it):
+a 2xx page is valid only with keys ⊆ {list key, `nextPageToken`} (`null`/unknown key/error object → bad response, log key
+names only); strip `*url.Error` to its cause (no URL in error text); refuse redirects; `http` base URL only on
+loopback, no userinfo/query/fragment; page cap → `invalid_input` with a "shorter range" hint; overflowing
+Retry-After fails fast; no retry on DNS not-found/x509 (log the cause type); 403 `RESOURCE_EXHAUSTED` retried like
+429; cap on total bytes across pages; `Invalidate` reports whether it acted (log "renewing" only then). Tests: no
+body leak on every error path, rollup pages within each chunk and exact chunk boundaries, per-type table values,
+a renewal does not use a retry, Retry-After 8s vs 9s and on 503, 408 and dropped-connection recovery, cancel
+in flight, one test with the real `auth.TokenSource`.
+
 **Tasks.** `internal/healthdata`: `Source` interface (consumed by the tools) + implementation over the client;
 `SleepNight(date)` = **longest** session ending on the local day `date` (naps ignored);
 `HRVNightly(range)` = median rMSSD of the samples **inside the window of that night's main session**
-(not by calendar date); `RestingHR(range)` (parse the string bpm); cache read/write per §5.3 with
-`const algoVersion = 1`; `Now` from `Deps`. Wire `googlehealth.New` + `auth.NewTokenSource` in `main` so a missing
+(not by calendar date); `RestingHR(range)` (parse the string bpm); cache read/write per §5.3, rows keyed by
+`metrics.AlgoVersion` (one constant for the whole cache); `Now` from `Deps`. *(Built as one call,
+`Source.Recovery(from, to)`, returning nights with their HRV and resting HR plus `Series(key)`: one live fetch fills
+both sleep and HRV, since the HRV median needs the night's window. Fitbit records only — Apple Health copies of sleep
+and resting HR exist in the real data.)* Wire `googlehealth.New` + `auth.NewTokenSource` in `main` so a missing
 `client_secret.json` or sign-in does not stop startup (health tools then answer `auth_expired`; memory tools keep
 working). The client filters by the local day of each record: HRV samples of a night that starts the evening before
-need `List(HeartRateVariability, date−1, date)`, then the session window narrows them.
+need `List(HeartRateVariability, date−1, date)`, then the session window narrows them. *(PR #7 review: main-sleep
+records ≤ 3 h apart are one night split by a wake-up, overlapping copies keep the longer; HRV needs ≥ 12 samples
+covering ≥ 50% of the night's 5-min slots and ≥ 25% of each half; stages only when `SUCCEEDED`, minute bounds with 2 min
+of rounding slack (checked against the real records); resting HR carries its method and only a lone `WITH_SLEEP` value
+is cached; `BaselineSeries` drops provisional nights and non-standard resting HR; rows carry their zone; an unreadable
+record taints only its day; `Excluded`/`Empty` report what was left out.)*
 
 **Verification.** Fake API: sleep 23:10→07:40 counted on the end day; a 20-min nap the same day ignored;
 HRV sample at 23:30 belongs to the night that ends the next day; D-5 cache hit, D-1 always live; `nil` value

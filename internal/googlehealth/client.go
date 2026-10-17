@@ -232,15 +232,20 @@ func (c *Client) collect(dt DataType, key string, fetch func(token string) ([]by
 		if err := json.Unmarshal(body, &page); err != nil || page == nil {
 			return nil, badResponse(dt)
 		}
-		// The API omits an empty list, so {} is a page with no points. Any
-		// other key (an error object, a renamed field) means the response is
-		// not what this client understands, and reading it as "no data"
-		// would hide that.
+		// The API omits an empty list, so a page without the list key is a
+		// page with no points only when nothing else is in it: an error
+		// object or a renamed field read as "no data" would hide the problem.
+		// With the list present, a new field is logged and tolerated.
+		_, hasList := page[key]
 		for k := range page {
-			if k != key && k != "nextPageToken" {
-				c.log.Warn("google health response has an unexpected field", "data_type", string(dt), "field", truncate(k, 40))
+			if k == key || k == "nextPageToken" {
+				continue
+			}
+			if !hasList {
+				c.log.Warn("google health response has no data list and an unexpected field", "data_type", string(dt), "field", truncate(k, 40))
 				return nil, badResponse(dt)
 			}
+			c.log.Info("google health response has a new field", "data_type", string(dt), "field", truncate(k, 40))
 		}
 		var items []json.RawMessage
 		if raw, ok := page[key]; ok {

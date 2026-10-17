@@ -271,8 +271,11 @@ in flight, one test with the real `auth.TokenSource`.
 **Tasks.** `internal/healthdata`: `Source` interface (consumed by the tools) + implementation over the client;
 `SleepNight(date)` = **longest** session ending on the local day `date` (naps ignored);
 `HRVNightly(range)` = median rMSSD of the samples **inside the window of that night's main session**
-(not by calendar date); `RestingHR(range)` (parse the string bpm); cache read/write per §5.3 with
-`const algoVersion = 1`; `Now` from `Deps`. Wire `googlehealth.New` + `auth.NewTokenSource` in `main` so a missing
+(not by calendar date); `RestingHR(range)` (parse the string bpm); cache read/write per §5.3, rows keyed by
+`metrics.AlgoVersion` (one constant for the whole cache); `Now` from `Deps`. *(Built as one call,
+`Source.Recovery(from, to)`, returning nights with their HRV and resting HR plus `Series(key)`: one live fetch fills
+both sleep and HRV, since the HRV median needs the night's window. Fitbit records only — Apple Health copies of sleep
+and resting HR exist in the real data.)* Wire `googlehealth.New` + `auth.NewTokenSource` in `main` so a missing
 `client_secret.json` or sign-in does not stop startup (health tools then answer `auth_expired`; memory tools keep
 working). The client filters by the local day of each record: HRV samples of a night that starts the evening before
 need `List(HeartRateVariability, date−1, date)`, then the session window narrows them.

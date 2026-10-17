@@ -11,7 +11,9 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - Inspect tools interactively: `npx @modelcontextprotocol/inspector bin/health-coach-mcp`
 
 ## Layout
-- `cmd/health-coach-mcp/` — entry point; picks the transport (`-transport=stdio|http`).
+- `cmd/health-coach-mcp/` — entry point; picks the transport (`-transport=stdio|http`) and wires
+  `auth.LazyTokenSource` → `googlehealth.New` → `healthdata.New` into `server.Deps.Health` (nothing is read at
+  startup: without `client_secret.json` or a sign-in, health calls return `auth_expired`).
 - `internal/config/` — env config: `HCM_TZ` (IANA zone, default America/Sao_Paulo, `Local` rejected,
   tzdata embedded), `HCM_DATA_DIR`, `HCM_CONFIG_DIR` (absolute after `~` expansion), `HCM_HTTP_TOKEN`
   (≥32 chars, required to bind HTTP beyond loopback).
@@ -28,7 +30,7 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
   `daily_metrics` cache (closed key list, `algo_version` mismatch = miss).
 - `internal/googlehealth/auth/` — OAuth Desktop sign-in (`Login`: loopback on `127.0.0.1:0`, PKCE,
-  `access_type=offline` + `prompt=consent`), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
+  `access_type=offline` + `prompt=consent`), `LazyTokenSource` (loads the client on first use, retried until the file exists), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
   `TokenSource` (`Invalidate(rejected) bool` forces the next renewal, ignored (false) once that token was replaced; renews and saves, keeps the old refresh token when Google omits it, reloads the file when
   another process signs in and lets that login win over a renewal in flight; `invalid_grant` → `auth_expired`,
   408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
@@ -47,6 +49,13 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   network errors drop `url.Error`'s URL. Redirects are refused; `http` base URLs only on loopback. A page is valid
   only with keys ⊆ {list key, `nextPageToken`} (`{}` = no points); page cap (200) or byte budget (64 MiB) →
   `invalid_input` "shorter range"; a repeated page token → `upstream_unavailable`. One renewal per page.
+- `internal/healthdata/` — Google Health records → daily values through the `daily_metrics` cache. `Source.Recovery(ctx,
+  from, to)` returns `Nights` (main session ending on each local day: Fitbit only, naps dropped, longest wins, sleep
+  fetched ±1 day and assigned with `coach.SleepDay`; stage minutes; median rMSSD of the samples inside the session, nil
+  below 12 samples) and `RestingHR` (Fitbit; `WITH_SLEEP` wins a duplicate), plus `Skipped` unreadable records;
+  `Series(key)` gives one `metrics.Point` per day. Cache: settled days (≤ today−3) only, and only from a clean fetch of
+  a processed night with stages; a night is a hit only with all 7 sleep keys + HRV; missing days are fetched in runs
+  of consecutive days. Rows are keyed by `metrics.AlgoVersion`. Apple Health (`HEALTH_KIT`) copies are ignored.
 - `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped; NaN/Inf count as
   missing in judgments and are rejected in series): `Baseline` (window `[before−days, before−1]`, sample sd; only
   in-window rows are validated), `ZScore` (nil below 7 nights or with no spread), `Delta`/`DeltaPct`, `EWMA` (over
@@ -57,7 +66,6 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   person's baseline) and quality flags (`ExerciseFlags`, `PartialDay`, `CheckLogging`). `AlgoVersion` keys the
   `daily_metrics` cache: bump it when a stored value's math changes.
 - `internal/version/` — version injected via `-ldflags`.
-- Planned (see `plans/health-coach-mcp-mvp.md`): `internal/healthdata/`.
 
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,

@@ -18,6 +18,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/googlehealth"
+	"github.com/athosmartinez/health-coach-mcp/internal/googlehealth/auth"
+	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 	"github.com/athosmartinez/health-coach-mcp/internal/server"
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
@@ -83,7 +86,11 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 		}
 	}()
 
-	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st})
+	health, err := newHealth(ctx, cfg, st, log)
+	if err != nil {
+		return err
+	}
+	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st, Health: health})
 	if err != nil {
 		return err
 	}
@@ -99,6 +106,17 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 }
 
 // validate checks the options and reports whether HTTP would be exposed beyond loopback.
+// newHealth reads nothing at startup: the OAuth client and sign-in load on the
+// first Google Health call, so the memory tools work before setup is done.
+func newHealth(ctx context.Context, cfg config.Config, st *store.Store, log *slog.Logger) (*healthdata.Data, error) {
+	ts := auth.NewLazyTokenSource(ctx, cfg.ConfigDir, auth.Endpoint, log)
+	api, err := googlehealth.New(ts, googlehealth.Options{TimeZone: cfg.TimeZone, Logger: log})
+	if err != nil {
+		return nil, err
+	}
+	return healthdata.New(api, st, cfg.TimeZone, time.Now, log)
+}
+
 func validate(cfg config.Config, o options) (exposed bool, err error) {
 	if cfg.TimeZone == nil {
 		return false, errors.New("config: TimeZone is required")

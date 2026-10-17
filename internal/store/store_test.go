@@ -489,7 +489,7 @@ func TestSchemaConstraints(t *testing.T) {
 func TestMetricsCache(t *testing.T) {
 	s, _ := openTest(t)
 	n := 3
-	m := Metric{Date: "2026-10-10", Key: "resting_hr_bpm", Value: 57, NSamples: &n, Source: "fitbit_air", AlgoVersion: 1}
+	m := Metric{Date: "2026-10-10", Key: "resting_hr_bpm", Value: 57, NSamples: &n, Source: "fitbit_air", Zone: "America/Sao_Paulo", AlgoVersion: 1}
 	if err := s.PutMetric(ctx, m); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestMetricsCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Value != 57 || *got.NSamples != 3 || got.Source != "fitbit_air" || !got.FetchedAt.Equal(fixedClock()) {
+	if got.Value != 57 || *got.NSamples != 3 || got.Source != "fitbit_air" || got.Zone != "America/Sao_Paulo" || !got.FetchedAt.Equal(fixedClock()) {
 		t.Errorf("got %+v", got)
 	}
 	_, err = s.GetMetric(ctx, "2026-10-10", "resting_hr_bpm", 2)
@@ -539,8 +539,28 @@ func TestMetricsCache(t *testing.T) {
 	if fmt.Sprint(days) != "[2026-10-08 2026-10-10 2026-10-12]" {
 		t.Errorf("range days = %v, want both endpoints included", days)
 	}
-	if !rng[0].FetchedAt.Equal(fetched) || rng[0].NSamples != nil || rng[0].Source != "" {
+	if !rng[0].FetchedAt.Equal(fetched) || rng[0].NSamples != nil || rng[0].Source != "" || rng[0].Zone != "" {
 		t.Errorf("round trip = %+v", rng[0])
+	}
+
+	// DeleteMetric removes one (date, metric); a missing row is not an error.
+	if err := s.DeleteMetric(ctx, "2026-10-10", "resting_hr_bpm"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetMetric(ctx, "2026-10-10", "resting_hr_bpm", 2); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleted row still served: %v", err)
+	}
+	if v, err := s.GetMetric(ctx, "2026-10-12", "resting_hr_bpm", 2); err != nil || v.Value != 60 {
+		t.Errorf("DeleteMetric touched another day: %+v, %v", v, err)
+	}
+	if err := s.DeleteMetric(ctx, "2026-10-10", "resting_hr_bpm"); err != nil {
+		t.Errorf("deleting a missing row: %v", err)
+	}
+	if err := s.DeleteMetric(ctx, "2026-10-10", "bogus"); !isInvalidInput(err) {
+		t.Errorf("DeleteMetric(bogus key) err = %v, want invalid_input", err)
+	}
+	if err := s.DeleteMetric(ctx, "10/10/2026", "steps"); !isInvalidInput(err) {
+		t.Errorf("DeleteMetric(bad date) err = %v, want invalid_input", err)
 	}
 }
 

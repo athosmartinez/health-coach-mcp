@@ -17,7 +17,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/googlehealth"
+	"github.com/athosmartinez/health-coach-mcp/internal/googlehealth/auth"
+	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 	"github.com/athosmartinez/health-coach-mcp/internal/server"
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
@@ -70,8 +74,12 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 	}
 
 	st, err := store.Open(ctx, filepath.Join(cfg.DataDir, "coach.db"), time.Now)
-	if errors.Is(err, context.Canceled) {
-		return nil // a signal during startup is a normal shutdown
+	if err != nil && ctx.Err() != nil {
+		// A signal during startup is a normal shutdown. SQLite may report the
+		// interrupted migration as its own error rather than context.Canceled;
+		// its type is logged in case the failure was real and only coincided.
+		log.Info("store open interrupted by shutdown", "error_types", coach.ErrorTypes(err))
+		return nil
 	}
 	if err != nil {
 		return err
@@ -83,7 +91,11 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 		}
 	}()
 
-	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st})
+	health, err := newHealth(ctx, cfg, st, log)
+	if err != nil {
+		return err
+	}
+	s, err := server.New(server.Deps{Cfg: cfg, Now: time.Now, Logger: log, Store: st, Health: health})
 	if err != nil {
 		return err
 	}
@@ -98,6 +110,20 @@ func serve(ctx context.Context, cfg config.Config, o options, log *slog.Logger) 
 	return serveHTTP(ctx, s, cfg, o, exposed, log)
 }
 
+// newHealth reads nothing at startup: the OAuth client and sign-in load on the
+// first Google Health call, so the memory tools work before setup is done.
+func newHealth(ctx context.Context, cfg config.Config, st *store.Store, log *slog.Logger) (*healthdata.Data, error) {
+	ts, err := auth.NewLazyTokenSource(ctx, cfg.ConfigDir, auth.Endpoint, log)
+	if err != nil {
+		return nil, err
+	}
+	api, err := googlehealth.New(ts, googlehealth.Options{TimeZone: cfg.TimeZone, Logger: log})
+	if err != nil {
+		return nil, err
+	}
+	return healthdata.New(api, st, cfg.TimeZone, time.Now, log)
+}
+
 // validate checks the options and reports whether HTTP would be exposed beyond loopback.
 func validate(cfg config.Config, o options) (exposed bool, err error) {
 	if cfg.TimeZone == nil {
@@ -105,6 +131,9 @@ func validate(cfg config.Config, o options) (exposed bool, err error) {
 	}
 	if !filepath.IsAbs(cfg.DataDir) {
 		return false, fmt.Errorf("config: DataDir %q must be an absolute path", cfg.DataDir)
+	}
+	if !filepath.IsAbs(cfg.ConfigDir) {
+		return false, fmt.Errorf("config: ConfigDir %q must be an absolute path", cfg.ConfigDir)
 	}
 	switch o.transport {
 	case "stdio":

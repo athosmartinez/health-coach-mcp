@@ -11,12 +11,16 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - Inspect tools interactively: `npx @modelcontextprotocol/inspector bin/health-coach-mcp`
 
 ## Layout
-- `cmd/health-coach-mcp/` — entry point; picks the transport (`-transport=stdio|http`).
+- `cmd/health-coach-mcp/` — entry point; picks the transport (`-transport=stdio|http`) and wires
+  `auth.LazyTokenSource` → `googlehealth.New` → `healthdata.New` into `server.Deps.Health` (nothing is read at
+  startup: without `client_secret.json` or a sign-in, health calls return `auth_expired`). `DataDir` and `ConfigDir`
+  must be absolute.
 - `internal/config/` — env config: `HCM_TZ` (IANA zone, default America/Sao_Paulo, `Local` rejected,
   tzdata embedded), `HCM_DATA_DIR`, `HCM_CONFIG_DIR` (absolute after `~` expansion), `HCM_HTTP_TOKEN`
   (≥32 chars, required to bind HTTP beyond loopback).
 - `internal/coach/` — shared domain: `LocalDate` (validated on decode; DST-safe `Bounds`; sleep → day it
-  ends), `Envelope[T]` + `Coverage`/`ConfidenceLevel`, `ToolError` codes, `WireError`, `ErrorResult`.
+  ends), `Envelope[T]` + `Coverage`/`ConfidenceLevel`, `ToolError` codes, `WireError`, `ErrorResult`, `ErrorTypes` (an
+  error chain's types, every branch of a multi-`%w`/joined error; the only error detail logs carry).
 - `internal/server/` — `Deps` + `New(Deps) (*mcp.Server, error)` (one `registerX` line per feature),
   tool-call logging middleware (name/duration/outcome only; it hands the logger to tools via
   `tools.WithLogger`), HTTP bind guard, bearer auth, `NewHTTPServer`.
@@ -26,10 +30,11 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
-  `daily_metrics` cache (closed key list, `algo_version` mismatch = miss).
+  `daily_metrics` cache (closed key list, `algo_version` mismatch = miss; `zone` column; `DeleteMetric`).
 - `internal/googlehealth/auth/` — OAuth Desktop sign-in (`Login`: loopback on `127.0.0.1:0`, PKCE,
-  `access_type=offline` + `prompt=consent`), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
-  `TokenSource` (`Invalidate(rejected)` forces the next renewal, ignored once that token was replaced; renews and saves, keeps the old refresh token when Google omits it, reloads the file when
+  `access_type=offline` + `prompt=consent`), `LazyTokenSource` (loads the client on first use, retried until the file exists; a missing, unreadable, non-JSON or
+  non-Desktop client file is `auth_expired` with the path in the hint), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
+  `TokenSource` (`Invalidate(rejected) bool` forces the next renewal, ignored (false) once that token was replaced; renews and saves, keeps the old refresh token when Google omits it, reloads the file when
   another process signs in and lets that login win over a renewal in flight; `invalid_grant` → `auth_expired`,
   408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
   (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
@@ -42,8 +47,31 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `GET …/dataPoints`, `GET …/dataPoints:reconcile` and `POST …/dataPoints:dailyRollUp` (a read). Retries 429/408/5xx/
   network 3 times (1s/2s/4s, jittered, Retry-After up to 8s, longer fails fast); one token renewal
   (`auth.TokenSource.Invalidate`) on a 401 or the stale-token 403; then 401 → `auth_expired`, 403 → `scope_missing`,
-  exhausted → `upstream_unavailable`, other 4xx → internal. Errors keep HTTP status + Google's status enum
-  (`StatusError`), never the body. A page cap or repeated page token is an error, never a short result.
+  exhausted → `upstream_unavailable`, other 4xx → internal; a quota 403 (`RESOURCE_EXHAUSTED`) is retried like 429;
+  DNS not-found/x509 fail fast. Errors keep HTTP status + Google's status enum (`StatusError`), never the body, and
+  network errors drop `url.Error`'s URL. Redirects are refused; `http` base URLs only on loopback. A page without
+  the list key is valid only when nothing but `nextPageToken` is in it (`{}` = no points); next to the list a new field
+  is logged at Warn and tolerated unless its name looks like paging (token, page, next, cursor, more, contin, offset,
+  after, trunc, partial, remain → `upstream_unavailable`); other 4xx rejections log the HTTP status and Google's enum; page cap (200)
+  or byte budget (64 MiB) → `invalid_input` "shorter range"; a repeated page token → `upstream_unavailable`. One renewal per page.
+- `internal/healthdata/` — Google Health records → daily values through the `daily_metrics` cache. `Source.Recovery(ctx,
+  from, to)` returns `Nights` (main sleep ending on each local day: Fitbit only, naps dropped, sleep fetched ±1 day and
+  assigned with `coach.SleepDay`; overlapping copies keep the longer, records ≤ 3 h apart are joined as one split night,
+  the group with most time in bed wins; stage values only from `STAGES` records with `stagesStatus` `SUCCEEDED` (each
+  type known and once, deep+light+REM = asleep ± 2 min), a `STAGES` night without them or an unprocessed record is
+  `Provisional`, a processed `CLASSIC` night has nil stages and is not; median rMSSD of the
+  samples inside the night, nil below 12 samples or under 50% of its 5-min slots (25% per half), with `HRVCoverage`) and
+  `RestingHR` (`{BPM, Method}`; `WITH_SLEEP` wins a duplicate, then the lower), plus `Skipped` unreadable records,
+  `Excluded` counts by reason and `Empty` types (records only from another platform or without a value). `Series(key)`
+  gives one `metrics.Point` per day; `BaselineSeries(key)` drops provisional nights and non-`WITH_SLEEP` resting HR.
+  `Excluded` counts only days fetched live in the call. `KeySleepStart` wraps at midnight (circular metrics only).
+  Cache: settled days (≤ today−3) only; a night is cached when settled, with a final HRV or no samples at all (none
+  of its samples left out for another platform or a missing value), and
+  written commit-row-last (`KeyAsleep` deleted first, written last; stage/HRV rows written or deleted); resting HR only
+  as a day's single `WITH_SLEEP` value. An unreadable record keeps its day out of the cache (its whole fetch when the
+  day is unknown). Rows carry `metrics.AlgoVersion` and the zone; a mismatch is a miss. Missing days are fetched in
+  runs of consecutive days. Source labels and the resting-HR method are stripped of control, format and separator characters and capped at 64
+  runes; a label left empty falls back to the platform.
 - `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped; NaN/Inf count as
   missing in judgments and are rejected in series): `Baseline` (window `[before−days, before−1]`, sample sd; only
   in-window rows are validated), `ZScore` (nil below 7 nights or with no spread), `Delta`/`DeltaPct`, `EWMA` (over
@@ -54,7 +82,6 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   person's baseline) and quality flags (`ExerciseFlags`, `PartialDay`, `CheckLogging`). `AlgoVersion` keys the
   `daily_metrics` cache: bump it when a stored value's math changes.
 - `internal/version/` — version injected via `-ldflags`.
-- Planned (see `plans/health-coach-mcp-mvp.md`): `internal/healthdata/`.
 
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,

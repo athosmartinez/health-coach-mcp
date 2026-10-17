@@ -99,6 +99,19 @@ func (s *TokenSource) Token() (*oauth2.Token, error) {
 	return next.token(), nil
 }
 
+// Invalidate marks the access token the API rejected as expired, so the next
+// Token call renews it even when its local expiry is still ahead (revoked, or
+// within the clock skew oauth2 allows). A rejection of a token that has
+// already been replaced is ignored: concurrent requests that saw the same 401
+// share one renewal.
+func (s *TokenSource) Invalidate(rejected string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file != nil && rejected != "" && s.creds.AccessToken == rejected {
+		s.creds.Expiry = time.Unix(1, 0)
+	}
+}
+
 // reload reads credentials.json when it is not loaded yet or was replaced.
 // The file is opened once, so the stat and the content describe the same version.
 func (s *TokenSource) reload() error {

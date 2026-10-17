@@ -596,3 +596,50 @@ func TestSafeCode(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenSourceInvalidate(t *testing.T) {
+	g := newFakeGoogle(t)
+	c := expired()
+	c.Expiry = time.Now().Add(time.Hour)
+	ts := NewTokenSource(context.Background(), saved(t, t.TempDir(), c), g.config(), nil)
+
+	ts.Invalidate("at-old") // before the first Token call: nothing loaded, nothing to drop
+	tok, err := ts.Token()
+	if err != nil || tok.AccessToken != "at-old" || g.requests.Load() != 0 {
+		t.Fatalf("Token = %+v, %v after %d renewals", tok, err, g.requests.Load())
+	}
+	// A token the API rejected is renewed on the next call, though its expiry is ahead.
+	ts.Invalidate("at-old")
+	if tok, err = ts.Token(); err != nil || tok.AccessToken != "at-1" {
+		t.Fatalf("Token after Invalidate = %+v, %v", tok, err)
+	}
+	// A rejection of a token already replaced is stale: the new one stays.
+	ts.Invalidate("at-old")
+	if tok, err = ts.Token(); err != nil || tok.AccessToken != "at-1" || g.requests.Load() != 1 {
+		t.Errorf("stale Invalidate: Token = %+v, %v after %d renewals", tok, err, g.requests.Load())
+	}
+}
+
+func TestTokenSourceInvalidateConcurrent(t *testing.T) {
+	g := newFakeGoogle(t)
+	c := expired()
+	c.Expiry = time.Now().Add(time.Hour)
+	ts := NewTokenSource(context.Background(), saved(t, t.TempDir(), c), g.config(), nil)
+	if _, err := ts.Token(); err != nil {
+		t.Fatal(err)
+	}
+	// Several requests see the same 401: the token is renewed once, not once per request.
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			ts.Invalidate("at-old")
+			if _, err := ts.Token(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := g.requests.Load(); n != 1 {
+		t.Errorf("%d renewals for one rejected token, want 1", n)
+	}
+}

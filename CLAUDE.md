@@ -29,11 +29,21 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `daily_metrics` cache (closed key list, `algo_version` mismatch = miss).
 - `internal/googlehealth/auth/` — OAuth Desktop sign-in (`Login`: loopback on `127.0.0.1:0`, PKCE,
   `access_type=offline` + `prompt=consent`), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
-  `TokenSource` (renews and saves, keeps the old refresh token when Google omits it, reloads the file when
+  `TokenSource` (`Invalidate(rejected)` forces the next renewal, ignored once that token was replaced; renews and saves, keeps the old refresh token when Google omits it, reloads the file when
   another process signs in and lets that login win over a renewal in flight; `invalid_grant` → `auth_expired`,
   408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
   (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
   `auth login|status` subcommands, dispatched before the server flags.
+- `internal/googlehealth/` — read-only API v4 client (`New(TokenSource, Options)`; makes no request and reads no file):
+  `List`/`Reconcile`/`DailyRollup(ctx, DataType, from, to coach.LocalDate)` return raw points (`json.RawMessage`) for
+  the inclusive local days. A closed `DataType` table (`datatypes.go`) holds each type's filter field (civil start,
+  sleep's civil end, physical UTC instant from `LocalDate.Bounds`, or date), page size (25 for sleep/exercise) and
+  dailyRollUp range cap (14 days for total-calories, 90 otherwise; longer ranges are split). `do` allows only
+  `GET …/dataPoints`, `GET …/dataPoints:reconcile` and `POST …/dataPoints:dailyRollUp` (a read). Retries 429/408/5xx/
+  network 3 times (1s/2s/4s, jittered, Retry-After up to 8s, longer fails fast); one token renewal
+  (`auth.TokenSource.Invalidate`) on a 401 or the stale-token 403; then 401 → `auth_expired`, 403 → `scope_missing`,
+  exhausted → `upstream_unavailable`, other 4xx → internal. Errors keep HTTP status + Google's status enum
+  (`StatusError`), never the body. A page cap or repeated page token is an error, never a short result.
 - `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped; NaN/Inf count as
   missing in judgments and are rejected in series): `Baseline` (window `[before−days, before−1]`, sample sd; only
   in-window rows are validated), `ZScore` (nil below 7 nights or with no spread), `Delta`/`DeltaPct`, `EWMA` (over
@@ -44,8 +54,7 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   person's baseline) and quality flags (`ExerciseFlags`, `PartialDay`, `CheckLogging`). `AlgoVersion` keys the
   `daily_metrics` cache: bump it when a stored value's math changes.
 - `internal/version/` — version injected via `-ldflags`.
-- Planned (see `plans/health-coach-mcp-mvp.md`): the `internal/googlehealth/` API client,
-  `internal/healthdata/`.
+- Planned (see `plans/health-coach-mcp-mvp.md`): `internal/healthdata/`.
 
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,

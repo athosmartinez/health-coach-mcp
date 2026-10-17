@@ -34,6 +34,7 @@ type DataType string
 // The data types the coach reads.
 const (
 	Sleep                     DataType = "sleep"
+	HeartRate                 DataType = "heart-rate"
 	HeartRateVariability      DataType = "heart-rate-variability"
 	DailyHeartRateVariability DataType = "daily-heart-rate-variability"
 	DailyRestingHeartRate     DataType = "daily-resting-heart-rate"
@@ -89,6 +90,7 @@ type typeInfo struct {
 
 var typeTable = map[DataType]typeInfo{
 	Sleep:                     {"sleep", civilEnd, opList | opReconcile, 25, 0},
+	HeartRate:                 {"heart_rate", physical, opList | opReconcile, 10000, 0},
 	HeartRateVariability:      {"heart_rate_variability", physical, opList | opReconcile, 10000, 0},
 	DailyHeartRateVariability: {"daily_heart_rate_variability", date, opList | opReconcile, 10000, 0},
 	DailyRestingHeartRate:     {"daily_resting_heart_rate", date, opList | opReconcile, 10000, 0},
@@ -159,6 +161,23 @@ func filter(info typeInfo, from, to coach.LocalDate, loc *time.Location) (string
 	default:
 		return bounds("date", string(from), string(end)), nil
 	}
+}
+
+// maxWindow bounds a ListBetween request: the band writes about one heart-rate
+// sample every 2 seconds, so a day is already four full pages.
+const maxWindow = 24 * time.Hour
+
+// windowFilter selects the instants [start, end) of a physical-time type.
+func windowFilter(dt DataType, info typeInfo, start, end time.Time) (string, error) {
+	if info.kind != physical {
+		return "", fmt.Errorf("googlehealth: %s is not filtered by instant", dt)
+	}
+	if !end.After(start) || end.Sub(start) > maxWindow {
+		return "", fmt.Errorf("googlehealth: a window must end after it starts and span at most %s", maxWindow)
+	}
+	const utc = "2006-01-02T15:04:05Z"
+	path := info.filterName + ".sample_time.physical_time"
+	return fmt.Sprintf("%s >= %q AND %s < %q", path, start.UTC().Format(utc), path, end.UTC().Format(utc)), nil
 }
 
 // civilDate is the API's CivilDateTime at a day's midnight.

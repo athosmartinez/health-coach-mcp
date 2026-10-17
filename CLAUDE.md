@@ -41,7 +41,8 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `auth login|status` subcommands, dispatched before the server flags.
 - `internal/googlehealth/` — read-only API v4 client (`New(TokenSource, Options)`; makes no request and reads no file):
   `List`/`Reconcile`/`DailyRollup(ctx, DataType, from, to coach.LocalDate)` return raw points (`json.RawMessage`) for
-  the inclusive local days. A closed `DataType` table (`datatypes.go`) holds each type's filter field (civil start,
+  the inclusive local days; `ListBetween(ctx, DataType, start, end time.Time)` lists a physical-time type (heart rate)
+  in an instant window of at most a day. A closed `DataType` table (`datatypes.go`) holds each type's filter field (civil start,
   sleep's civil end, physical UTC instant from `LocalDate.Bounds`, or date), page size (25 for sleep/exercise) and
   dailyRollUp range cap (14 days for total-calories, 90 otherwise; longer ranges are split). `do` allows only
   `GET …/dataPoints`, `GET …/dataPoints:reconcile` and `POST …/dataPoints:dailyRollUp` (a read). Retries 429/408/5xx/
@@ -72,6 +73,15 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   day is unknown). Rows carry `metrics.AlgoVersion` and the zone; a mismatch is a miss. Missing days are fetched in
   runs of consecutive days. Source labels and the resting-HR method are stripped of control, format and separator characters and capped at 64
   runes; a label left empty falls back to the platform.
+  `Activity(from, to)`: steps, AZM (`fat+cardio+peak` as the rollup reports them; 0 on a day with Fitbit step records
+  but no AZM row, else nil) and total calories per local day from `DailyRollup` (merged across sources, I2), `Partial`
+  for today, cached per settled day only when all three are present. `Body(from, to)`: weight (kg) and body fat, the
+  last reading of each local day from every platform. `Exercises(from, to, maxHR)`: Fitbit sessions by local start
+  day (±1 day fetch), resource name as `ID`, `HR` nil without an average, `Manual` from `recordingMethod`, flags from
+  `metrics.ExerciseFlags`; with `maxHR` one `ListBetween(HeartRate)` per session. `Nutrition(from, to)`: Fitbit food
+  items by local day with per-nutrient `Total{Value, Items}` (an item without a nutrient is unknown, not 0): kcal,
+  carbs and fat from the item totals, protein/fiber/sugar/sodium (g → mg) from the nutrient list; never cached.
+  `Series`/`BaselineSeries` on each result (baselines drop partial days). `MaxRangeDays` = 366.
 - `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped; NaN/Inf count as
   missing in judgments and are rejected in series): `Baseline` (window `[before−days, before−1]`, sample sd; only
   in-window rows are validated), `ZScore` (nil below 7 nights or with no spread), `Delta`/`DeltaPct`, `EWMA` (over

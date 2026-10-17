@@ -309,9 +309,19 @@ not cached; changing `algoVersion` forces a refetch; deleting the table → iden
 zones, `manual_entry` if there's no HR), `Nutrition(date)` (items + totals; totals with partial coverage
 flagged — e.g. protein present in only some items), `Weight(range)`, `BodyFat(range)`.
 Check the low-HR list (`metrics.IsVigorous`) against the `exerciseType` values the API really returns (only
-`JIU_JITSU` is confirmed), and `metrics.IsMainMeal` against the real `mealType` values.
+`JIU_JITSU` is confirmed), and `metrics.IsMainMeal` against the real `mealType` values. *(Real data, 2026-10-17,
+structure and counts only: the daily rollup is a merged total per local civil day, not a sum of the band and the
+phone (it equals `reconcile` summed on 11 of 14 days, within 1% on 2), so steps, AZM and total calories come from
+`dailyRollUp`; AZM rollup sums are already Active Zone Minutes (cardio/peak count 2), and a day the band recorded
+steps without a rollup row is 0 AZM; manual exercise entries still carry band HR and zones, so `manual_entry` comes
+from `recordingMethod=MANUAL` and `no_hr_data` from a missing average; max HR comes from `heart-rate` samples in the
+session window (`ListBetween`, ~1 sample/2 s), only when asked; real exercise types: STRENGTH_TRAINING, JIU_JITSU,
+MARTIAL_ARTS, PILATES, RUNNING, TREADMILL, CORE_TRAINING — TREADMILL stays out of the low-HR list (it may be a
+walk); real meal types BREAKFAST/LUNCH/DINNER/SNACK; carbs and fat from the item totals (the list repeats carbs);
+weight from every platform (the Apple reading is a separate scale reading), the day's last reading; body fat empty.)*
 
-**Verification.** Fake API: steps from 2 sources not doubled; exercise without HR → `manual_entry`;
+**Verification.** Fake API: steps from 2 sources not doubled; exercise without HR → `no_hr_data`, logged by hand
+→ `manual_entry`;
 average HR 81 in 60 min of JIU_JITSU → `low_hr_for_activity`; today with `partial_day`; nutrition with protein
 in 1 of 3 items → partial total.
 

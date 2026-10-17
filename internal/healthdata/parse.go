@@ -26,8 +26,9 @@ var (
 )
 
 type dataSource struct {
-	Platform string `json:"platform"`
-	Device   struct {
+	Platform        string `json:"platform"`
+	RecordingMethod string `json:"recordingMethod"`
+	Device          struct {
 		DisplayName string `json:"displayName"`
 	} `json:"device"`
 }

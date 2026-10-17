@@ -6,7 +6,10 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 )
@@ -16,6 +19,12 @@ import (
 // are dropped, so a night is never counted twice or taken from the phone.
 const primaryPlatform = "FITBIT"
 
+// Reasons a readable record is left out; the caller counts them.
+var (
+	errOtherSource = errors.New("record from another platform")
+	errNoValue     = errors.New("record without a value")
+)
+
 type dataSource struct {
 	Platform string `json:"platform"`
 	Device   struct {
@@ -23,12 +32,30 @@ type dataSource struct {
 	} `json:"device"`
 }
 
-// label names the source in envelopes: the device when known, else the platform.
+const maxLabelRunes = 64
+
+// label names the source in envelopes: the device when known, else the
+// platform. It reaches the cache and tool output, which an LLM reads, so
+// control and format characters (bidi overrides, zero-width) are dropped and
+// the length is capped.
 func (d dataSource) label() string {
-	if d.Device.DisplayName != "" {
-		return d.Device.DisplayName
+	s := d.Device.DisplayName
+	if strings.TrimSpace(s) == "" {
+		s = d.Platform
 	}
-	return d.Platform
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == maxLabelRunes {
+			break
+		}
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // int64s is an int64 the API sends as a JSON string. Proto3 JSON omits
@@ -73,56 +100,84 @@ type sleepRecord struct {
 type session struct {
 	start, end           time.Time
 	asleep, awake, inBed float64
-	deep, light, rem     *float64 // nil for a night without stages
+	deep, light, rem     *float64 // nil without final stages
 	nap                  bool
-	settled              bool // processed, and stages final when it has them
-	source               string
+	// settled: processed, with final stages or a classic record. A night that
+	// is not settled may still change and is never cached.
+	settled     bool
+	unknownType bool // a sleep type other than STAGES or CLASSIC, read without stages
+	source      string
 }
 
-const maxSessionMinutes = 24 * 60
+const (
+	maxSessionMinutes = 24 * 60
+	// minuteSlack absorbs rounding between Fitbit's separately rounded
+	// minute fields when checking that the parts fit the whole.
+	minuteSlack = 2
+)
 
-// parseSleep decodes one record. ok is false for a record of another source
-// (not an error); err marks a record that cannot be read. Error texts never
-// quote the record.
-func parseSleep(raw json.RawMessage) (s session, ok bool, err error) {
+// parseSleep decodes one record. errOtherSource and errNoValue mark records
+// left out on purpose; any other error a record that cannot be read. When the
+// interval was readable, s.start and s.end are set even with an error, so
+// the caller can tell which day it concerns. Error texts never quote the
+// record.
+func parseSleep(raw json.RawMessage) (s session, err error) {
 	var r sleepRecord
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return session{}, false, errors.New("unreadable sleep record")
-	}
-	if r.DataSource.Platform != primaryPlatform {
-		return session{}, false, nil
+		return session{}, errors.New("unreadable sleep record")
 	}
 	sl := r.Sleep
-	if sl == nil || sl.Summary == nil || sl.Interval.StartTime.IsZero() || !sl.Interval.EndTime.After(sl.Interval.StartTime) {
-		return session{}, false, errors.New("sleep record without an interval or summary")
+	if sl == nil || sl.Interval.StartTime.IsZero() || !sl.Interval.EndTime.After(sl.Interval.StartTime) {
+		return session{}, errors.New("sleep record without an interval")
+	}
+	s.start, s.end = sl.Interval.StartTime, sl.Interval.EndTime
+	if r.DataSource.Platform != primaryPlatform {
+		return s, errOtherSource
+	}
+	if sl.Summary == nil {
+		return s, errors.New("sleep record without a summary")
 	}
 	sum := sl.Summary
-	s = session{
-		start: sl.Interval.StartTime, end: sl.Interval.EndTime,
-		asleep: float64(sum.MinutesAsleep), awake: float64(sum.MinutesAwake), inBed: float64(sum.MinutesInSleepPeriod),
-		nap:    sl.Metadata.Nap,
-		source: r.DataSource.label(),
+	s.asleep, s.awake, s.inBed = float64(sum.MinutesAsleep), float64(sum.MinutesAwake), float64(sum.MinutesInSleepPeriod)
+	s.nap, s.source = sl.Metadata.Nap, r.DataSource.label()
+	if s.inBed <= 0 || s.inBed > maxSessionMinutes || s.asleep <= 0 || s.awake < 0 ||
+		s.asleep+s.awake > s.inBed+minuteSlack {
+		return s, errors.New("sleep record with implausible minutes")
 	}
-	if s.asleep < 0 || s.awake < 0 || s.inBed <= 0 || s.inBed > maxSessionMinutes || s.asleep > s.inBed {
-		return session{}, false, errors.New("sleep record with implausible minutes")
-	}
-	stages := sl.Type == "STAGES"
-	if stages {
+	switch sl.Type {
+	case "STAGES":
+		if len(sum.StagesSummary) == 0 {
+			return s, errors.New("staged sleep record without stages")
+		}
 		var deep, light, rem float64
 		for _, st := range sum.StagesSummary {
+			m := float64(st.Minutes)
+			if m < 0 || m > s.inBed {
+				return s, errors.New("sleep record with implausible stage minutes")
+			}
 			switch st.Type {
 			case "DEEP":
-				deep = float64(st.Minutes)
+				deep = m
 			case "LIGHT":
-				light = float64(st.Minutes)
+				light = m
 			case "REM":
-				rem = float64(st.Minutes)
+				rem = m
 			}
 		}
-		s.deep, s.light, s.rem = &deep, &light, &rem
+		if deep+light+rem > s.asleep+minuteSlack {
+			return s, errors.New("sleep record with implausible stage minutes")
+		}
+		// Stages still being computed would read as zeros: leave them out.
+		if sl.Metadata.StagesStatus == "SUCCEEDED" {
+			s.deep, s.light, s.rem = &deep, &light, &rem
+		}
+		s.settled = sl.Metadata.Processed && s.deep != nil
+	case "CLASSIC":
+		s.settled = sl.Metadata.Processed
+	default:
+		s.unknownType = true
 	}
-	s.settled = sl.Metadata.Processed && (!stages || sl.Metadata.StagesStatus == "SUCCEEDED")
-	return s, true, nil
+	return s, nil
 }
 
 type hrvRecord struct {
@@ -140,27 +195,31 @@ type hrvSample struct {
 	rmssd float64
 }
 
-// parseHRV decodes one sample. ok is false for another source or a sample
-// without an rMSSD value (the field is optional).
-func parseHRV(raw json.RawMessage) (h hrvSample, ok bool, err error) {
+const maxRMSSD = 500
+
+// parseHRV decodes one sample; errors as parseSleep, with h.at set when the
+// sample time was readable.
+func parseHRV(raw json.RawMessage) (h hrvSample, err error) {
 	var r hrvRecord
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return hrvSample{}, false, errors.New("unreadable HRV sample")
-	}
-	if r.DataSource.Platform != primaryPlatform {
-		return hrvSample{}, false, nil
+		return hrvSample{}, errors.New("unreadable HRV sample")
 	}
 	v := r.HeartRateVariability
 	if v == nil || v.SampleTime.PhysicalTime.IsZero() {
-		return hrvSample{}, false, errors.New("HRV sample without a time")
+		return hrvSample{}, errors.New("HRV sample without a time")
 	}
-	if v.RMSSD == nil {
-		return hrvSample{}, false, nil
+	h.at = v.SampleTime.PhysicalTime
+	if r.DataSource.Platform != primaryPlatform {
+		return h, errOtherSource
 	}
-	if x := *v.RMSSD; math.IsNaN(x) || math.IsInf(x, 0) || x <= 0 || x > 500 {
-		return hrvSample{}, false, errors.New("HRV sample out of range")
+	if v.RMSSD == nil { // the field is optional
+		return h, errNoValue
 	}
-	return hrvSample{at: v.SampleTime.PhysicalTime, rmssd: *v.RMSSD}, true, nil
+	if x := *v.RMSSD; math.IsNaN(x) || math.IsInf(x, 0) || x <= 0 || x > maxRMSSD {
+		return h, errors.New("HRV sample out of range")
+	}
+	h.rmssd = *v.RMSSD
+	return h, nil
 }
 
 type restingRecord struct {
@@ -185,27 +244,30 @@ type restingDay struct {
 	source string
 }
 
-func parseResting(raw json.RawMessage) (d restingDay, ok bool, err error) {
+const minRestingBPM, maxRestingBPM = 20, 250
+
+// parseResting decodes one day; errors as parseSleep, with d.date set when
+// the date was readable.
+func parseResting(raw json.RawMessage) (d restingDay, err error) {
 	var r restingRecord
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return restingDay{}, false, errors.New("unreadable resting heart rate record")
-	}
-	if r.DataSource.Platform != primaryPlatform {
-		return restingDay{}, false, nil
+		return restingDay{}, errors.New("unreadable resting heart rate record")
 	}
 	v := r.DailyRestingHeartRate
 	if v == nil {
-		return restingDay{}, false, errors.New("resting heart rate record without a value")
+		return restingDay{}, errors.New("resting heart rate record without a value")
 	}
 	t := time.Date(v.Date.Year, time.Month(v.Date.Month), v.Date.Day, 0, 0, 0, 0, time.UTC)
 	if v.Date.Year == 0 || t.Year() != v.Date.Year || int(t.Month()) != v.Date.Month || t.Day() != v.Date.Day {
-		return restingDay{}, false, errors.New("resting heart rate record with an invalid date")
+		return restingDay{}, errors.New("resting heart rate record with an invalid date")
 	}
-	if bpm := float64(v.BeatsPerMinute); bpm < 20 || bpm > 250 {
-		return restingDay{}, false, errors.New("resting heart rate out of range")
+	d.date = coach.LocalDate(t.Format(time.DateOnly))
+	if r.DataSource.Platform != primaryPlatform {
+		return d, errOtherSource
 	}
-	return restingDay{
-		date: coach.LocalDate(t.Format(time.DateOnly)), bpm: float64(v.BeatsPerMinute),
-		method: v.Metadata.CalculationMethod, source: r.DataSource.label(),
-	}, true, nil
+	if bpm := float64(v.BeatsPerMinute); bpm < minRestingBPM || bpm > maxRestingBPM {
+		return d, errors.New("resting heart rate out of range")
+	}
+	d.bpm, d.method, d.source = float64(v.BeatsPerMinute), v.Metadata.CalculationMethod, r.DataSource.label()
+	return d, nil
 }

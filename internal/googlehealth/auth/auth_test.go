@@ -116,13 +116,28 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(`{"installed": {"client_secret": "secret-synthetic"`)
-	if _, err := LoadConfig(path, Endpoint); err == nil || strings.Contains(err.Error(), "secret-synthetic") {
-		t.Errorf("broken JSON: err = %v, want an error that does not quote the file", err)
+	// A file that exists but cannot be used is actionable, never internal_error.
+	unusable := func(name string, want string) {
+		t.Helper()
+		_, err := LoadConfig(path, Endpoint)
+		te := coach.AsToolError(err)
+		if te.Code != coach.CodeAuthExpired || !strings.Contains(te.Message, want) || !strings.Contains(te.Hint, path) ||
+			strings.Contains(err.Error(), "secret-synthetic") {
+			t.Errorf("%s: err = %v (%+v)", name, err, te)
+		}
 	}
-	write(`{"web": {"client_id": "id", "client_secret": "s"}}`)
-	if _, err := LoadConfig(path, Endpoint); err == nil || !strings.Contains(err.Error(), "Desktop") {
-		t.Errorf("web client: err = %v, want a Desktop app error", err)
+	write(`{"installed": {"client_secret": "secret-synthetic"`)
+	unusable("broken JSON", "not valid JSON")
+	write(`{"web": {"client_id": "id", "client_secret": "secret-synthetic"}}`)
+	unusable("web client", "Desktop")
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 { // root reads it anyway
+		unusable("unreadable", "cannot be read")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	write(`{"installed": {"client_id": "id-synthetic", "client_secret": "secret-synthetic", "redirect_uris": ["http://localhost"]}}`)
 	conf, err := LoadConfig(path, Endpoint)

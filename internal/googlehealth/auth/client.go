@@ -62,7 +62,7 @@ func LoadConfig(path string, endpoint oauth2.Endpoint) (*oauth2.Config, error) {
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read OAuth client: %w", err)
+		return nil, fmt.Errorf("%w: %w", unusableClient(path, "it cannot be read"), err)
 	}
 	// Only the fields are read; the file content never goes into an error.
 	var file struct {
@@ -72,10 +72,10 @@ func LoadConfig(path string, endpoint oauth2.Endpoint) (*oauth2.Config, error) {
 		} `json:"installed"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse OAuth client %s: not valid JSON", path)
+		return nil, unusableClient(path, "it is not valid JSON")
 	}
 	if file.Installed == nil || file.Installed.ClientID == "" {
-		return nil, fmt.Errorf("OAuth client %s is not a Desktop app client (no \"installed\" client_id)", path)
+		return nil, unusableClient(path, `it is not a Desktop app client (no "installed" client_id)`)
 	}
 	return &oauth2.Config{
 		ClientID:     file.Installed.ClientID,
@@ -83,6 +83,16 @@ func LoadConfig(path string, endpoint oauth2.Endpoint) (*oauth2.Config, error) {
 		Endpoint:     endpoint,
 		Scopes:       slices.Clone(Scopes),
 	}, nil
+}
+
+// unusableClient is a client file that exists but cannot be used: an
+// actionable error rather than internal_error, since only the user can fix it.
+func unusableClient(path, reason string) error {
+	return coach.ToolError{
+		Code:    coach.CodeAuthExpired,
+		Message: "the OAuth client file cannot be used: " + reason,
+		Hint:    fmt.Sprintf("replace %s with the Desktop app client JSON from the Cloud console, then run %s", path, LoginCommand),
+	}
 }
 
 // MissingScopes lists the coach scopes not in granted, in Scopes order. Google

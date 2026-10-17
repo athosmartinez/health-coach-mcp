@@ -73,20 +73,25 @@ func ErrorResult(err error) *mcp.CallToolResult {
 
 // ErrorTypes names the types along an error chain ("*fmt.wrapError > *sqlite.Error"):
 // enough to tell a database fault from a bug without logging any message text.
+// Every branch of a multi-%w or joined error is walked, depth first.
 func ErrorTypes(err error) string {
+	const maxTypes = 8
 	var types []string
-	for err != nil && len(types) < 8 {
+	var walk func(error)
+	walk = func(err error) {
+		if err == nil || len(types) == maxTypes {
+			return
+		}
 		types = append(types, fmt.Sprintf("%T", err))
 		switch u := err.(type) {
 		case interface{ Unwrap() []error }:
-			if errs := u.Unwrap(); len(errs) > 0 {
-				err = errs[0]
-				continue
+			for _, e := range u.Unwrap() {
+				walk(e)
 			}
-			err = nil
-		default:
-			err = errors.Unwrap(err)
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap())
 		}
 	}
+	walk(err)
 	return strings.Join(types, " > ")
 }

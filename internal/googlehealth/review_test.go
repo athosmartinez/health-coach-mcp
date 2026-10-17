@@ -1,12 +1,14 @@
 package googlehealth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,17 +31,22 @@ func list(c *Client) error {
 
 func TestUnexpectedPageShapes(t *testing.T) {
 	for body, wantErr := range map[string]bool{
-		`{}`:                                     false, // the API omits an empty list
-		`{"nextPageToken": ""}`:                  false,
-		`null`:                                   true,
-		`{"error": {"code": 500}}`:               true,
-		`{"data_points": [{"a": 1}]}`:            true,
-		`{"dataPoints": {}}`:                     true,
-		`{"dataPoints": [], "nextPageToken": 7}`: true,
-		`{"dataPoints": [], "newField": 1}`:      false, // a field added by Google does not drop the data
-		`{"dataPoints": [], "pageToken": "p2"}`:  true,  // a renamed continuation would end the range early
-		`{"dataPoints": [], "nextCursor": "p2"}`: true,
-		`{"dataPoints": [], "next_page": "p2"}`:  true,
+		`{}`:                                      false, // the API omits an empty list
+		`{"nextPageToken": ""}`:                   false,
+		`null`:                                    true,
+		`{"error": {"code": 500}}`:                true,
+		`{"data_points": [{"a": 1}]}`:             true,
+		`{"dataPoints": {}}`:                      true,
+		`{"dataPoints": [], "nextPageToken": 7}`:  true,
+		`{"dataPoints": [], "newField": 1}`:       false, // a field added by Google does not drop the data
+		`{"dataPoints": [], "pageToken": "p2"}`:   true,  // a renamed continuation would end the range early
+		`{"dataPoints": [], "nextCursor": "p2"}`:  true,
+		`{"dataPoints": [], "next_page": "p2"}`:   true,
+		`{"dataPoints": [], "hasMore": true}`:     true,
+		`{"dataPoints": [], "continuation": "x"}`: true,
+		`{"dataPoints": [], "OFFSET": 25}`:        true,
+		`{"dataPoints": [], "truncated": true}`:   true,
+		`{"dataPoints": [], "remaining": 3}`:      true,
 	} {
 		api := newFakeAPI(t, func(w http.ResponseWriter, _ int, _ request) {
 			w.WriteHeader(200)
@@ -203,7 +210,8 @@ func TestPermanentNetworkErrorsFailFast(t *testing.T) {
 	if te := coach.AsToolError(err); te.Code != coach.CodeUpstreamUnavailable || !strings.Contains(te.Message, "verified") || waits != 0 {
 		t.Errorf("err = %v after %d waits", err, waits)
 	}
-	if !permanent(&net.DNSError{Err: "no such host", Name: "health.invalid", IsNotFound: true}) || permanent(errors.New("connection reset")) {
+	if !permanent(&net.DNSError{Err: "no such host", Name: "health.invalid", IsNotFound: true}) || permanent(errors.New("connection reset")) ||
+		permanent(&net.DNSError{Err: "server misbehaving", Name: "health.invalid", IsTemporary: true}) {
 		t.Error("permanent() misclassifies")
 	}
 }
@@ -494,4 +502,27 @@ func TestWithTheRealTokenSource(t *testing.T) {
 			t.Errorf("err = %v, %d renewals", err, renewals.Load())
 		}
 	})
+}
+
+// A rejected request is logged with its HTTP status and Google's enum, never
+// the body.
+func TestRejectedRequestIsLogged(t *testing.T) {
+	api := newFakeAPI(t, func(w http.ResponseWriter, _ int, _ request) {
+		apiError(w, 400, "INVALID_ARGUMENT", "filter near 2026-10-01")
+	})
+	c, _ := newTestClient(t, api, &fakeTokens{})
+	var buf bytes.Buffer
+	c.log = slog.New(slog.NewTextHandler(&buf, nil))
+	if _, err := c.List(context.Background(), Steps, day("2026-10-01"), day("2026-10-01")); err == nil {
+		t.Fatal("no error")
+	}
+	out := buf.String()
+	for _, want := range []string{"request rejected", "data_type=steps", "http_status=400", "google_status=INVALID_ARGUMENT"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q lacks %q", out, want)
+		}
+	}
+	if strings.Contains(out, "near") {
+		t.Errorf("log quotes the body: %q", out)
+	}
 }

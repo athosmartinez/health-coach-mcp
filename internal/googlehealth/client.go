@@ -278,7 +278,19 @@ func (c *Client) collect(dt DataType, key string, fetch func(token string) ([]by
 // continuation marker (nextPageToken renamed or joined by another).
 func pagingField(name string) bool {
 	n := strings.ToLower(name)
-	return strings.Contains(n, "token") || strings.Contains(n, "page") || strings.Contains(n, "next") || strings.Contains(n, "cursor")
+	for _, w := range pagingWords {
+		if strings.Contains(n, w) {
+			return true
+		}
+	}
+	return false
+}
+
+var pagingWords = []string{"token", "page", "next", "cursor", "more", "contin", "offset", "after", "trunc", "partial", "remain"}
+
+// quota reports a 403 that is a rate limit (RESOURCE_EXHAUSTED), not a denial.
+func quota(status int, body []byte) bool {
+	return status == http.StatusForbidden && statusError(status, body).Status == "RESOURCE_EXHAUSTED"
 }
 
 // tooMuch is a range whose data exceeds the page or byte budget.
@@ -340,8 +352,9 @@ func allowed(method, path string) (DataType, bool) {
 	return DataType(m[1]), true
 }
 
-// do sends one logical request: it retries 429, 408, 5xx and network errors
-// with backoff, and renews the token once on a 401 or a stale-token 403.
+// do sends one logical request: it retries 429, 408, 5xx, a quota 403
+// (RESOURCE_EXHAUSTED) and network errors with backoff, and renews the token
+// once on a 401 or a stale-token 403.
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, body []byte) ([]byte, error) {
 	dt, ok := allowed(method, path)
 	if !ok {
@@ -388,20 +401,23 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 				Message: "Google Health rejected the sign-in",
 				Hint:    "run " + auth.LoginCommand,
 			}, statusError(status, respBody))
-		case status == http.StatusForbidden && statusError(status, respBody).Status != "RESOURCE_EXHAUSTED":
+		case status == http.StatusForbidden && !quota(status, respBody):
 			return nil, fmt.Errorf("%w: %w", coach.ToolError{
 				Code:    coach.CodeScopeMissing,
 				Message: fmt.Sprintf("Google Health denied access to %s data", dt),
 				Hint:    "run " + auth.LoginCommand + " and allow every permission; check the Google Health API is enabled in the Cloud project",
 			}, statusError(status, respBody))
-		case status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500 ||
-			status == http.StatusForbidden: // a quota 403 (RESOURCE_EXHAUSTED) is a rate limit
+		case status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500 || quota(status, respBody):
 			last = fmt.Errorf("%w: %w", unavailable("Google Health API is unavailable"), statusError(status, respBody))
 			if wait = retryAfter(header, time.Now()); wait > maxRetryAfter {
 				return nil, last
 			}
 		default:
-			return nil, fmt.Errorf("googlehealth: %s request rejected: %w", dt, statusError(status, respBody))
+			se := statusError(status, respBody)
+			// A changed filter field or API version lands here; the status and
+			// Google's enum are the only signal (the body is never logged).
+			c.log.Warn("google health request rejected", "data_type", string(dt), "http_status", status, "google_status", se.Status)
+			return nil, fmt.Errorf("googlehealth: %s request rejected: %w", dt, se)
 		}
 		if failures++; failures >= maxAttempts {
 			return nil, last

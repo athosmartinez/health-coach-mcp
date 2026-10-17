@@ -74,7 +74,12 @@ func TestWireErrorIsJSONAndUnwraps(t *testing.T) {
 func TestErrorTypes(t *testing.T) {
 	base := &json.SyntaxError{}
 	wrapped := fmt.Errorf("read: %w", errors.Join(base, errors.New("second")))
-	if got, want := ErrorTypes(wrapped), "*fmt.wrapError > *errors.joinError > *json.SyntaxError"; got != want {
+	if got, want := ErrorTypes(wrapped), "*fmt.wrapError > *errors.joinError > *json.SyntaxError > *errors.errorString"; got != want {
+		t.Errorf("ErrorTypes = %q, want %q", got, want)
+	}
+	// Both sides of a "%w: %w" error, the shape the API client returns.
+	two := fmt.Errorf("%w: %w", ToolError{Code: CodeAuthExpired}, &json.SyntaxError{})
+	if got, want := ErrorTypes(two), "*fmt.wrapErrors > coach.ToolError > *json.SyntaxError"; got != want {
 		t.Errorf("ErrorTypes = %q, want %q", got, want)
 	}
 	if got := ErrorTypes(nil); got != "" {

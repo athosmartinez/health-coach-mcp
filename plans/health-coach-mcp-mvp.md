@@ -75,7 +75,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 2 SQLite store + migrations | `feat/store` | 1 | default | ☑ #2 |
 | 3 Coach memory tools | `feat/memory-tools` | 1, 2 | default | ☑ #3 |
 | 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☑ #4 |
-| 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☐ |
+| 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☑ #6 |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☑ #5 |
 | 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☐ |
 | 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☐ |
@@ -257,6 +257,16 @@ EWMA against values computed by hand.
 - `heart-rate-variability`: samples `{time, rootMeanSquareOfSuccessiveDifferencesMilliseconds, metadata{highFrequencyPower, lowFrequencyPower}}`.
 - `daily-resting-heart-rate`: `{date, beatsPerMinute:"57" (string), dailyRestingHeartRateMetadata{calculationMethod}}`.
 Cache rules in CAPABILITY §5.3 (settled ≥ 3 days, never `null`/partial, `algo_version`, closed list of keys).
+
+**Tasks — first, the client fixes from the PR #6 review** (in `internal/googlehealth`, before building on it):
+a 2xx page is valid only with keys ⊆ {list key, `nextPageToken`} (`null`/unknown key/error object → bad response, log key
+names only); strip `*url.Error` to its cause (no URL in error text); refuse redirects; `http` base URL only on
+loopback, no userinfo/query/fragment; page cap → `invalid_input` with a "shorter range" hint; overflowing
+Retry-After fails fast; no retry on DNS not-found/x509 (log the cause type); 403 `RESOURCE_EXHAUSTED` retried like
+429; cap on total bytes across pages; `Invalidate` reports whether it acted (log "renewing" only then). Tests: no
+body leak on every error path, rollup pages within each chunk and exact chunk boundaries, per-type table values,
+a renewal does not use a retry, Retry-After 8s vs 9s and on 503, 408 and dropped-connection recovery, cancel
+in flight, one test with the real `auth.TokenSource`.
 
 **Tasks.** `internal/healthdata`: `Source` interface (consumed by the tools) + implementation over the client;
 `SleepNight(date)` = **longest** session ending on the local day `date` (naps ignored);

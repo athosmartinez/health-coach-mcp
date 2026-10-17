@@ -223,6 +223,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
   date TEXT NOT NULL, metric TEXT NOT NULL,                  -- metric from the closed list in 5.3
   value REAL NOT NULL, n_samples INTEGER, source TEXT,
   algo_version INTEGER NOT NULL,                             -- bump when the derivation changes
+  zone TEXT,                                                 -- IANA zone it was computed in (migration 0003)
   fetched_at TEXT NOT NULL,
   PRIMARY KEY (date, metric)
 );
@@ -232,7 +233,8 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 - Only **settled days** (≥ 3 days ago) are cached in `daily_metrics`. The last 3 days are always
   fetched live, because the band syncs late and nutrition is logged after the fact.
 - **Never cache** a missing value (`null`) or a day with partial coverage — it gets fetched again next time.
-- A row with `algo_version` different from the code's is ignored and recomputed.
+- A row with `algo_version` different from the code's is ignored and recomputed, and so is a row computed in
+  another time zone (or with none): the sleep start minute and the day a night belongs to depend on it.
 - Closed list of keys (scalars per day): `sleep_asleep_min`, `sleep_awake_min`, `sleep_in_bed_min`,
   `sleep_deep_min`, `sleep_light_min`, `sleep_rem_min`, `sleep_start_min_of_day`, `hrv_rmssd_ms`,
   `resting_hr_bpm`, `steps`, `azm_min`, `total_calories_kcal`, `weight_kg`, `body_fat_pct`.

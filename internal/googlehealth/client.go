@@ -235,17 +235,19 @@ func (c *Client) collect(dt DataType, key string, fetch func(token string) ([]by
 		// The API omits an empty list, so a page without the list key is a
 		// page with no points only when nothing else is in it: an error
 		// object or a renamed field read as "no data" would hide the problem.
-		// With the list present, a new field is logged and tolerated.
+		// With the list present, a new field is logged and tolerated, unless
+		// it looks like paging: a renamed page token read as "last page"
+		// would silently cut the range short.
 		_, hasList := page[key]
 		for k := range page {
 			if k == key || k == "nextPageToken" {
 				continue
 			}
-			if !hasList {
-				c.log.Warn("google health response has no data list and an unexpected field", "data_type", string(dt), "field", truncate(k, 40))
+			if !hasList || pagingField(k) {
+				c.log.Warn("google health response has an unexpected field", "data_type", string(dt), "field", truncate(k, 40), "has_list", hasList)
 				return nil, badResponse(dt)
 			}
-			c.log.Info("google health response has a new field", "data_type", string(dt), "field", truncate(k, 40))
+			c.log.Warn("google health response has a new field", "data_type", string(dt), "field", truncate(k, 40))
 		}
 		var items []json.RawMessage
 		if raw, ok := page[key]; ok {
@@ -270,6 +272,13 @@ func (c *Client) collect(dt DataType, key string, fetch func(token string) ([]by
 		token = next
 	}
 	return nil, tooMuch(dt)
+}
+
+// pagingField reports whether an unknown response field name looks like a
+// continuation marker (nextPageToken renamed or joined by another).
+func pagingField(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "token") || strings.Contains(n, "page") || strings.Contains(n, "next") || strings.Contains(n, "cursor")
 }
 
 // tooMuch is a range whose data exceeds the page or byte budget.

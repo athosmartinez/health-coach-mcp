@@ -37,6 +37,9 @@ func TestUnexpectedPageShapes(t *testing.T) {
 		`{"dataPoints": {}}`:                     true,
 		`{"dataPoints": [], "nextPageToken": 7}`: true,
 		`{"dataPoints": [], "newField": 1}`:      false, // a field added by Google does not drop the data
+		`{"dataPoints": [], "pageToken": "p2"}`:  true,  // a renamed continuation would end the range early
+		`{"dataPoints": [], "nextCursor": "p2"}`: true,
+		`{"dataPoints": [], "next_page": "p2"}`:  true,
 	} {
 		api := newFakeAPI(t, func(w http.ResponseWriter, _ int, _ request) {
 			w.WriteHeader(200)

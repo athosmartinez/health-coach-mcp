@@ -3,6 +3,8 @@ package coach
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -67,4 +69,24 @@ func ErrorResult(err error) *mcp.CallToolResult {
 	res := &mcp.CallToolResult{}
 	res.SetError(ToWire(err))
 	return res
+}
+
+// ErrorTypes names the types along an error chain ("*fmt.wrapError > *sqlite.Error"):
+// enough to tell a database fault from a bug without logging any message text.
+func ErrorTypes(err error) string {
+	var types []string
+	for err != nil && len(types) < 8 {
+		types = append(types, fmt.Sprintf("%T", err))
+		switch u := err.(type) {
+		case interface{ Unwrap() []error }:
+			if errs := u.Unwrap(); len(errs) > 0 {
+				err = errs[0]
+				continue
+			}
+			err = nil
+		default:
+			err = errors.Unwrap(err)
+		}
+	}
+	return strings.Join(types, " > ")
 }

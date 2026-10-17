@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -24,9 +25,13 @@ type LazyTokenSource struct {
 }
 
 // NewLazyTokenSource reads <configDir>/client_secret.json and credentials.json
-// when first needed; see NewTokenSource for ctx and log.
-func NewLazyTokenSource(ctx context.Context, configDir string, endpoint oauth2.Endpoint, log *slog.Logger) *LazyTokenSource {
-	return &LazyTokenSource{ctx: ctx, dir: configDir, endpoint: endpoint, log: log}
+// when first needed; see NewTokenSource for ctx and log. configDir must be
+// absolute, so the files never resolve against the working directory.
+func NewLazyTokenSource(ctx context.Context, configDir string, endpoint oauth2.Endpoint, log *slog.Logger) (*LazyTokenSource, error) {
+	if !filepath.IsAbs(configDir) {
+		return nil, fmt.Errorf("auth: config dir %q must be an absolute path", configDir)
+	}
+	return &LazyTokenSource{ctx: ctx, dir: configDir, endpoint: endpoint, log: log}, nil
 }
 
 func (l *LazyTokenSource) source() (*TokenSource, error) {

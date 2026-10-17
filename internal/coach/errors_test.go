@@ -70,3 +70,14 @@ func TestWireErrorIsJSONAndUnwraps(t *testing.T) {
 		t.Error("WireError must unwrap to its ToolError")
 	}
 }
+
+func TestErrorTypes(t *testing.T) {
+	base := &json.SyntaxError{}
+	wrapped := fmt.Errorf("read: %w", errors.Join(base, errors.New("second")))
+	if got, want := ErrorTypes(wrapped), "*fmt.wrapError > *errors.joinError > *json.SyntaxError"; got != want {
+		t.Errorf("ErrorTypes = %q, want %q", got, want)
+	}
+	if got := ErrorTypes(nil); got != "" {
+		t.Errorf("ErrorTypes(nil) = %q", got)
+	}
+}

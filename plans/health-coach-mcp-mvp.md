@@ -36,7 +36,7 @@
   inferred schema carries `coach.DatePattern`. `Bounds(loc) (start, end, error)` and `AddDays(n) (LocalDate, error)`
   return errors instead of panicking; `Bounds` handles DST days (23h/25h) and skipped midnights.
 - **`main` wiring (single place, `cmd/health-coach-mcp/main.go`):** `config.Load` → `store.Open` (from Step 2)
-  → `googlehealth.New` (from Step 4b) → `healthdata.New` (from Step 6a) → `server.New`. Subcommands
+  → `googlehealth.New` (client from Step 4b, wired in Step 6a) → `healthdata.New` (from Step 6a) → `server.New`. Subcommands
   (`auth login|status`) are dispatched **before** parsing the server flags (Step 4a).
 - **Tool schemas:** built with `jsonschema.For[In]()` from `github.com/google/jsonschema-go` and patched
   with `Enum`s/`Format`s through helpers in `internal/tools/schema.go` (the `jsonschema` tag is a **description
@@ -212,8 +212,12 @@ To see a real request without executing it: `ghealth data <type> list --dry-run`
 **Verification.** `httptest.Server` with **synthetic** JSON in the format of `--dry-run`/docs: 3 pages,
 429→200, 401→refresh→200, 401 twice → `auth_expired`, 403 → `scope_missing`.
 
-**Exit criteria.** Coverage ≥ 80% on the package; `grep -rE 'POST|PATCH|DELETE' internal/googlehealth` returns
-only the token endpoint.
+**Exit criteria.** Coverage ≥ 80% on the package. Read-only (R2) is enforced in code: the one request builder
+(`do`) allows only `GET …/dataPoints`, `GET …/dataPoints:reconcile` and `POST …/dataPoints:dailyRollUp` (the API
+defines dailyRollUp as a POST that reads), and a test asserts every other method/path is refused before sending.
+(The original grep criterion could not hold: dailyRollUp itself is a POST.)
+**`main` wiring** moves to Step 6a: nothing consumes the client before `healthdata.New`, and building the token
+source needs `client_secret.json`, whose absence must not stop the memory tools from starting.
 **Rollback.** Revert.
 
 ---
@@ -258,7 +262,10 @@ Cache rules in CAPABILITY §5.3 (settled ≥ 3 days, never `null`/partial, `algo
 `SleepNight(date)` = **longest** session ending on the local day `date` (naps ignored);
 `HRVNightly(range)` = median rMSSD of the samples **inside the window of that night's main session**
 (not by calendar date); `RestingHR(range)` (parse the string bpm); cache read/write per §5.3 with
-`const algoVersion = 1`; `Now` from `Deps`.
+`const algoVersion = 1`; `Now` from `Deps`. Wire `googlehealth.New` + `auth.NewTokenSource` in `main` so a missing
+`client_secret.json` or sign-in does not stop startup (health tools then answer `auth_expired`; memory tools keep
+working). The client filters by the local day of each record: HRV samples of a night that starts the evening before
+need `List(HeartRateVariability, date−1, date)`, then the session window narrows them.
 
 **Verification.** Fake API: sleep 23:10→07:40 counted on the end day; a 20-min nap the same day ignored;
 HRV sample at 23:30 belongs to the night that ends the next day; D-5 cache hit, D-1 always live; `nil` value

@@ -23,12 +23,15 @@ var MetricKeys = []string{
 // Metric is one cached daily value. The cache is disposable: deciding what to
 // cache (settled days only, never null or partial) is the caller's job.
 type Metric struct {
-	Date     coach.LocalDate `json:"date"`
-	Key      string          `json:"metric"`
-	Value    float64         `json:"value"`
-	NSamples *int            `json:"n_samples,omitempty"`
-	Source   string          `json:"source,omitempty"`
-	// Zone is the IANA time zone the value was computed in, when it depends on one.
+	Date  coach.LocalDate `json:"date"`
+	Key   string          `json:"metric"`
+	Value float64         `json:"value"`
+	// NSamples is an optional count stored with the value; for hrv_rmssd_ms
+	// it is the number of 5-minute slots holding a sample.
+	NSamples *int   `json:"n_samples,omitempty"`
+	Source   string `json:"source,omitempty"`
+	// Zone is the IANA time zone the value was computed in (healthdata always
+	// sets it and treats another zone, or none, as a miss).
 	Zone        string    `json:"zone,omitempty"`
 	AlgoVersion int       `json:"algo_version"`
 	FetchedAt   time.Time `json:"fetched_at"`

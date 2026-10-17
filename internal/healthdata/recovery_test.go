@@ -151,6 +151,7 @@ type fakeAPI struct {
 	records map[googlehealth.DataType][]json.RawMessage
 	calls   []string
 	err     error
+	loose   bool // return every record, ignoring the range, like a sloppy filter
 }
 
 func (f *fakeAPI) add(dt googlehealth.DataType, recs ...json.RawMessage) {
@@ -172,7 +173,7 @@ func (f *fakeAPI) List(_ context.Context, dt googlehealth.DataType, from, to coa
 	var out []json.RawMessage
 	for _, raw := range f.records[dt] {
 		day := recordDay(dt, raw)
-		if day == "" || (day >= from && day <= to) { // records without a readable day always come back
+		if f.loose || day == "" || (day >= from && day <= to) { // records without a readable day always come back
 			out = append(out, raw)
 		}
 	}
@@ -683,9 +684,12 @@ func TestHRVCoverage(t *testing.T) {
 			samples:  hrvNight(at("2026-10-09", 23, 0), at("2026-10-10", 2, 55), 50),
 			coverage: 0.5,
 		},
-		"phone samples": { // Apple Health HRV inside the night is not the band's
+		"phone samples": { // Apple Health HRV inside the night is not the band's; not "no HRV" either
 			samples: hrvEvery(at("2026-10-09", 23, 0), at("2026-10-10", 7, 0), 5*time.Minute, 50, "HEALTH_KIT"),
-			cached:  true,
+		},
+		"only the second half": {
+			samples:  hrvNight(at("2026-10-10", 3, 0), at("2026-10-10", 6, 55), 50),
+			coverage: 0.5,
 		},
 		"no samples": {cached: true},
 	} {
@@ -707,6 +711,30 @@ func TestHRVCoverage(t *testing.T) {
 			}
 		})
 	}
+	t.Run("exactly 12 samples", func(t *testing.T) {
+		api := &fakeAPI{}
+		api.add(googlehealth.Sleep, sleepRec(at("2026-10-10", 1, 0), at("2026-10-10", 2, 0), sleepOpt{deep: 10}))
+		api.add(googlehealth.HeartRateVariability, hrvNight(at("2026-10-10", 1, 0), at("2026-10-10", 1, 55), 50)...)
+		d, _ := newData(t, api)
+		r, _ := d.Recovery(ctx, d10, d10)
+		if n := r.Nights[d10]; n.HRV == nil || n.HRVCoverage != 1 {
+			t.Errorf("night %+v", n)
+		}
+	})
+	t.Run("slots round up and read back the same", func(t *testing.T) {
+		api := &fakeAPI{}
+		// 62 minutes is 13 slots; a sample every 10 minutes fills 7 of them.
+		api.add(googlehealth.Sleep, sleepRec(at("2026-10-10", 1, 0), at("2026-10-10", 2, 2), sleepOpt{deep: 10}))
+		api.add(googlehealth.HeartRateVariability, hrvEvery(at("2026-10-10", 1, 0), at("2026-10-10", 2, 0), 10*time.Minute, 50, "FITBIT")...)
+		api.add(googlehealth.HeartRateVariability, hrvEvery(at("2026-10-10", 1, 1), at("2026-10-10", 2, 1), 10*time.Minute, 50, "FITBIT")...)
+		d, _ := newData(t, api)
+		live, _ := d.Recovery(ctx, d10, d10)
+		if n := live.Nights[d10]; n.HRV == nil || n.HRVCoverage != 7.0/13 {
+			t.Fatalf("night %+v", n)
+		}
+		cached, _ := d.Recovery(ctx, d10, d10)
+		assertSame(t, live, cached)
+	})
 	t.Run("too few samples for a short night", func(t *testing.T) {
 		api := &fakeAPI{}
 		api.add(googlehealth.Sleep, sleepRec(at("2026-10-10", 1, 0), at("2026-10-10", 1, 55), sleepOpt{deep: 10}))
@@ -1017,24 +1045,30 @@ func TestParseSleepBounds(t *testing.T) {
 		raw  string
 		good bool
 	}{
-		"consistent":           {rec(440, 40, 480, stages(60, 300, 80)), true},
-		"rounding slack":       {rec(440, 42, 480, stages(60, 302, 80)), true},
-		"parts exceed the bed": {rec(440, 43, 480, stages(60, 300, 80)), false},
-		"stages exceed asleep": {rec(440, 40, 480, stages(60, 303, 80)), false},
-		"no time asleep":       {rec(0, 480, 480, stages(0, 0, 0)), false},
-		"negative awake":       {rec(440, -1, 480, stages(60, 300, 80)), false},
-		"negative stage":       {rec(440, 40, 480, stages(-1, 300, 80)), false},
-		"stage beyond the bed": {rec(440, 40, 480, stages(481, 0, 0)), false},
-		"no stage list":        {rec(440, 40, 480, ""), false},
-		"longer than a day":    {rec(1400, 41, 1441, stages(60, 300, 80)), false},
-		"a full day":           {rec(1400, 40, 1440, stages(60, 300, 80)), true},
-		"empty summary":        {sleepJSON(`{}`), false},
-		"no summary":           {`{"dataSource":{"platform":"FITBIT"},"sleep":{"interval":{"startTime":"2026-10-10T00:00:00Z","endTime":"2026-10-10T08:00:00Z"}}}`, false},
-		"no record":            {`{"dataSource":{"platform":"FITBIT"}}`, false},
-		"not json":             {`not json`, false},
-		"end before start":     {`{"dataSource":{"platform":"FITBIT"},"sleep":{"interval":{"startTime":"2026-10-10T07:00:00Z","endTime":"2026-10-10T06:00:00Z"},"summary":{"minutesInSleepPeriod":"60"}}}`, false},
-		"minutes not a number": {sleepJSON(`{"minutesAsleep":"x"}`), false},
-		"minutes as a float":   {sleepJSON(`{"minutesAsleep":"1.5"}`), false},
+		"consistent":             {rec(440, 40, 480, stages(60, 300, 80)), true},
+		"rounding slack":         {rec(440, 42, 480, stages(60, 302, 80)), true},
+		"parts exceed the bed":   {rec(440, 43, 480, stages(60, 300, 80)), false},
+		"stages exceed asleep":   {rec(440, 40, 480, stages(60, 303, 80)), false},
+		"no time asleep":         {rec(0, 480, 480, stages(0, 0, 0)), false},
+		"negative awake":         {rec(440, -1, 480, stages(60, 300, 80)), false},
+		"negative stage":         {rec(440, 40, 480, stages(-1, 300, 80)), false},
+		"stage beyond the bed":   {rec(440, 40, 480, stages(481, 0, 0)), false},
+		"no stage list":          {rec(440, 40, 480, ""), false},
+		"longer than a day":      {rec(1400, 41, 1441, stages(60, 300, 80)), false},
+		"a full day":             {rec(1400, 40, 1440, stages(200, 1000, 200)), true},
+		"stages short of asleep": {rec(440, 40, 480, stages(60, 297, 80)), false},
+		"a renamed stage":        {rec(440, 40, 480, `,"stagesSummary":[{"type":"DEEP","minutes":"60"},{"type":"NREM_LIGHT","minutes":"300"},{"type":"REM","minutes":"80"}]`), false},
+		"an extra unknown stage": {rec(440, 40, 480, `,"stagesSummary":[{"type":"DEEP","minutes":"60"},{"type":"LIGHT","minutes":"300"},{"type":"REM","minutes":"80"},{"type":"ONSET","minutes":"5"}]`), false},
+		"a stage listed twice":   {rec(440, 40, 480, `,"stagesSummary":[{"type":"DEEP","minutes":"60"},{"type":"LIGHT","minutes":"300"},{"type":"REM","minutes":"80"},{"type":"REM","minutes":"80"}]`), false},
+		"a repeated stage":       {rec(440, 40, 480, `,"stagesSummary":[{"type":"DEEP","minutes":"60"},{"type":"LIGHT","minutes":"150"},{"type":"LIGHT","minutes":"150"},{"type":"REM","minutes":"80"}]`), false},
+		"with the awake stage":   {rec(440, 40, 480, stages(60, 300, 80)[:len(stages(60, 300, 80))-1]+`,{"type":"AWAKE","minutes":"40"}]`), true},
+		"empty summary":          {sleepJSON(`{}`), false},
+		"no summary":             {`{"dataSource":{"platform":"FITBIT"},"sleep":{"interval":{"startTime":"2026-10-10T00:00:00Z","endTime":"2026-10-10T08:00:00Z"}}}`, false},
+		"no record":              {`{"dataSource":{"platform":"FITBIT"}}`, false},
+		"not json":               {`not json`, false},
+		"end before start":       {`{"dataSource":{"platform":"FITBIT"},"sleep":{"interval":{"startTime":"2026-10-10T07:00:00Z","endTime":"2026-10-10T06:00:00Z"},"summary":{"minutesInSleepPeriod":"60"}}}`, false},
+		"minutes not a number":   {sleepJSON(`{"minutesAsleep":"x"}`), false},
+		"minutes as a float":     {sleepJSON(`{"minutesAsleep":"1.5"}`), false},
 	} {
 		s, err := parseSleep(json.RawMessage(tc.raw))
 		if (err == nil) != tc.good {
@@ -1136,8 +1170,10 @@ func TestSourceLabel(t *testing.T) {
 		{"", "FITBIT", "FITBIT"},
 		{"   ", "FITBIT", "FITBIT"},
 		{"Band\n\tIgnore previous instructions", "FITBIT", "BandIgnore previous instructions"},
-		{"Band‮​X", "FITBIT", "BandX"}, // bidi override, zero-width space
-		{"Band\xff", "FITBIT", "Band"}, // invalid UTF-8
+		{"Band‮​X", "FITBIT", "BandX"},       // bidi override, zero-width space
+		{"Band\xff", "FITBIT", "Band"},       // invalid UTF-8
+		{"Band\u2028X", "FITBIT", "BandX"},   // line separator
+		{"\u202e\u200b", "FITBIT", "FITBIT"}, // nothing visible left: the platform
 		{strings.Repeat("é", 100), "FITBIT", strings.Repeat("é", maxLabelRunes)},
 	} {
 		if got := label(tc.name, tc.platform); got != tc.want {
@@ -1164,6 +1200,165 @@ func TestMedian(t *testing.T) {
 	}{{[]float64{1}, 1}, {[]float64{3, 1, 2}, 2}, {[]float64{4, 1, 3, 2}, 2.5}} {
 		if got := median(tc.in); got != tc.want {
 			t.Errorf("median(%v) = %v", tc.in, got)
+		}
+	}
+}
+
+func TestNightsInAZoneAheadOfUTC(t *testing.T) {
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{}
+	// 23:00 → 06:30 Tokyo ends at 21:30Z the day before.
+	start := time.Date(2026, 10, 9, 23, 0, 0, 0, tokyo)
+	end := time.Date(2026, 10, 10, 6, 30, 0, 0, tokyo)
+	api.add(googlehealth.Sleep, sleepRec(start, end, sleepOpt{deep: 60}))
+	api.add(googlehealth.HeartRateVariability, hrvNight(start, end.Add(-5*time.Minute), 50)...)
+	api.loose = true // the fake filters in São Paulo days
+	st := openStore(t)
+	d, _ := New(api, st, tokyo, func() time.Time { return now }, nil)
+	r, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, ok := r.Nights[day("2026-10-10")]
+	if !ok || n.StartMinOfDay != 23*60 || n.HRV == nil {
+		t.Fatalf("nights = %+v", r.Nights)
+	}
+	api.takeCalls()
+	again, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if calls := api.takeCalls(); len(calls) != 1 {
+		t.Errorf("the Tokyo night was not a cache hit: %v", calls)
+	}
+	assertSame(t, r, again)
+}
+
+func TestSplitNightWithAnUnprocessedFirstPart(t *testing.T) {
+	api := &fakeAPI{}
+	api.add(googlehealth.Sleep,
+		sleepRec(at("2026-10-09", 23, 0), at("2026-10-10", 2, 0), sleepOpt{deep: 40, unprocessed: true}),
+		sleepRec(at("2026-10-10", 3, 0), at("2026-10-10", 7, 0), sleepOpt{deep: 40}),
+	)
+	d, st := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if !r.Nights[day("2026-10-10")].Provisional || len(cachedKeys(st, "2026-10-10")) != 0 {
+		t.Errorf("night %+v, cached %v", r.Nights[day("2026-10-10")], cachedKeys(st, "2026-10-10"))
+	}
+}
+
+func TestUnprocessedClassicNightIsNotCached(t *testing.T) {
+	api := &fakeAPI{}
+	oneNight(api, sleepOpt{classic: true, unprocessed: true})
+	d, st := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if !r.Nights[day("2026-10-10")].Provisional || len(cachedKeys(st, "2026-10-10")) != 0 {
+		t.Errorf("night %+v, cached %v", r.Nights[day("2026-10-10")], cachedKeys(st, "2026-10-10"))
+	}
+}
+
+func TestTouchingSessionsAreJoined(t *testing.T) {
+	api := &fakeAPI{}
+	api.add(googlehealth.Sleep,
+		sleepRec(at("2026-10-09", 22, 0), at("2026-10-10", 2, 0), sleepOpt{deep: 40}),
+		sleepRec(at("2026-10-10", 2, 0), at("2026-10-10", 6, 0), sleepOpt{deep: 30}),
+	)
+	d, _ := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if n := r.Nights[day("2026-10-10")]; n.InBedMin != 480 || *n.DeepMin != 70 || r.Excluded.ExtraSessions != 0 {
+		t.Errorf("night %+v, excluded %+v", n, r.Excluded)
+	}
+}
+
+func TestMixedSourcesAreNotEmpty(t *testing.T) {
+	api := &fakeAPI{}
+	week(api)
+	api.add(googlehealth.HeartRateVariability, hrvRec(at("2026-10-10", 3, 0), 50, "HEALTH_KIT"))
+	api.add(googlehealth.DailyRestingHeartRate, restingRec("2026-10-10", 49, "", "HEALTH_KIT"))
+	d, _ := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if r.Empty != nil || r.Excluded.OtherSource != 2 {
+		t.Errorf("empty %v, excluded %+v", r.Empty, r.Excluded)
+	}
+}
+
+// HRV samples of the night that arrive without a value are a format change,
+// not a night without HRV: counted, and the night stays out of the cache.
+func TestHRVWithoutValueIsNotCachedAsNone(t *testing.T) {
+	noValue := func(t time.Time) json.RawMessage {
+		return mustJSON(map[string]any{
+			"dataSource":           map[string]any{"platform": "FITBIT"},
+			"heartRateVariability": map[string]any{"sampleTime": map[string]any{"physicalTime": t.UTC().Format(time.RFC3339)}},
+		})
+	}
+	api := &fakeAPI{}
+	oneNight(api, sleepOpt{deep: 60})
+	api.add(googlehealth.HeartRateVariability, noValue(at("2026-10-10", 1, 0)), noValue(at("2026-10-10", 2, 0)), noValue(at("2026-10-10", 3, 0)))
+	api.add(googlehealth.HeartRateVariability, noValue(at("2026-10-10", 12, 0))) // outside the night
+	d, st := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if r.Excluded.NoHRVValue != 3 || fmt.Sprint(r.Empty) != "[heart-rate-variability]" {
+		t.Errorf("excluded %+v, empty %v", r.Excluded, r.Empty)
+	}
+	if got := cachedKeys(st, "2026-10-10"); len(got) != 0 {
+		t.Errorf("cached %v", got)
+	}
+	// Alongside a full set of valid samples, they are counted but the night is
+	// still not cached: the value may be missing from the median.
+	api2 := &fakeAPI{}
+	oneNight(api2, sleepOpt{deep: 60})
+	api2.add(googlehealth.HeartRateVariability, hrvNight(at("2026-10-09", 23, 0), at("2026-10-10", 7, 0), 50)...)
+	api2.add(googlehealth.HeartRateVariability, noValue(at("2026-10-10", 1, 1)))
+	d2, st2 := newData(t, api2)
+	r2, _ := d2.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if r2.Nights[day("2026-10-10")].HRV == nil || r2.Excluded.NoHRVValue != 1 || r2.Empty != nil || len(cachedKeys(st2, "2026-10-10")) != 0 {
+		t.Errorf("night %+v, excluded %+v, empty %v, cached %v", r2.Nights[day("2026-10-10")], r2.Excluded, r2.Empty, cachedKeys(st2, "2026-10-10"))
+	}
+}
+
+func TestEmptyLabelIsNotASource(t *testing.T) {
+	api := &fakeAPI{}
+	api.add(googlehealth.DailyRestingHeartRate, mustJSON(map[string]any{
+		"dataSource":            map[string]any{"platform": "FITBIT", "device": map[string]any{"displayName": "\u202e"}},
+		"dailyRestingHeartRate": map[string]any{"beatsPerMinute": "55", "date": map[string]any{"year": 2026, "month": 10, "day": 10}},
+	}))
+	d, _ := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if fmt.Sprint(r.Sources) != "[FITBIT]" {
+		t.Errorf("sources = %q", r.Sources)
+	}
+}
+
+func TestRestingOutsideTheRangeIsIgnored(t *testing.T) {
+	api := &fakeAPI{loose: true}
+	api.add(googlehealth.DailyRestingHeartRate, restingRec("2026-10-09", 55, "WITH_SLEEP", "FITBIT"), restingRec("2026-10-10", 56, "WITH_SLEEP", "FITBIT"))
+	d, _ := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if len(r.RestingHR) != 1 || r.RestingHR[day("2026-10-10")].BPM != 56 {
+		t.Errorf("resting HR = %v", r.RestingHR)
+	}
+}
+
+func TestRestingMethodIsCleaned(t *testing.T) {
+	api := &fakeAPI{}
+	api.add(googlehealth.DailyRestingHeartRate, restingRec("2026-10-10", 55, "NEW\nMETHOD", "FITBIT"))
+	d, _ := newData(t, api)
+	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if h := r.RestingHR[day("2026-10-10")]; h.Method != "NEWMETHOD" || h.Standard() {
+		t.Errorf("resting HR = %+v", h)
+	}
+}
+
+// The covered slot count stored in the cache comes back exactly from the
+// coverage it was computed from.
+func TestCoveredSlotsRoundTrip(t *testing.T) {
+	for inBed := 1.0; inBed <= 1440; inBed++ {
+		total := slotCount(inBed)
+		for c := 0; c <= total; c++ {
+			n := Night{InBedMin: inBed, HRVCoverage: coverage(c, inBed)}
+			if got := coveredSlots(n); got != c {
+				t.Fatalf("in bed %v, %d of %d slots: read back %d", inBed, c, total, got)
+			}
 		}
 	}
 }

@@ -35,21 +35,26 @@ type dataSource struct {
 const maxLabelRunes = 64
 
 // label names the source in envelopes: the device when known, else the
-// platform. It reaches the cache and tool output, which an LLM reads, so
-// control and format characters (bidi overrides, zero-width) are dropped and
-// the length is capped.
+// platform.
 func (d dataSource) label() string {
-	s := d.Device.DisplayName
-	if strings.TrimSpace(s) == "" {
-		s = d.Platform
+	if s := clean(d.Device.DisplayName); s != "" {
+		return s
 	}
+	return clean(d.Platform)
+}
+
+// clean makes a Google-supplied string safe to show: it reaches the cache and
+// tool output, which an LLM reads, so control, format (bidi overrides,
+// zero-width) and line/paragraph separator characters are dropped and the
+// length is capped.
+func clean(s string) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
 		if n == maxLabelRunes {
 			break
 		}
-		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			continue
 		}
 		b.WriteRune(r)
@@ -85,15 +90,17 @@ type sleepRecord struct {
 			StagesStatus string `json:"stagesStatus"`
 		} `json:"metadata"`
 		Summary *struct {
-			MinutesAsleep        int64s `json:"minutesAsleep"`
-			MinutesAwake         int64s `json:"minutesAwake"`
-			MinutesInSleepPeriod int64s `json:"minutesInSleepPeriod"`
-			StagesSummary        []struct {
-				Type    string `json:"type"`
-				Minutes int64s `json:"minutes"`
-			} `json:"stagesSummary"`
+			MinutesAsleep        int64s  `json:"minutesAsleep"`
+			MinutesAwake         int64s  `json:"minutesAwake"`
+			MinutesInSleepPeriod int64s  `json:"minutesInSleepPeriod"`
+			StagesSummary        []stage `json:"stagesSummary"`
 		} `json:"summary"`
 	} `json:"sleep"`
+}
+
+type stage struct {
+	Type    string `json:"type"`
+	Minutes int64s `json:"minutes"`
 }
 
 // session is one sleep record, checked and in the coach's units.
@@ -116,11 +123,10 @@ const (
 	minuteSlack = 2
 )
 
-// parseSleep decodes one record. errOtherSource and errNoValue mark records
-// left out on purpose; any other error a record that cannot be read. When the
-// interval was readable, s.start and s.end are set even with an error, so
-// the caller can tell which day it concerns. Error texts never quote the
-// record.
+// parseSleep decodes one record. errOtherSource marks a record left out on
+// purpose; any other error a record that cannot be read. When the interval was
+// readable, s.start and s.end are set even with an error, so the caller can
+// tell which day it concerns. Error texts never quote the record.
 func parseSleep(raw json.RawMessage) (s session, err error) {
 	var r sleepRecord
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -146,30 +152,14 @@ func parseSleep(raw json.RawMessage) (s session, err error) {
 	}
 	switch sl.Type {
 	case "STAGES":
-		if len(sum.StagesSummary) == 0 {
-			return s, errors.New("staged sleep record without stages")
-		}
-		var deep, light, rem float64
-		for _, st := range sum.StagesSummary {
-			m := float64(st.Minutes)
-			if m < 0 || m > s.inBed {
-				return s, errors.New("sleep record with implausible stage minutes")
-			}
-			switch st.Type {
-			case "DEEP":
-				deep = m
-			case "LIGHT":
-				light = m
-			case "REM":
-				rem = m
-			}
-		}
-		if deep+light+rem > s.asleep+minuteSlack {
-			return s, errors.New("sleep record with implausible stage minutes")
-		}
-		// Stages still being computed would read as zeros: leave them out.
+		// Stages still being computed may be missing or zero: leave them out
+		// and check only final ones.
 		if sl.Metadata.StagesStatus == "SUCCEEDED" {
-			s.deep, s.light, s.rem = &deep, &light, &rem
+			st, err := stageMinutes(sum.StagesSummary, s.asleep, s.inBed)
+			if err != nil {
+				return s, err
+			}
+			s.deep, s.light, s.rem = &st[0], &st[1], &st[2]
 		}
 		s.settled = sl.Metadata.Processed && s.deep != nil
 	case "CLASSIC":
@@ -178,6 +168,42 @@ func parseSleep(raw json.RawMessage) (s session, err error) {
 		s.unknownType = true
 	}
 	return s, nil
+}
+
+var errStageMinutes = errors.New("sleep record with implausible stage minutes")
+
+// stageMinutes returns deep, light and REM minutes. Every type must be known
+// and appear once, and the three must add up to the time asleep (Fitbit's
+// asleep minutes are their sum): a renamed or split stage would otherwise read
+// as zero minutes and be cached as final.
+func stageMinutes(list []stage, asleep, inBed float64) ([3]float64, error) {
+	var out [3]float64
+	if len(list) == 0 {
+		return out, errors.New("staged sleep record without stages")
+	}
+	seen := map[string]bool{}
+	for _, st := range list {
+		m := float64(st.Minutes)
+		if seen[st.Type] || m < 0 || m > inBed {
+			return out, errStageMinutes
+		}
+		seen[st.Type] = true
+		switch st.Type {
+		case "DEEP":
+			out[0] = m
+		case "LIGHT":
+			out[1] = m
+		case "REM":
+			out[2] = m
+		case "AWAKE":
+		default:
+			return out, errors.New("sleep record with an unknown stage")
+		}
+	}
+	if math.Abs(out[0]+out[1]+out[2]-asleep) > minuteSlack {
+		return out, errStageMinutes
+	}
+	return out, nil
 }
 
 type hrvRecord struct {
@@ -215,10 +241,11 @@ func parseHRV(raw json.RawMessage) (h hrvSample, err error) {
 	if v.RMSSD == nil { // the field is optional
 		return h, errNoValue
 	}
-	if x := *v.RMSSD; math.IsNaN(x) || math.IsInf(x, 0) || x <= 0 || x > maxRMSSD {
+	x := *v.RMSSD
+	if math.IsNaN(x) || math.IsInf(x, 0) || x <= 0 || x > maxRMSSD {
 		return h, errors.New("HRV sample out of range")
 	}
-	h.rmssd = *v.RMSSD
+	h.rmssd = x
 	return h, nil
 }
 
@@ -265,9 +292,10 @@ func parseResting(raw json.RawMessage) (d restingDay, err error) {
 	if r.DataSource.Platform != primaryPlatform {
 		return d, errOtherSource
 	}
-	if bpm := float64(v.BeatsPerMinute); bpm < minRestingBPM || bpm > maxRestingBPM {
+	bpm := float64(v.BeatsPerMinute)
+	if bpm < minRestingBPM || bpm > maxRestingBPM {
 		return d, errors.New("resting heart rate out of range")
 	}
-	d.bpm, d.method, d.source = float64(v.BeatsPerMinute), v.Metadata.CalculationMethod, r.DataSource.label()
+	d.bpm, d.method, d.source = bpm, clean(v.Metadata.CalculationMethod), r.DataSource.label()
 	return d, nil
 }

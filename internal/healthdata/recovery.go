@@ -4,14 +4,15 @@
 package healthdata
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
@@ -28,7 +29,7 @@ const (
 	KeyDeep       = "sleep_deep_min"
 	KeyLight      = "sleep_light_min"
 	KeyREM        = "sleep_rem_min"
-	KeySleepStart = "sleep_start_min_of_day"
+	KeySleepStart = "sleep_start_min_of_day" // wraps at midnight: only for metrics.SleepOnsetConsistency, never a linear mean
 	KeyHRV        = "hrv_rmssd_ms"
 	KeyRestingHR  = "resting_hr_bpm"
 )
@@ -79,21 +80,25 @@ type Source interface {
 	Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery, error)
 }
 
-// Night is the main sleep ending on a local day (CAPABILITY I4): the longest
-// session, joined with the parts of the same night split by a wake-up, and
-// the median HRV inside it.
+// Night is the main sleep ending on a local day (CAPABILITY I4): of that day's
+// main-sleep sessions (overlapping copies merged, sessions at most maxSplitGap
+// apart joined), the group with the most time in bed, and the median HRV
+// inside it.
 type Night struct {
 	AsleepMin, AwakeMin, InBedMin float64
 	DeepMin, LightMin, REMMin     *float64 // nil without final stages
 	StartMinOfDay                 int      // local start time, minutes after midnight
 	HRV                           *float64 // median rMSSD (ms); nil when the samples cover too little of the night
 	// HRVCoverage is the share (0..1) of the night's 5-minute slots holding
-	// an HRV sample.
+	// an HRV sample. With HRV nil and coverage above 0, the value was
+	// withheld for too little coverage (on a recent night, possibly samples
+	// still syncing), not missing.
 	HRVCoverage float64
 	Source      string
 	// Provisional: Google has not finished processing the night (or sent it
 	// in a format the coach does not know), so its values may still change.
-	// Baselines leave it out.
+	// Baselines leave it out. It says nothing about HRV still syncing: any
+	// night newer than the settled days may still change.
 	Provisional bool
 }
 
@@ -109,13 +114,15 @@ type RestingHR struct {
 // Standard reports whether the value was computed with the band's standard method.
 func (h RestingHR) Standard() bool { return h.Method == restingWithSleep }
 
-// Excluded counts readable records of the range the coach left out, by reason.
+// Excluded counts readable records the coach did not use as-is, by reason.
+// Only days fetched live in the call are counted (cached days add nothing),
+// so two calls over the same range can differ.
 type Excluded struct {
 	OtherSource      int // another platform, such as Apple Health copies
 	Naps             int
 	ExtraSessions    int // main-sleep records that were not part of the night, or duplicated it
 	NoHRVValue       int // HRV samples inside a night without an rMSSD value
-	UnknownSleepType int // nights in a sleep format other than STAGES or CLASSIC
+	UnknownSleepType int // sleep records in a format other than STAGES or CLASSIC: kept, read without stages, provisional
 }
 
 // Recovery holds the nights and resting heart rates of [From, To].
@@ -129,9 +136,9 @@ type Recovery struct {
 	// is unknown) is never cached.
 	Skipped  int
 	Excluded Excluded
-	// Empty lists the data types whose records for the range were all from
-	// another platform or without a value: a source or format change, not a
-	// lack of data.
+	// Empty lists the data types for which a live fetch returned records
+	// but none usable (all from another platform or without a value): a
+	// source or format change, not a lack of data.
 	Empty []googlehealth.DataType
 }
 
@@ -268,14 +275,8 @@ func (d *Data) Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery
 		}
 	}
 	delete(f.sources, "")
-	for s := range f.sources {
-		r.Sources = append(r.Sources, s)
-	}
-	sort.Strings(r.Sources)
-	for dt := range f.empty {
-		r.Empty = append(r.Empty, dt)
-	}
-	slices.Sort(r.Empty)
+	r.Sources = slices.Sorted(maps.Keys(f.sources))
+	r.Empty = slices.Sorted(maps.Keys(f.empty))
 	return r, nil
 }
 
@@ -305,12 +306,10 @@ func (c cacheRows) night(day coach.LocalDate) (Night, bool) {
 			stages = append(stages, &v)
 		}
 	}
-	switch len(stages) {
-	case len(stageKeys):
+	if len(stages) == len(stageKeys) {
 		n.DeepMin, n.LightMin, n.REMMin = stages[0], stages[1], stages[2]
-	case 0:
-	default:
-		return Night{}, false
+	} else if len(stages) != 0 {
+		return Night{}, false // stage rows are all or none
 	}
 	if m, ok := c[KeyHRV][day]; ok {
 		if m.NSamples == nil {
@@ -428,26 +427,22 @@ func (d *Data) fetchNights(ctx context.Context, a, b coach.LocalDate, f *fetch) 
 		parts, extra := nightParts(ss)
 		r.Excluded.ExtraSessions += extra
 		n, settled := d.night(parts, samples)
-		within := func(ts []time.Time) int {
-			c := 0
-			for _, t := range ts {
-				if inParts(parts, t) {
-					c++
-				}
-			}
-			return c
-		}
-		if c := within(bad); c > 0 {
+		if c := countWithin(parts, bad); c > 0 {
 			skipped += c
 			tainted[day] = true
 		}
-		r.Excluded.NoHRVValue += within(noValue)
-		r.Excluded.OtherSource += within(foreign)
+		noValueIn, foreignIn := countWithin(parts, noValue), countWithin(parts, foreign)
+		r.Excluded.NoHRVValue += noValueIn
+		r.Excluded.OtherSource += foreignIn
 		r.Nights[day] = n
 		f.sources[n.Source] = true
 		// Only settled nights from a clean fetch are cached, and only with a
-		// final HRV value or none at all: partial samples may still be syncing.
-		if day <= f.settled && !runTainted && !tainted[day] && settled && (n.HRV != nil || n.HRVCoverage == 0) {
+		// final HRV value or none at all: partial samples may still be
+		// syncing. A night whose own samples were all left out (another
+		// platform, no value) is not "no HRV" but a format change: caching it
+		// would keep the gap after the parsing is fixed.
+		finalHRV := n.HRV != nil || (n.HRVCoverage == 0 && foreignIn == 0)
+		if day <= f.settled && !runTainted && !tainted[day] && settled && finalHRV && noValueIn == 0 {
 			d.putNight(ctx, day, n)
 		}
 	}
@@ -469,7 +464,7 @@ func (d *Data) markEmpty(f *fetch, dt googlehealth.DataType, a, b coach.LocalDat
 // most maxSplitGap apart are parts of one night, and the night with the most
 // time in bed wins (a tie keeps the later end). extra counts the rest.
 func nightParts(ss []session) (parts []session, extra int) {
-	sort.Slice(ss, func(i, j int) bool { return ss[i].start.Before(ss[j].start) })
+	slices.SortFunc(ss, func(a, b session) int { return a.start.Compare(b.start) })
 	var kept []session
 	for _, s := range ss {
 		if n := len(kept); n > 0 && s.start.Before(kept[n-1].end) {
@@ -509,13 +504,16 @@ func longer(s, than session) bool {
 	return ds > dt || (ds == dt && s.end.After(than.end))
 }
 
-func inParts(parts []session, t time.Time) bool {
-	for _, p := range parts {
-		if !t.Before(p.start) && !t.After(p.end) {
-			return true
+func (s session) contains(t time.Time) bool { return !t.Before(s.start) && !t.After(s.end) }
+
+// countWithin counts the times inside any of the parts.
+func countWithin(parts []session, ts []time.Time) (c int) {
+	for _, t := range ts {
+		if slices.ContainsFunc(parts, func(p session) bool { return p.contains(t) }) {
+			c++
 		}
 	}
-	return false
+	return c
 }
 
 // night joins the parts and computes the HRV median over the samples inside
@@ -545,7 +543,7 @@ func (d *Data) night(parts []session, samples []hrvSample) (n Night, settled boo
 	for _, p := range parts {
 		ps := make([]bool, slotCount(p.inBed))
 		for _, h := range samples {
-			if !h.at.Before(p.start) && !h.at.After(p.end) {
+			if p.contains(h.at) {
 				vals = append(vals, h.rmssd)
 				ps[min(int(h.at.Sub(p.start)/hrvSlot), len(ps)-1)] = true
 			}
@@ -600,27 +598,24 @@ func (d *Data) putNight(ctx context.Context, day coach.LocalDate, n Night) {
 	if !d.del(ctx, day, KeyAsleep) {
 		return
 	}
-	stages := map[string]*float64{KeyDeep: n.DeepMin, KeyLight: n.LightMin, KeyREM: n.REMMin}
-	for _, k := range stageKeys {
-		ok := false
-		if v := stages[k]; v != nil {
-			ok = d.put(ctx, store.Metric{Date: day, Key: k, Value: *v, Source: n.Source})
-		} else {
-			ok = d.del(ctx, day, k)
-		}
-		if !ok {
-			return
-		}
-	}
-	ok := false
+	var hrv *store.Metric
 	if n.HRV != nil {
 		slots := coveredSlots(n)
-		ok = d.put(ctx, store.Metric{Date: day, Key: KeyHRV, Value: *n.HRV, NSamples: &slots, Source: n.Source})
-	} else {
-		ok = d.del(ctx, day, KeyHRV)
+		hrv = &store.Metric{Date: day, Key: KeyHRV, Value: *n.HRV, NSamples: &slots, Source: n.Source}
 	}
-	if !ok {
-		return
+	optional := []struct {
+		key string
+		m   *store.Metric
+	}{
+		{KeyDeep, d.row(day, KeyDeep, n.DeepMin, n.Source)},
+		{KeyLight, d.row(day, KeyLight, n.LightMin, n.Source)},
+		{KeyREM, d.row(day, KeyREM, n.REMMin, n.Source)},
+		{KeyHRV, hrv},
+	}
+	for _, o := range optional {
+		if !d.putOrDel(ctx, day, o.key, o.m) {
+			return
+		}
 	}
 	for k, v := range map[string]float64{KeyAwake: n.AwakeMin, KeyInBed: n.InBedMin, KeySleepStart: float64(n.StartMinOfDay)} {
 		if !d.put(ctx, store.Metric{Date: day, Key: k, Value: v, Source: n.Source}) {
@@ -628,6 +623,21 @@ func (d *Data) putNight(ctx context.Context, day coach.LocalDate, n Night) {
 		}
 	}
 	d.put(ctx, store.Metric{Date: day, Key: KeyAsleep, Value: n.AsleepMin, Source: n.Source})
+}
+
+func (d *Data) row(day coach.LocalDate, key string, v *float64, source string) *store.Metric {
+	if v == nil {
+		return nil
+	}
+	return &store.Metric{Date: day, Key: key, Value: *v, Source: source}
+}
+
+// putOrDel writes m when present, else removes the row.
+func (d *Data) putOrDel(ctx context.Context, day coach.LocalDate, key string, m *store.Metric) bool {
+	if m == nil {
+		return d.del(ctx, day, key)
+	}
+	return d.put(ctx, *m)
 }
 
 // put writes one cache row. The cache is disposable, so a failed write is
@@ -691,11 +701,14 @@ func (d *Data) fetchResting(ctx context.Context, a, b coach.LocalDate, f *fetch)
 		d.markEmpty(f, googlehealth.DailyRestingHeartRate, a, b)
 	}
 	for day, vs := range byDay {
-		sort.Slice(vs, func(i, j int) bool {
-			if wi, wj := vs[i].method == restingWithSleep, vs[j].method == restingWithSleep; wi != wj {
-				return wi
+		slices.SortFunc(vs, func(x, y restingDay) int {
+			if wx, wy := x.method == restingWithSleep, y.method == restingWithSleep; wx != wy {
+				if wx {
+					return -1
+				}
+				return 1
 			}
-			return vs[i].bpm < vs[j].bpm
+			return cmp.Compare(x.bpm, y.bpm)
 		})
 		v := vs[0]
 		h := RestingHR{BPM: v.bpm, Method: v.method}

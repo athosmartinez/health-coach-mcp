@@ -232,7 +232,8 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 ### 5.3 Cache
 - Only **settled days** (≥ 3 days ago) are cached in `daily_metrics`. The last 3 days are always
   fetched live, because the band syncs late and nutrition is logged after the fact.
-- **Never cache** a missing value (`null`) or a day with partial coverage — it gets fetched again next time.
+- **Never cache** a missing value (`null`), a partial value or a day that may still change — it gets fetched again
+  next time. A settled night with no HRV samples at all is cached without an HRV row (absent, not partial).
 - A row with `algo_version` different from the code's is ignored and recomputed, and so is a row computed in
   another time zone (or with none): the sleep start minute and the day a night belongs to depend on it.
 - Closed list of keys (scalars per day): `sleep_asleep_min`, `sleep_awake_min`, `sleep_in_bed_min`,

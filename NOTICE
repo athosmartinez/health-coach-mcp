@@ -7,3 +7,5 @@ Copyright 2026 Google LLC, licensed under the Apache License, Version 2.0
 
 Adapted files keep the original license header and list their changes:
 - internal/googlehealth/auth/login.go (from pkg/auth/auth.go, InteractiveLogin)
+- internal/googlehealth/client.go (from pkg/client/client.go, Do; cmd/data.go, pagination)
+- internal/googlehealth/datatypes.go (from pkg/types/registry.go; cmd/data.go, filter and rollup bodies)

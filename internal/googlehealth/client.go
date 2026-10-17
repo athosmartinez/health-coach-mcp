@@ -26,12 +26,15 @@ package googlehealth
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -62,14 +65,17 @@ const (
 	// defaultMaxPages bounds pagination against a server that never stops
 	// returning a next page token.
 	defaultMaxPages = 200
-	requestTimeout  = 30 * time.Second
+	// maxTotalBytes bounds the responses of one call across all its pages.
+	maxTotalBytes  = 64 << 20
+	requestTimeout = 30 * time.Second
 )
 
 // TokenSource supplies access tokens. Invalidate reports a token the API
-// rejected, so the next Token call renews it (auth.TokenSource).
+// rejected, so the next Token call renews it, and says whether it did: a token
+// already replaced is left alone (auth.TokenSource).
 type TokenSource interface {
 	Token() (*oauth2.Token, error)
-	Invalidate(rejected string)
+	Invalidate(rejected string) bool
 }
 
 // Options configures a Client. TimeZone is required: local days are turned
@@ -83,12 +89,13 @@ type Options struct {
 
 // Client reads data points. It is safe for concurrent use.
 type Client struct {
-	base     string
-	http     *http.Client
-	ts       TokenSource
-	loc      *time.Location
-	log      *slog.Logger
-	maxPages int
+	base          string
+	http          *http.Client
+	ts            TokenSource
+	loc           *time.Location
+	log           *slog.Logger
+	maxPages      int
+	maxTotalBytes int
 	// Swappable so tests run the retry loop without real time.
 	wait   func(ctx context.Context, d time.Duration) error
 	jitter func(time.Duration) time.Duration
@@ -106,21 +113,45 @@ func New(ts TokenSource, opts Options) (*Client, error) {
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	if u, err := url.Parse(base); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return nil, fmt.Errorf("googlehealth: invalid base URL %q", base)
+	if err := checkBaseURL(base); err != nil {
+		return nil, err
 	}
-	hc := opts.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: requestTimeout}
+	hc := &http.Client{Timeout: requestTimeout}
+	if opts.HTTPClient != nil {
+		cp := *opts.HTTPClient
+		hc = &cp
 	}
+	// The API never redirects; following one could carry the bearer token to
+	// another path, a subdomain or plain http on the same host.
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Client{
 		base: strings.TrimSuffix(base, "/"), http: hc, ts: ts, loc: opts.TimeZone, log: log,
-		maxPages: defaultMaxPages, wait: sleepCtx, jitter: equalJitter,
+		maxPages: defaultMaxPages, maxTotalBytes: maxTotalBytes, wait: sleepCtx, jitter: equalJitter,
 	}, nil
+}
+
+// checkBaseURL accepts https, or http only on a loopback host (a local test
+// server): over http the bearer token would travel in cleartext.
+func checkBaseURL(base string) error {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("googlehealth: invalid base URL (want scheme://host[/path], no user, query or fragment)")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if h := u.Hostname(); h == "localhost" || net.ParseIP(h).IsLoopback() {
+			return nil
+		}
+		return errors.New("googlehealth: base URL must use https outside loopback")
+	default:
+		return errors.New("googlehealth: base URL must use https")
+	}
 }
 
 // List returns the data points of the local days [from, to].
@@ -188,14 +219,28 @@ func (c *Client) collect(dt DataType, key string, fetch func(token string) ([]by
 	var all []json.RawMessage
 	seen := map[string]bool{}
 	token := ""
+	total := 0
 	for range c.maxPages {
 		body, err := fetch(token)
 		if err != nil {
 			return nil, err
 		}
+		if total += len(body); total > c.maxTotalBytes {
+			return nil, tooMuch(dt)
+		}
 		var page map[string]json.RawMessage
-		if err := json.Unmarshal(body, &page); err != nil {
+		if err := json.Unmarshal(body, &page); err != nil || page == nil {
 			return nil, badResponse(dt)
+		}
+		// The API omits an empty list, so {} is a page with no points. Any
+		// other key (an error object, a renamed field) means the response is
+		// not what this client understands, and reading it as "no data"
+		// would hide that.
+		for k := range page {
+			if k != key && k != "nextPageToken" {
+				c.log.Warn("google health response has an unexpected field", "data_type", string(dt), "field", truncate(k, 40))
+				return nil, badResponse(dt)
+			}
 		}
 		var items []json.RawMessage
 		if raw, ok := page[key]; ok {
@@ -219,7 +264,23 @@ func (c *Client) collect(dt DataType, key string, fetch func(token string) ([]by
 		seen[next] = true
 		token = next
 	}
-	return nil, fmt.Errorf("googlehealth: %s has more than %d pages; narrow the range", dt, c.maxPages)
+	return nil, tooMuch(dt)
+}
+
+// tooMuch is a range whose data exceeds the page or byte budget.
+func tooMuch(dt DataType) error {
+	return coach.ToolError{
+		Code:    coach.CodeInvalidInput,
+		Message: fmt.Sprintf("the date range holds more %s data than one call reads", dt),
+		Hint:    "use a shorter date range",
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 func badResponse(dt DataType) error {
@@ -291,15 +352,21 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 				return nil, ctx.Err()
 			}
 			if errors.Is(err, errTooLarge) {
-				return nil, fmt.Errorf("%w: %w", unavailable(fmt.Sprintf("Google Health returned too much %s data at once", dt)), err)
+				return nil, fmt.Errorf("%w: %w", tooMuch(dt), err)
 			}
+			if permanent(err) {
+				c.log.Warn("google health API host cannot be used", "data_type", string(dt), "cause", fmt.Sprintf("%T", err))
+				return nil, fmt.Errorf("%w: %w", unavailable("Google Health API host could not be found or verified"), err)
+			}
+			c.log.Warn("google health request did not complete", "data_type", string(dt), "cause", fmt.Sprintf("%T", err))
 			last = fmt.Errorf("%w: %w", unavailable("Google Health API could not be reached"), err)
 		case status >= 200 && status < 300:
 			return respBody, nil
-		case !refreshed && (status == http.StatusUnauthorized || status == http.StatusForbidden && staleScope(respBody)):
+		case !refreshed && (status == http.StatusUnauthorized || (status == http.StatusForbidden && staleScope(respBody))):
 			refreshed = true
-			c.ts.Invalidate(tok.AccessToken)
-			c.log.Warn("google health token rejected; renewing", "data_type", string(dt), "http_status", status)
+			if c.ts.Invalidate(tok.AccessToken) {
+				c.log.Warn("google health token rejected; renewing", "data_type", string(dt), "http_status", status)
+			}
 			continue // a renewal is not a failure: no backoff, no attempt used
 		case status == http.StatusUnauthorized:
 			return nil, fmt.Errorf("%w: %w", coach.ToolError{
@@ -307,13 +374,14 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 				Message: "Google Health rejected the sign-in",
 				Hint:    "run " + auth.LoginCommand,
 			}, statusError(status, respBody))
-		case status == http.StatusForbidden:
+		case status == http.StatusForbidden && statusError(status, respBody).Status != "RESOURCE_EXHAUSTED":
 			return nil, fmt.Errorf("%w: %w", coach.ToolError{
 				Code:    coach.CodeScopeMissing,
 				Message: fmt.Sprintf("Google Health denied access to %s data", dt),
 				Hint:    "run " + auth.LoginCommand + " and allow every permission; check the Google Health API is enabled in the Cloud project",
 			}, statusError(status, respBody))
-		case status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500:
+		case status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500 ||
+			status == http.StatusForbidden: // a quota 403 (RESOURCE_EXHAUSTED) is a rate limit
 			last = fmt.Errorf("%w: %w", unavailable("Google Health API is unavailable"), statusError(status, respBody))
 			if wait = retryAfter(header, time.Now()); wait > maxRetryAfter {
 				return nil, last
@@ -348,6 +416,11 @@ func (c *Client) send(ctx context.Context, method, target, token string, body []
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		// url.Error's text quotes the request URL (dates, page token); keep only the cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
@@ -385,6 +458,19 @@ func statusError(httpStatus int, body []byte) *StatusError {
 	return se
 }
 
+// permanent reports a network error that repeats on every attempt: the host
+// does not exist or its certificate does not verify.
+func permanent(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	var unknownCA x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	return errors.As(err, &certErr) || errors.As(err, &unknownCA) || errors.As(err, &hostErr)
+}
+
 // staleScope reports a 403 of the "insufficient authentication scopes" kind.
 // An access token can pass the local validity check yet be expired at Google
 // (oauth2 allows some clock skew), and the API then answers this 403 instead
@@ -405,6 +491,8 @@ func retryAfter(h http.Header, now time.Time) time.Duration {
 	}
 	if secs, err := strconv.Atoi(v); err == nil {
 		return time.Duration(min(max(secs, 0), 86400)) * time.Second // capped: no overflow
+	} else if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(v, "-") {
+		return maxRetryAfter + time.Second // too large to parse is too long to wait
 	}
 	if t, err := http.ParseTime(v); err == nil && t.After(now) {
 		return t.Sub(now)

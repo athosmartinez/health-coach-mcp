@@ -29,7 +29,7 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `daily_metrics` cache (closed key list, `algo_version` mismatch = miss).
 - `internal/googlehealth/auth/` — OAuth Desktop sign-in (`Login`: loopback on `127.0.0.1:0`, PKCE,
   `access_type=offline` + `prompt=consent`), `credentials.json` I/O (atomic replace, 0600, dir 0700) and
-  `TokenSource` (`Invalidate(rejected)` forces the next renewal, ignored once that token was replaced; renews and saves, keeps the old refresh token when Google omits it, reloads the file when
+  `TokenSource` (`Invalidate(rejected) bool` forces the next renewal, ignored (false) once that token was replaced; renews and saves, keeps the old refresh token when Google omits it, reloads the file when
   another process signs in and lets that login win over a renewal in flight; `invalid_grant` → `auth_expired`,
   408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
   (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
@@ -42,8 +42,11 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `GET …/dataPoints`, `GET …/dataPoints:reconcile` and `POST …/dataPoints:dailyRollUp` (a read). Retries 429/408/5xx/
   network 3 times (1s/2s/4s, jittered, Retry-After up to 8s, longer fails fast); one token renewal
   (`auth.TokenSource.Invalidate`) on a 401 or the stale-token 403; then 401 → `auth_expired`, 403 → `scope_missing`,
-  exhausted → `upstream_unavailable`, other 4xx → internal. Errors keep HTTP status + Google's status enum
-  (`StatusError`), never the body. A page cap or repeated page token is an error, never a short result.
+  exhausted → `upstream_unavailable`, other 4xx → internal; a quota 403 (`RESOURCE_EXHAUSTED`) is retried like 429;
+  DNS not-found/x509 fail fast. Errors keep HTTP status + Google's status enum (`StatusError`), never the body, and
+  network errors drop `url.Error`'s URL. Redirects are refused; `http` base URLs only on loopback. A page is valid
+  only with keys ⊆ {list key, `nextPageToken`} (`{}` = no points); page cap (200) or byte budget (64 MiB) →
+  `invalid_input` "shorter range"; a repeated page token → `upstream_unavailable`. One renewal per page.
 - `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped; NaN/Inf count as
   missing in judgments and are rejected in series): `Baseline` (window `[before−days, before−1]`, sample sd; only
   in-window rows are validated), `ZScore` (nil below 7 nights or with no spread), `Delta`/`DeltaPct`, `EWMA` (over

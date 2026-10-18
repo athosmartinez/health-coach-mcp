@@ -318,7 +318,10 @@ from `recordingMethod=MANUAL` and `no_hr_data` from a missing average; max HR co
 session window (`ListBetween`, ~1 sample/2 s), only when asked; real exercise types: STRENGTH_TRAINING, JIU_JITSU,
 MARTIAL_ARTS, PILATES, RUNNING, TREADMILL, CORE_TRAINING — TREADMILL stays out of the low-HR list (it may be a
 walk); real meal types BREAKFAST/LUNCH/DINNER/SNACK; carbs and fat from the item totals (the list repeats carbs);
-weight from every platform (the Apple reading is a separate scale reading), the day's last reading; body fat empty.)*
+weight from every platform (the Apple reading is a separate scale reading), the day's first reading (morning
+weigh-in; `AlgoVersion` 2); body fat empty. PR #8 review: max HR is the highest 5-sample median, for at most 31
+sessions per call; `ActivityDay.Worn` lets nutrition_day leave non-worn days out of energy balance; nutrition series
+carry complete totals only.)*
 
 **Verification.** Fake API: steps from 2 sources not doubled; exercise without HR → `no_hr_data`, logged by hand
 → `manual_entry`;

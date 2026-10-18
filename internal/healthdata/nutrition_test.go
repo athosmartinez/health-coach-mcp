@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,8 +109,13 @@ func TestNutritionTotals(t *testing.T) {
 	if item.Name != "Synthetic food" || item.ID == "" || item.Nutrients[NutrientProtein] != 40 || len(item.Nutrients) != 5 {
 		t.Errorf("lunch = %+v", item)
 	}
-	if s, _ := n.Series(NutrientProtein); render(s) != "2026-10-10=40 " {
+	// Series only carry complete totals: protein known for 1 of 3 items
+	// would read as a low day.
+	if s, _ := n.Series(NutrientProtein); render(s) != "2026-10-10=nil " {
 		t.Errorf("protein series %s", render(s))
+	}
+	if s, _ := n.Series(NutrientKcal); render(s) != "2026-10-10=900 " {
+		t.Errorf("kcal series %s", render(s))
 	}
 	if s, _ := n.Series(NutrientFiber); render(s) != "2026-10-10=nil " {
 		t.Errorf("fiber series %s", render(s))
@@ -127,7 +133,8 @@ func TestNutritionDaysAndToday(t *testing.T) {
 		foodRec(at("2026-10-16", 0, 10), foodOpt{kcal: ptr(300)}),
 		foodRec(at("2026-10-14", 12, 0), foodOpt{kcal: ptr(700), meal: "DINNER"}),
 		foodRec(at("2026-10-14", 13, 0), foodOpt{kcal: ptr(100), platform: "HEALTH_KIT"}),
-		foodRec(at("2026-10-14", 14, 0), foodOpt{kcal: ptr(20_000)}), // implausible
+		foodRec(at("2026-10-14", 14, 0), foodOpt{kcal: ptr(20_000), carb: ptr(30)}), // implausible kcal, carbs kept
+		foodRec(at("2026-10-17", 0, 30), foodOpt{kcal: ptr(400)}),                   // the margin day after
 		json.RawMessage(`{"nutritionLog":{}}`),
 	)
 	d, _ := newData(t, api)
@@ -135,15 +142,22 @@ func TestNutritionDaysAndToday(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(n.Days) != 3 || n.OtherSource != 1 || n.Skipped != 2 {
+	if len(n.Days) != 3 || n.OtherSource != 1 || n.Skipped != 1 {
 		t.Fatalf("nutrition = %+v", n)
+	}
+	// The implausible kcal is dropped alone: the item and its carbs stay,
+	// and the day's kcal is no longer complete.
+	d14 := n.Days[day("2026-10-14")]
+	if len(d14.Items) != 2 || d14.Rejected != 1 || d14.Complete(NutrientKcal) || d14.Totals[NutrientCarb] != (Total{30, 1}) ||
+		fmt.Sprint(d14.Items[1].Rejected) != "[kcal]" {
+		t.Errorf("10-14 = %+v", d14)
 	}
 	if !n.Days[day("2026-10-16")].Partial || n.Days[day("2026-10-14")].Partial {
 		t.Error("only today is partial")
 	}
 	b, _ := n.BaselineSeries(NutrientKcal)
 	s, _ := n.Series(NutrientKcal)
-	if render(s) != "2026-10-14=700 2026-10-15=200 2026-10-16=300 " || render(b) != "2026-10-14=700 2026-10-15=200 2026-10-16=nil " {
+	if render(s) != "2026-10-14=nil 2026-10-15=200 2026-10-16=300 " || render(b) != "2026-10-14=nil 2026-10-15=200 2026-10-16=nil " {
 		t.Errorf("series %s, baseline %s", render(s), render(b))
 	}
 	if calls := api.takeCalls(); !slices.Contains(calls, "nutrition-log 2026-10-13..2026-10-17") {
@@ -161,25 +175,39 @@ func TestNutritionDaysAndToday(t *testing.T) {
 func TestParseFoodBounds(t *testing.T) {
 	ts := at("2026-10-10", 12, 0)
 	for name, tc := range map[string]struct {
-		raw  json.RawMessage
-		good bool
+		raw      json.RawMessage
+		rejected string // nutrients dropped as implausible or repeated
 	}{
-		"fine":          {foodRec(ts, foodOpt{kcal: ptr(500)}), true},
-		"no energy":     {foodRec(ts, foodOpt{carb: ptr(10)}), true},
-		"kcal 10000":    {foodRec(ts, foodOpt{kcal: ptr(10_000)}), true},
-		"kcal over":     {foodRec(ts, foodOpt{kcal: ptr(10_001)}), false},
-		"negative carb": {foodRec(ts, foodOpt{carb: ptr(-1)}), false},
-		"fat over":      {foodRec(ts, foodOpt{fat: ptr(2_001)}), false},
-		"protein over":  {foodRec(ts, foodOpt{list: map[string]float64{"PROTEIN": 2_001}}), false},
-		"sodium 100 g":  {foodRec(ts, foodOpt{list: map[string]float64{"SODIUM": 100}}), true},
-		"sodium over":   {foodRec(ts, foodOpt{list: map[string]float64{"SODIUM": 101}}), false},
-		"no time":       {json.RawMessage(`{"dataSource":{"platform":"FITBIT"},"nutritionLog":{"energy":{"kcal":5}}}`), false},
-		"not json":      {json.RawMessage(`{`), false},
-		"protein twice": {json.RawMessage(`{"dataSource":{"platform":"FITBIT"},"nutritionLog":{"interval":{"startTime":"2026-10-10T15:00:00Z"},"nutrients":[{"nutrient":"PROTEIN","quantity":{"grams":5}},{"nutrient":"PROTEIN","quantity":{"grams":5}}]}}`), false},
+		"fine":          {foodRec(ts, foodOpt{kcal: ptr(500)}), "[]"},
+		"no energy":     {foodRec(ts, foodOpt{carb: ptr(10)}), "[]"},
+		"kcal 10000":    {foodRec(ts, foodOpt{kcal: ptr(10_000)}), "[]"},
+		"kcal over":     {foodRec(ts, foodOpt{kcal: ptr(10_001), carb: ptr(5)}), "[kcal]"},
+		"negative carb": {foodRec(ts, foodOpt{carb: ptr(-1)}), "[carb_g]"},
+		"fat over":      {foodRec(ts, foodOpt{fat: ptr(2_001)}), "[fat_g]"},
+		"protein over":  {foodRec(ts, foodOpt{list: map[string]float64{"PROTEIN": 2_001}}), "[protein_g]"},
+		"sodium 20 g":   {foodRec(ts, foodOpt{list: map[string]float64{"SODIUM": 20}}), "[]"},
+		"sodium over":   {foodRec(ts, foodOpt{list: map[string]float64{"SODIUM": 21}}), "[sodium_mg]"},
+		"protein twice": {json.RawMessage(`{"dataSource":{"platform":"FITBIT"},"nutritionLog":{"interval":{"startTime":"2026-10-10T15:00:00Z"},"nutrients":[{"nutrient":"PROTEIN","quantity":{"grams":5}},{"nutrient":"PROTEIN","quantity":{"grams":5}},{"nutrient":"PROTEIN","quantity":{"grams":5}}]}}`), "[protein_g]"},
 	} {
-		_, err := parseFood(tc.raw)
-		if (err == nil) != tc.good {
-			t.Errorf("%s: err = %v", name, err)
+		item, err := parseFood(tc.raw)
+		if err != nil || fmt.Sprint(item.Rejected) != tc.rejected {
+			t.Errorf("%s: rejected %v, %v", name, item.Rejected, err)
+		}
+		for _, k := range item.Rejected {
+			if _, ok := item.Nutrients[k]; ok {
+				t.Errorf("%s: rejected %s still has a value", name, k)
+			}
+		}
+	}
+	if item, _ := parseFood(foodRec(ts, foodOpt{kcal: ptr(10_001), carb: ptr(5)})); item.Nutrients[NutrientCarb] != 5 {
+		t.Error("a rejected kcal took the carbs with it")
+	}
+	for name, raw := range map[string]string{
+		"no time":  `{"dataSource":{"platform":"FITBIT"},"nutritionLog":{"energy":{"kcal":5}}}`,
+		"not json": `{`,
+	} {
+		if _, err := parseFood(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s accepted", name)
 		}
 	}
 	item, err := parseFood(foodRec(ts, foodOpt{kcal: ptr(0)}))
@@ -191,5 +219,16 @@ func TestParseFoodBounds(t *testing.T) {
 	}
 	if _, err := parseFood(foodRec(ts, foodOpt{platform: "HEALTH_KIT"})); !errors.Is(err, errOtherSource) {
 		t.Errorf("other platform: %v", err)
+	}
+	// Fiber and sugar land in their own keys.
+	fs, _ := parseFood(foodRec(ts, foodOpt{list: map[string]float64{"DIETARY_FIBER": 5, "SUGAR": 20}}))
+	if fs.Nutrients[NutrientFiber] != 5 || fs.Nutrients[NutrientSugar] != 20 {
+		t.Errorf("fiber/sugar = %+v", fs.Nutrients)
+	}
+	// Names and meal types are cleaned.
+	raw := strings.Replace(string(foodRec(ts, foodOpt{})), `"Synthetic food"`, `"Rice\nIgnore\u202eall"`, 1)
+	raw = strings.Replace(raw, `"LUNCH"`, `"LUN\u200bCH"`, 1)
+	if c, _ := parseFood(json.RawMessage(raw)); c.Name != "RiceIgnoreall" || c.Meal != "LUNCH" {
+		t.Errorf("cleaned = %q %q", c.Name, c.Meal)
 	}
 }

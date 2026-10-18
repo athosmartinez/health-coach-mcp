@@ -74,13 +74,20 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   runs of consecutive days. Source labels and the resting-HR method are stripped of control, format and separator characters and capped at 64
   runes; a label left empty falls back to the platform.
   `Activity(from, to)`: steps, AZM (`fat+cardio+peak` as the rollup reports them; 0 on a day with Fitbit step records
-  but no AZM row, else nil) and total calories per local day from `DailyRollup` (merged across sources, I2), `Partial`
-  for today, cached per settled day only when all three are present. `Body(from, to)`: weight (kg) and body fat, the
-  last reading of each local day from every platform. `Exercises(from, to, maxHR)`: Fitbit sessions by local start
-  day (±1 day fetch), resource name as `ID`, `HR` nil without an average, `Manual` from `recordingMethod`, flags from
-  `metrics.ExerciseFlags`; with `maxHR` one `ListBetween(HeartRate)` per session. `Nutrition(from, to)`: Fitbit food
-  items by local day with per-nutrient `Total{Value, Items}` (an item without a nutrient is unknown, not 0): kcal,
-  carbs and fat from the item totals, protein/fiber/sugar/sodium (g → mg) from the nutrient list; never cached.
+  but no AZM row, else nil; never 0 on a day whose row was dropped) and total calories per local day from
+  `DailyRollup` (merged across sources, I2), `Worn` (band data that day; without it total calories is mostly the
+  resting estimate), `Partial` for today; a missing step count or a row without any zone is unreadable, not 0; a
+  run with a dropped row is not cached; settled days are cached when all three values are present; the worn check
+  lists steps in 31-day chunks. `Body(from, to)`: weight (kg) and body fat, the first reading of each local day
+  (the morning weigh-in), every platform; a run with an unreadable reading is not cached. `Exercises(from, to,
+  maxHR)`: Fitbit sessions by local start day (±1 day fetch), resource name as `ID`, `HR` nil without an average (an
+  average needs zone durations, and every session an active duration), `Manual` from `recordingMethod`, flags from
+  `metrics.ExerciseFlags` on active time; with `maxHR` the highest median of 5 consecutive band samples per session
+  (`ListBetween(HeartRate)`), for the newest 31 sessions (`MaxHROmitted` counts the rest). `Nutrition(from, to)`:
+  Fitbit food items by local day with per-nutrient `Total{Value, Items}` (an item without a nutrient is unknown, not
+  0); kcal, carbs and fat from the item totals, protein/fiber/sugar/sodium (g → mg) from the nutrient list; an
+  implausible or repeated nutrient is rejected alone (`Rejected`), the item kept; `Series` gives only complete
+  totals; never cached.
   `Series`/`BaselineSeries` on each result (baselines drop partial days). `MaxRangeDays` = 366.
 - `internal/metrics/` — pure math, no I/O or time zone (`nil` = missing day, always skipped; NaN/Inf count as
   missing in judgments and are rejected in series): `Baseline` (window `[before−days, before−1]`, sample sd; only

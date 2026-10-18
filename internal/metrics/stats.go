@@ -16,7 +16,7 @@ import (
 
 // AlgoVersion is stored with every cached daily aggregate. Bump it when a change
 // here alters a stored value, so the cache recomputes instead of mixing versions.
-const AlgoVersion = 1
+const AlgoVersion = 2
 
 // MinBaselineNights is the baseline size below which a z-score is not given.
 const MinBaselineNights = 7

@@ -36,6 +36,9 @@ type ActivityDay struct {
 	// peak 2): 0 on a day the band recorded without any zone minutes.
 	AZM       *float64
 	TotalKcal *float64
+	// Worn: the band recorded that day. Without it total calories is mostly
+	// an estimate of the resting burn, not a measured one.
+	Worn bool
 	// Partial: today, so the totals can still grow. Baselines leave it out.
 	Partial bool
 }
@@ -110,8 +113,8 @@ func (d *Data) Activity(ctx context.Context, from, to coach.LocalDate) (Activity
 		s, okS := cached[KeySteps][day]
 		z, okZ := cached[KeyAZM][day]
 		k, okK := cached[KeyTotalCalories][day]
-		if okS && okZ && okK {
-			a.Days[day] = ActivityDay{Steps: ptr(s.Value), AZM: ptr(z.Value), TotalKcal: ptr(k.Value)}
+		if okS && okZ && okK { // an AZM value, even 0, means the band recorded the day
+			a.Days[day] = ActivityDay{Steps: ptr(s.Value), AZM: ptr(z.Value), TotalKcal: ptr(k.Value), Worn: true}
 			continue
 		}
 		need = append(need, day)
@@ -128,30 +131,38 @@ func (d *Data) fetchActivity(ctx context.Context, a, b, today, settled coach.Loc
 	steps, err := d.rollup(ctx, googlehealth.Steps, a, b, act, func(raw json.RawMessage) (float64, error) {
 		var r struct {
 			Steps *struct {
-				CountSum int64s `json:"countSum"`
+				CountSum *int64s `json:"countSum"`
 			} `json:"steps"`
 		}
-		if err := json.Unmarshal(raw, &r); err != nil || r.Steps == nil {
+		// A row is sent only for a day with steps: a missing count is a
+		// renamed field, not zero steps.
+		if err := json.Unmarshal(raw, &r); err != nil || r.Steps == nil || r.Steps.CountSum == nil {
 			return 0, errors.New("unreadable steps rollup")
 		}
-		return float64(r.Steps.CountSum), nil
-	}, 0, 200_000)
+		return float64(*r.Steps.CountSum), nil
+	}, 0, maxDaySteps)
 	if err != nil {
 		return err
 	}
 	azm, err := d.rollup(ctx, googlehealth.ActiveZoneMinutes, a, b, act, func(raw json.RawMessage) (float64, error) {
 		var r struct {
 			AZM *struct {
-				FatBurn int64s `json:"sumInFatBurnHeartZone"`
-				Cardio  int64s `json:"sumInCardioHeartZone"`
-				Peak    int64s `json:"sumInPeakHeartZone"`
+				FatBurn *int64s `json:"sumInFatBurnHeartZone"`
+				Cardio  *int64s `json:"sumInCardioHeartZone"`
+				Peak    *int64s `json:"sumInPeakHeartZone"`
 			} `json:"activeZoneMinutes"`
 		}
 		if err := json.Unmarshal(raw, &r); err != nil || r.AZM == nil {
 			return 0, errors.New("unreadable active zone minutes rollup")
 		}
-		return float64(r.AZM.FatBurn + r.AZM.Cardio + r.AZM.Peak), nil
-	}, 0, 2*24*60)
+		z := r.AZM
+		// A row is sent only for a day with zone minutes: no zone at all is
+		// a renamed field.
+		if z.FatBurn == nil && z.Cardio == nil && z.Peak == nil {
+			return 0, errors.New("active zone minutes rollup without zones")
+		}
+		return float64(deref64(z.FatBurn) + deref64(z.Cardio) + deref64(z.Peak)), nil
+	}, 0, maxDayAZM)
 	if err != nil {
 		return err
 	}
@@ -165,13 +176,14 @@ func (d *Data) fetchActivity(ctx context.Context, a, b, today, settled coach.Loc
 			return 0, errors.New("unreadable total calories rollup")
 		}
 		return *r.TotalCalories.KcalSum, nil
-	}, 0, 20_000)
+	}, 0, maxDayKcal)
 	if err != nil {
 		return err
 	}
 	// The rollup leaves out a day without zone minutes. On a day the band
 	// recorded steps that is 0 minutes; on a day it was not worn, no data.
-	worn, err := d.wornDays(ctx, a, b, azm)
+	// A day whose AZM row was dropped as unreadable gets no 0.
+	worn, err := d.wornDays(ctx, a, b, azm.values)
 	if err != nil {
 		return err
 	}
@@ -179,16 +191,20 @@ func (d *Data) fetchActivity(ctx context.Context, a, b, today, settled coach.Loc
 	if err != nil {
 		return err
 	}
+	// Like a night fetched with an unreadable record, a run with a dropped
+	// row is returned but not cached.
+	cleanRun := steps.skipped+azm.skipped+kcal.skipped == 0
 	for _, day := range days {
-		v := ActivityDay{Steps: steps[day], AZM: azm[day], TotalKcal: kcal[day], Partial: day >= today}
-		if v.AZM == nil && worn[day] {
+		v := ActivityDay{Steps: steps.values[day], AZM: azm.values[day], TotalKcal: kcal.values[day], Partial: day >= today}
+		v.Worn = v.AZM != nil || worn[day]
+		if v.AZM == nil && worn[day] && cleanRun {
 			v.AZM = ptr(0)
 		}
 		if v.Steps == nil && v.AZM == nil && v.TotalKcal == nil {
 			continue
 		}
 		act.Days[day] = v
-		if day > settled {
+		if day > settled || !cleanRun {
 			continue
 		}
 		for key, val := range map[string]*float64{KeySteps: v.Steps, KeyAZM: v.AZM, KeyTotalCalories: v.TotalKcal} {
@@ -200,16 +216,29 @@ func (d *Data) fetchActivity(ctx context.Context, a, b, today, settled coach.Loc
 	return nil
 }
 
+const (
+	maxDaySteps = 200_000
+	maxDayAZM   = 2 * 24 * 60 // every minute in cardio or peak
+	maxDayKcal  = 20_000
+	// wornChunkDays bounds one steps list for the worn-day check: the band
+	// writes a record about every minute it counts steps.
+	wornChunkDays = 31
+)
+
+type rollupDays struct {
+	values  map[coach.LocalDate]*float64
+	skipped int
+}
+
 // rollup reads one daily rollup into values per local day; a row outside
 // [lo, hi] or unreadable is skipped and counted.
 func (d *Data) rollup(ctx context.Context, dt googlehealth.DataType, a, b coach.LocalDate, act *Activity,
-	value func(json.RawMessage) (float64, error), lo, hi float64) (map[coach.LocalDate]*float64, error) {
+	value func(json.RawMessage) (float64, error), lo, hi float64) (rollupDays, error) {
 	raws, err := d.api.DailyRollup(ctx, dt, a, b)
 	if err != nil {
-		return nil, err
+		return rollupDays{}, err
 	}
-	out := map[coach.LocalDate]*float64{}
-	skipped := 0
+	out := rollupDays{values: map[coach.LocalDate]*float64{}}
 	for _, raw := range raws {
 		var r struct {
 			Start civilDate `json:"civilStartTime"`
@@ -218,22 +247,25 @@ func (d *Data) rollup(ctx context.Context, dt googlehealth.DataType, a, b coach.
 		if derr == nil {
 			day, derr = r.Start.day()
 		}
-		v, err := value(raw)
-		if derr != nil || err != nil || math.IsNaN(v) || v < lo || v > hi || day < a || day > b {
-			skipped++
+		if derr == nil && (day < a || day > b) {
 			continue
 		}
-		out[day] = &v
+		v, err := value(raw)
+		if derr != nil || err != nil || math.IsNaN(v) || v < lo || v > hi {
+			out.skipped++
+			continue
+		}
+		out.values[day] = &v
 	}
-	if skipped > 0 {
-		act.Skipped += skipped
-		d.log.Warn("unreadable daily rollup rows", "data_type", string(dt), "from", string(a), "to", string(b), "skipped", skipped)
+	if out.skipped > 0 {
+		act.Skipped += out.skipped
+		d.log.Warn("unreadable daily rollup rows", "data_type", string(dt), "from", string(a), "to", string(b), "skipped", out.skipped)
 	}
 	return out, nil
 }
 
-// wornDays lists the days of [a, b] with band step records, fetched only
-// when some day has no zone minutes row.
+// wornDays lists the days of [a, b] with band step records, fetched (in
+// chunks) only when some day has no zone minutes row.
 func (d *Data) wornDays(ctx context.Context, a, b coach.LocalDate, azm map[coach.LocalDate]*float64) (map[coach.LocalDate]bool, error) {
 	days, err := dayList(a, b)
 	if err != nil {
@@ -242,28 +274,38 @@ func (d *Data) wornDays(ctx context.Context, a, b coach.LocalDate, azm map[coach
 	if len(azm) == len(days) {
 		return nil, nil
 	}
-	raws, err := d.api.List(ctx, googlehealth.Steps, a, b)
-	if err != nil {
-		return nil, err
-	}
 	worn := map[coach.LocalDate]bool{}
-	for _, raw := range raws {
-		var r struct {
-			DataSource dataSource `json:"dataSource"`
-			Steps      *struct {
-				Interval struct {
-					Start civilDate `json:"civilStartTime"`
-				} `json:"interval"`
-			} `json:"steps"`
+	for i := 0; i < len(days); i += wornChunkDays {
+		chunk := days[i:min(i+wornChunkDays, len(days))]
+		raws, err := d.api.List(ctx, googlehealth.Steps, chunk[0], chunk[len(chunk)-1])
+		if err != nil {
+			return nil, err
 		}
-		if json.Unmarshal(raw, &r) != nil || r.Steps == nil || r.DataSource.Platform != primaryPlatform {
-			continue
-		}
-		if day, err := r.Steps.Interval.Start.day(); err == nil {
-			worn[day] = true
+		for _, raw := range raws {
+			var r struct {
+				DataSource dataSource `json:"dataSource"`
+				Steps      *struct {
+					Interval struct {
+						Start civilDate `json:"civilStartTime"`
+					} `json:"interval"`
+				} `json:"steps"`
+			}
+			if json.Unmarshal(raw, &r) != nil || r.Steps == nil || r.DataSource.Platform != primaryPlatform {
+				continue
+			}
+			if day, err := r.Steps.Interval.Start.day(); err == nil {
+				worn[day] = true
+			}
 		}
 	}
 	return worn, nil
+}
+
+func deref64(p *int64s) int64 {
+	if p == nil {
+		return 0
+	}
+	return int64(*p)
 }
 
 // civilDate is the date part of the API's CivilDateTime.
@@ -292,8 +334,10 @@ type Reading struct {
 	Source string
 }
 
-// Body holds the weight and body fat of [From, To]: the last reading of each
-// local day. Every platform counts (a scale may sync through Apple Health).
+// Body holds the weight and body fat of [From, To]: the first reading of each
+// local day, the usual morning weigh-in (an evening reading runs about a
+// kilogram higher, the size of a week's trend). Every platform counts (a
+// scale may sync through Apple Health).
 type Body struct {
 	From, To coach.LocalDate
 	Weight   map[coach.LocalDate]Reading
@@ -367,22 +411,26 @@ func (d *Data) Body(ctx context.Context, from, to coach.LocalDate) (Body, error)
 		if err != nil {
 			return Body{}, err
 		}
+		skipped := 0
 		for _, raw := range raws {
 			at, v, src, err := m.parse(raw)
 			if err != nil {
-				b.Skipped++
+				skipped++
 				continue
 			}
 			day := coach.DateOf(at, d.loc)
 			if day < from || day > to {
 				continue
 			}
-			if cur, ok := m.out[day]; !ok || at.After(cur.At) {
+			if cur, ok := m.out[day]; !ok || at.Before(cur.At) {
 				m.out[day] = Reading{At: at, Value: v, Source: src.label()}
 			}
 		}
+		b.Skipped += skipped
+		// The dropped reading may have been a day's first: a run with one is
+		// returned but not cached.
 		for day, r := range m.out {
-			if day <= settled {
+			if day <= settled && skipped == 0 {
 				d.put(ctx, store.Metric{Date: day, Key: m.key, Value: r.Value, Source: r.Source})
 			}
 		}

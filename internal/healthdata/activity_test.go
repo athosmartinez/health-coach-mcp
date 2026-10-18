@@ -76,7 +76,8 @@ func TestActivityDays(t *testing.T) {
 	got := a.Days[day("2026-10-15")]
 	// Active Zone Minutes are the zone sums as reported: cardio and peak
 	// already count double.
-	if *got.Steps != 8015 || *got.AZM != 26 || *got.TotalKcal != 2400.5 || got.Partial {
+	// Zone minutes come from the band: the day was worn without a steps list.
+	if *got.Steps != 8015 || *got.AZM != 26 || *got.TotalKcal != 2400.5 || got.Partial || !got.Worn {
 		t.Errorf("10-15 = %+v", got)
 	}
 	if !a.Days[day("2026-10-16")].Partial || a.Days[day("2026-10-14")].Partial {
@@ -175,12 +176,15 @@ func TestActivityBadRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Skipped != 5 || *a.Days[day("2026-10-10")].Steps != 9000 || a.Days[day("2026-10-11")].Steps != nil || a.Days[day("2026-10-10")].TotalKcal != nil {
+	// The row outside the range is ignored, not counted.
+	if a.Skipped != 4 || *a.Days[day("2026-10-10")].Steps != 9000 || a.Days[day("2026-10-11")].Steps != nil || a.Days[day("2026-10-10")].TotalKcal != nil {
 		t.Errorf("activity = %+v, skipped %d", a.Days, a.Skipped)
 	}
-	// A day missing a value is cached in part and read live again next time.
-	if ms, _ := st.MetricRange(ctx, KeyTotalCalories, day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
-		t.Errorf("cached calories %+v", ms)
+	// A run with dropped rows is returned but not cached.
+	for _, k := range activityKeys {
+		if ms, _ := st.MetricRange(ctx, k, day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
+			t.Errorf("cached %s %+v", k, ms)
+		}
 	}
 	api.takeCalls()
 	if _, err := d.Activity(ctx, day("2026-10-10"), day("2026-10-12")); err != nil || len(api.takeCalls()) == 0 {
@@ -233,7 +237,7 @@ func TestBody(t *testing.T) {
 	api := &fakeAPI{}
 	api.add(googlehealth.Weight,
 		weightRec(at("2026-10-10", 7, 0), 80500, "FITBIT"),
-		weightRec(at("2026-10-10", 21, 0), 81200, "FITBIT"),    // the day's last reading wins
+		weightRec(at("2026-10-10", 21, 0), 81200, "FITBIT"),    // an evening reading the same day
 		weightRec(at("2026-10-12", 8, 0), 80100, "HEALTH_KIT"), // a scale synced through the phone counts
 		weightRec(at("2026-10-11", 8, 0), 5000, "FITBIT"),      // implausible
 		json.RawMessage(`{"weight":{}}`),
@@ -244,7 +248,8 @@ func TestBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := b.Weight[day("2026-10-10")]; w.Value != 81.2 || w.Source != "Synthetic Scale" {
+	// The day's first reading: the morning weigh-in.
+	if w := b.Weight[day("2026-10-10")]; w.Value != 80.5 || w.Source != "Synthetic Scale" {
 		t.Errorf("10-10 = %+v", w)
 	}
 	if b.Weight[day("2026-10-12")].Value != 80.1 || len(b.Weight) != 2 || b.Skipped != 2 || b.BodyFat[day("2026-10-12")].Value != 18.5 {
@@ -257,18 +262,132 @@ func TestBody(t *testing.T) {
 		t.Error("Last of nothing found something")
 	}
 	s, _ := b.Series(KeyWeight)
-	if render(s) != "2026-10-10=81.2 2026-10-11=nil 2026-10-12=80.1 " {
+	if render(s) != "2026-10-10=80.5 2026-10-11=nil 2026-10-12=80.1 " {
 		t.Errorf("series %s", render(s))
 	}
-	if _, err := b.Series(KeyBodyFat); err != nil {
-		t.Error(err)
+	if f, err := b.Series(KeyBodyFat); err != nil || render(f) != "2026-10-10=nil 2026-10-11=nil 2026-10-12=18.5 " {
+		t.Errorf("body fat series %s, %v", render(f), err)
 	}
 	if _, err := b.Series("steps"); err == nil {
 		t.Error("unknown body series accepted")
 	}
-	ms, _ := st.MetricRange(ctx, KeyWeight, day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion)
-	if len(ms) != 2 {
+	// The dropped readings may have been a day's first: nothing is cached.
+	if ms, _ := st.MetricRange(ctx, KeyWeight, day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
 		t.Errorf("cached %+v", ms)
+	}
+	// Body fat read cleanly: its settled day is cached.
+	if ms, _ := st.MetricRange(ctx, KeyBodyFat, day("2026-10-12"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 1 {
+		t.Errorf("cached body fat %+v", ms)
+	}
+}
+
+func TestBodyCachesOnlySettledDays(t *testing.T) {
+	api := &fakeAPI{}
+	for _, dd := range []string{"2026-10-13", "2026-10-14", "2026-10-16"} {
+		api.add(googlehealth.Weight, weightRec(at(dd, 7, 0), 80000, "FITBIT"))
+	}
+	d, st := newData(t, api)
+	if _, err := d.Body(ctx, day("2026-10-13"), day("2026-10-16")); err != nil {
+		t.Fatal(err)
+	}
+	// 10-13 is D-3, the last settled day; 10-14 and today stay live.
+	ms, _ := st.MetricRange(ctx, KeyWeight, day("2026-10-13"), day("2026-10-16"), metrics.AlgoVersion)
+	if len(ms) != 1 || ms[0].Date != day("2026-10-13") {
+		t.Errorf("cached %+v", ms)
+	}
+}
+
+func TestAZMKeepsRealValuesInARunWithAGap(t *testing.T) {
+	api := &fakeAPI{}
+	api.addRollup(googlehealth.Steps, stepsRollup("2026-10-10", 9000), stepsRollup("2026-10-11", 4000))
+	api.addRollup(googlehealth.ActiveZoneMinutes, azmRollup("2026-10-10", 20, 5, 0))
+	api.add(googlehealth.Steps, stepRec("2026-10-10", "FITBIT"), stepRec("2026-10-11", "FITBIT"))
+	d, _ := newData(t, api)
+	a, _ := d.Activity(ctx, day("2026-10-10"), day("2026-10-11"))
+	if v := a.Days[day("2026-10-10")]; *v.AZM != 25 || !v.Worn {
+		t.Errorf("10-10 = %+v", v)
+	}
+	if v := a.Days[day("2026-10-11")]; *v.AZM != 0 || !v.Worn {
+		t.Errorf("10-11 = %+v", v)
+	}
+}
+
+func TestDroppedAZMRowIsNotZero(t *testing.T) {
+	api := &fakeAPI{}
+	api.addRollup(googlehealth.Steps, stepsRollup("2026-10-10", 9000))
+	api.addRollup(googlehealth.TotalCalories, kcalRollup("2026-10-10", 2500))
+	api.addRollup(googlehealth.ActiveZoneMinutes, azmRollup("2026-10-10", 3000, 0, 0)) // implausible
+	api.add(googlehealth.Steps, stepRec("2026-10-10", "FITBIT"))
+	d, st := newData(t, api)
+	a, _ := d.Activity(ctx, day("2026-10-10"), day("2026-10-10"))
+	if v := a.Days[day("2026-10-10")]; v.AZM != nil || !v.Worn || a.Skipped != 1 {
+		t.Errorf("10-10 = %+v, skipped %d", v, a.Skipped)
+	}
+	if ms, _ := st.MetricRange(ctx, KeySteps, day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
+		t.Errorf("cached %+v", ms)
+	}
+}
+
+func TestRenamedRollupFieldsAreNotZero(t *testing.T) {
+	api := &fakeAPI{}
+	api.addRollup(googlehealth.Steps, rollupRow("2026-10-10", "steps", map[string]any{"stepCount": "9000"}))
+	api.addRollup(googlehealth.ActiveZoneMinutes, rollupRow("2026-10-10", "activeZoneMinutes", map[string]any{"fatBurn": "20"}))
+	api.addRollup(googlehealth.TotalCalories, rollupRow("2026-10-10", "totalCalories", map[string]any{"kcal": 2400}))
+	d, _ := newData(t, api)
+	a, _ := d.Activity(ctx, day("2026-10-10"), day("2026-10-10"))
+	if a.Skipped != 3 || len(a.Days) != 0 {
+		t.Errorf("activity = %+v, skipped %d", a.Days, a.Skipped)
+	}
+}
+
+func TestRollupBounds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		row  json.RawMessage
+		dt   googlehealth.DataType
+		keep bool
+	}{
+		"0 steps":          {stepsRollup("2026-10-10", 0), googlehealth.Steps, true},
+		"200000 steps":     {stepsRollup("2026-10-10", 200_000), googlehealth.Steps, true},
+		"200001 steps":     {stepsRollup("2026-10-10", 200_001), googlehealth.Steps, false},
+		"2880 AZM":         {azmRollup("2026-10-10", 2880, 0, 0), googlehealth.ActiveZoneMinutes, true},
+		"2881 AZM":         {azmRollup("2026-10-10", 2881, 0, 0), googlehealth.ActiveZoneMinutes, false},
+		"20000 kcal":       {kcalRollup("2026-10-10", 20_000), googlehealth.TotalCalories, true},
+		"20001 kcal":       {kcalRollup("2026-10-10", 20_001), googlehealth.TotalCalories, false},
+		"negative kcal":    {kcalRollup("2026-10-10", -1), googlehealth.TotalCalories, false},
+		"before the range": {stepsRollup("2026-10-09", 10), googlehealth.Steps, false},
+	} {
+		api := &fakeAPI{loose: true}
+		api.addRollup(tc.dt, tc.row)
+		d, _ := newData(t, api)
+		a, err := d.Activity(ctx, day("2026-10-10"), day("2026-10-10"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, kept := a.Days[day("2026-10-10")]
+		if kept != tc.keep {
+			t.Errorf("%s: kept %v, days %+v", name, kept, a.Days)
+		}
+	}
+}
+
+func TestNotWornDay(t *testing.T) {
+	api := &fakeAPI{}
+	api.addRollup(googlehealth.Steps, stepsRollup("2026-10-10", 3000))
+	api.addRollup(googlehealth.TotalCalories, kcalRollup("2026-10-10", 1700)) // mostly the resting burn
+	api.add(googlehealth.Steps, stepRec("2026-10-10", "HEALTH_KIT"))
+	d, _ := newData(t, api)
+	a, _ := d.Activity(ctx, day("2026-10-10"), day("2026-10-10"))
+	if v := a.Days[day("2026-10-10")]; v.Worn || v.AZM != nil || v.TotalKcal == nil {
+		t.Errorf("10-10 = %+v", v)
+	}
+	// A cached day had an AZM value, so the band recorded it.
+	api2 := &fakeAPI{}
+	activityWeek(api2)
+	d2, _ := newData(t, api2)
+	_, _ = d2.Activity(ctx, day("2026-10-10"), day("2026-10-10"))
+	again, _ := d2.Activity(ctx, day("2026-10-10"), day("2026-10-10"))
+	if !again.Days[day("2026-10-10")].Worn {
+		t.Error("a cached day lost Worn")
 	}
 }
 
@@ -291,12 +410,13 @@ func TestBodyFromTheCache(t *testing.T) {
 func TestParseBodyBounds(t *testing.T) {
 	ts := at("2026-10-10", 8, 0)
 	for raw, good := range map[string]bool{
-		string(weightRec(ts, 20000, "FITBIT")):  true,
-		string(weightRec(ts, 400000, "FITBIT")): true,
-		string(weightRec(ts, 19999, "FITBIT")):  false,
-		string(weightRec(ts, 400001, "FITBIT")): false,
-		`{"weight":{"weightGrams":80000}}`:      false,
-		`[]`:                                    false,
+		string(weightRec(ts, 20000, "FITBIT")):                              true,
+		string(weightRec(ts, 400000, "FITBIT")):                             true,
+		string(weightRec(ts, 19999, "FITBIT")):                              false,
+		string(weightRec(ts, 400001, "FITBIT")):                             false,
+		`{"weight":{"weightGrams":80000}}`:                                  false,
+		`{"weight":{"sampleTime":{"physicalTime":"2026-10-10T10:00:00Z"}}}`: false,
+		`[]`: false,
 	} {
 		if _, _, _, err := parseWeight(json.RawMessage(raw)); (err == nil) != good {
 			t.Errorf("weight %s: %v", raw, err)
@@ -308,6 +428,8 @@ func TestParseBodyBounds(t *testing.T) {
 		string(bodyFatRec(ts, 1)):  false,
 		string(bodyFatRec(ts, 76)): false,
 		`{"bodyFat":{}}`:           false,
+		`{"bodyFat":{"sampleTime":{"physicalTime":"2026-10-10T10:00:00Z"}}}`: false,
+		`{"bodyFat":{"percentage":20}}`:                                      false,
 	} {
 		if _, _, _, err := parseBodyFat(json.RawMessage(raw)); (err == nil) != good {
 			t.Errorf("body fat %s: %v", raw, err)

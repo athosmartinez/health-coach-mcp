@@ -22,8 +22,9 @@ type ZoneMinutes struct {
 // ExerciseHR is a session's heart rate.
 type ExerciseHR struct {
 	AvgBPM float64
-	// MaxBPM is the highest band sample inside the session: nil unless asked
-	// for, or when the band has no samples there.
+	// MaxBPM is the highest median of maxHRWindow consecutive band samples
+	// inside the session, so one optical spike is not the max: nil unless
+	// asked for, beyond maxHRSessions, or with too few samples.
 	MaxBPM  *float64
 	ZoneMin ZoneMinutes
 }
@@ -54,6 +55,9 @@ type Exercises struct {
 	Sessions    []Exercise
 	Skipped     int // records that could not be read
 	OtherSource int // records from another platform
+	// MaxHROmitted counts sessions with heart rate left without a max
+	// because the call asked for more than maxHRSessions.
+	MaxHROmitted int
 }
 
 // Exercises returns the sessions that started in [from, to]. With maxHR, each
@@ -97,13 +101,23 @@ func (d *Data) Exercises(ctx context.Context, from, to coach.LocalDate, maxHR bo
 		}
 	}
 	slices.SortFunc(out.Sessions, func(a, b Exercise) int { return a.Start.Compare(b.Start) })
+	lookups := 0
+	for i := len(out.Sessions) - 1; i >= 0; i-- { // newest first, for the cap
+		e := &out.Sessions[i]
+		if !maxHR || e.HR == nil {
+			continue
+		}
+		if lookups == maxHRSessions {
+			out.MaxHROmitted++
+			continue
+		}
+		lookups++
+		if e.HR.MaxBPM, err = d.maxHR(ctx, e.Start, e.End); err != nil {
+			return Exercises{}, err
+		}
+	}
 	for i := range out.Sessions {
 		e := &out.Sessions[i]
-		if maxHR && e.HR != nil {
-			if e.HR.MaxBPM, err = d.maxHR(ctx, e.Start, e.End); err != nil {
-				return Exercises{}, err
-			}
-		}
 		var avg *float64
 		if e.HR != nil {
 			avg = &e.HR.AvgBPM
@@ -117,29 +131,72 @@ func (d *Data) Exercises(ctx context.Context, from, to coach.LocalDate, maxHR bo
 	return out, nil
 }
 
-// maxHR is the highest Fitbit heart-rate sample in [start, end].
+// maxHR is the highest median of maxHRWindow consecutive Fitbit heart-rate
+// samples in [start, end], or nil with fewer samples.
 func (d *Data) maxHR(ctx context.Context, start, end time.Time) (*float64, error) {
-	raws, err := d.api.ListBetween(ctx, googlehealth.HeartRate, start, end.Add(time.Second))
+	// The last second is included; a session of a full day keeps the
+	// request within the API client's one-day window.
+	stop := end.Add(time.Second)
+	if limit := start.Add(24 * time.Hour); stop.After(limit) {
+		stop = limit
+	}
+	raws, err := d.api.ListBetween(ctx, googlehealth.HeartRate, start, stop)
 	if err != nil {
 		return nil, err
 	}
-	var best *float64
+	type sample struct {
+		at  time.Time
+		bpm float64
+	}
+	var ss []sample
+	unreadable := 0
 	for _, raw := range raws {
 		var r struct {
 			DataSource dataSource `json:"dataSource"`
 			HeartRate  *struct {
-				BPM int64s `json:"beatsPerMinute"`
+				BPM        *int64s `json:"beatsPerMinute"`
+				SampleTime struct {
+					PhysicalTime time.Time `json:"physicalTime"`
+				} `json:"sampleTime"`
 			} `json:"heartRate"`
 		}
-		if json.Unmarshal(raw, &r) != nil || r.HeartRate == nil || r.DataSource.Platform != primaryPlatform {
+		if json.Unmarshal(raw, &r) != nil || r.HeartRate == nil || r.HeartRate.BPM == nil {
+			unreadable++
 			continue
 		}
-		if v := float64(r.HeartRate.BPM); v >= minHRBPM && v <= maxHRBPM && (best == nil || v > *best) {
-			best = ptr(v)
+		if r.DataSource.Platform != primaryPlatform {
+			continue
+		}
+		if v := float64(*r.HeartRate.BPM); v >= minHRBPM && v <= maxHRBPM {
+			ss = append(ss, sample{r.HeartRate.SampleTime.PhysicalTime, v})
 		}
 	}
-	return best, nil
+	if unreadable > 0 && len(ss) == 0 {
+		d.log.Warn("heart rate samples arrived but none were usable", "unreadable", unreadable)
+	}
+	if len(ss) < maxHRWindow {
+		return nil, nil
+	}
+	slices.SortFunc(ss, func(a, b sample) int { return a.at.Compare(b.at) })
+	var best float64
+	win := make([]float64, maxHRWindow)
+	for i := 0; i+maxHRWindow <= len(ss); i++ {
+		for j := range win {
+			win[j] = ss[i+j].bpm
+		}
+		best = max(best, median(win))
+	}
+	return &best, nil
 }
+
+const (
+	// maxHRWindow samples (about 10 s at the band's rate) make one max HR
+	// reading: optical HR spikes for a sample or two on motion.
+	maxHRWindow = 5
+	// maxHRSessions bounds the heart-rate requests of one call (one per
+	// session), newest sessions first.
+	maxHRSessions = 31
+)
 
 const (
 	minHRBPM, maxHRBPM = 20, 250
@@ -191,8 +248,9 @@ func parseExercise(raw json.RawMessage) (e Exercise, err error) {
 		return e, errOtherSource
 	}
 	span := e.End.Sub(e.Start)
+	// Every real session carries an active duration: none is a renamed field.
 	active, err := minutes(x.ActiveDuration, span)
-	if err != nil || span > 24*time.Hour {
+	if err != nil || x.ActiveDuration == "" || span > 24*time.Hour {
 		return e, errors.New("exercise record with an implausible duration")
 	}
 	ms := x.MetricsSummary
@@ -217,6 +275,11 @@ func parseExercise(raw json.RawMessage) (e Exercise, err error) {
 			return e, errors.New("exercise record with an implausible heart rate")
 		}
 		hr := &ExerciseHR{AvgBPM: avg}
+		zs := ms.Zones
+		if zs.Light == "" && zs.Moderate == "" && zs.Vigorous == "" && zs.Peak == "" {
+			// A session with heart rate always has its zone durations.
+			return e, errors.New("exercise record with heart rate but no zone times")
+		}
 		for _, z := range []struct {
 			s   string
 			dst *float64

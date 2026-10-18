@@ -37,6 +37,9 @@ type FoodItem struct {
 	// Nutrients holds only what the item reports: a nutrient left out is
 	// unknown, not zero.
 	Nutrients map[string]float64
+	// Rejected lists nutrients the item reported with an implausible value
+	// or twice; they count as unknown, and the rest of the item is kept.
+	Rejected []string
 }
 
 // Total is a day's sum of one nutrient over the items that report it.
@@ -49,6 +52,8 @@ type Total struct {
 type NutritionDay struct {
 	Items  []FoodItem // in time order
 	Totals map[string]Total
+	// Rejected counts nutrient values dropped from the day's items.
+	Rejected int
 	// Partial: today, so the log can still grow. Baselines leave it out.
 	Partial bool
 }
@@ -67,7 +72,9 @@ type Nutrition struct {
 }
 
 // Series returns one point per day with the day's total of nutrient, nil on a
-// day without a log or without any item reporting it.
+// day without a log or where an item does not report it: a partial total
+// would read as a low day (a missed protein target) in adherence and trends.
+// Tools show a day's partial totals from Days.
 func (n Nutrition) Series(nutrient string) ([]metrics.Point, error) { return n.series(nutrient, false) }
 
 // BaselineSeries is Series without partial days.
@@ -84,8 +91,8 @@ func (n Nutrition) series(nutrient string, baseline bool) ([]metrics.Point, erro
 		if !ok || (baseline && v.Partial) {
 			return nil
 		}
-		if t := v.Totals[nutrient]; t.Items > 0 {
-			return ptr(t.Value)
+		if v.Complete(nutrient) {
+			return ptr(v.Totals[nutrient].Value)
 		}
 		return nil
 	})
@@ -135,6 +142,7 @@ func (d *Data) Nutrition(ctx context.Context, from, to coach.LocalDate) (Nutriti
 			nd.Totals, nd.Partial = map[string]Total{}, day >= today
 		}
 		nd.Items = append(nd.Items, item)
+		nd.Rejected += len(item.Rejected)
 		for k, v := range item.Nutrients {
 			t := nd.Totals[k]
 			t.Value += v
@@ -156,7 +164,7 @@ func (d *Data) Nutrition(ctx context.Context, from, to coach.LocalDate) (Nutriti
 const (
 	maxItemKcal   = 10_000
 	maxItemGrams  = 2_000
-	maxItemSodium = 100_000 // mg
+	maxItemSodium = 20_000 // mg: 50 g of salt in one item
 )
 
 type grams struct {
@@ -199,7 +207,9 @@ var fromList = map[string]struct {
 }
 
 // parseFood decodes one item; errors as parseSleep, with item.At set when the
-// time was readable.
+// time was readable. An implausible or repeated nutrient is rejected alone:
+// dropping the whole item would take its calories out of a day that would
+// still look complete.
 func parseFood(raw json.RawMessage) (item FoodItem, err error) {
 	var r foodRecord
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -218,31 +228,25 @@ func parseFood(raw json.RawMessage) (item FoodItem, err error) {
 		item.ID = r.Name
 	}
 	item.Nutrients = map[string]float64{}
-	set := func(key string, v float64, hi float64) error {
-		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > hi {
-			return errors.New("nutrition record with an implausible amount")
-		}
-		if _, dup := item.Nutrients[key]; dup {
-			return errors.New("nutrition record with a nutrient listed twice")
+	rejected := map[string]bool{}
+	set := func(key string, v float64, hi float64) {
+		_, dup := item.Nutrients[key]
+		if rejected[key] || dup || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > hi {
+			delete(item.Nutrients, key)
+			rejected[key] = true
+			return
 		}
 		item.Nutrients[key] = v
-		return nil
 	}
 	// Proto3 leaves out a zero inside a present field: kcal 0 is "0 kcal".
 	if n.Energy != nil {
-		if err := set(NutrientKcal, deref(n.Energy.Kcal), maxItemKcal); err != nil {
-			return item, err
-		}
+		set(NutrientKcal, deref(n.Energy.Kcal), maxItemKcal)
 	}
 	if n.TotalCarbohydrate != nil {
-		if err := set(NutrientCarb, deref(n.TotalCarbohydrate.Grams), maxItemGrams); err != nil {
-			return item, err
-		}
+		set(NutrientCarb, deref(n.TotalCarbohydrate.Grams), maxItemGrams)
 	}
 	if n.TotalFat != nil {
-		if err := set(NutrientFat, deref(n.TotalFat.Grams), maxItemGrams); err != nil {
-			return item, err
-		}
+		set(NutrientFat, deref(n.TotalFat.Grams), maxItemGrams)
 	}
 	for _, x := range n.Nutrients {
 		m, ok := fromList[x.Nutrient]
@@ -253,8 +257,11 @@ func parseFood(raw json.RawMessage) (item FoodItem, err error) {
 		if m.key == NutrientSodium {
 			hi = maxItemSodium
 		}
-		if err := set(m.key, deref(x.Quantity.Grams)*m.factor, hi); err != nil {
-			return item, err
+		set(m.key, deref(x.Quantity.Grams)*m.factor, hi)
+	}
+	for _, k := range Nutrients {
+		if rejected[k] {
+			item.Rejected = append(item.Rejected, k)
 		}
 	}
 	return item, nil

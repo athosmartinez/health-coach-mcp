@@ -430,3 +430,5 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   Step 4 → 4a/4b and 6 → 6a/6b; OAuth `offline`+`consent`, refresh token preserved, 127.0.0.1; HRV by
   sleep window; missing readiness signals don't count; R4 middleware and R6 guard in Step 1; per-connection
   pragmas via DSN; objective exit criteria; Step 10 after 9.
+- 2026-10-19 — Step 7: `morning_briefing` returns the night's `start`/`end`, so `healthdata.Night` carries `Start`/`End`
+  and the cache gains the `sleep_end_min_of_day` key (a cached night without it is a miss and is fetched again).

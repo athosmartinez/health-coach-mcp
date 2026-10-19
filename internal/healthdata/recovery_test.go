@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -342,6 +343,7 @@ func TestNightBelongsToTheDayItEnds(t *testing.T) {
 		t.Fatalf("no night on the end day: %+v", r.Nights)
 	}
 	if n.InBedMin != 510 || n.AsleepMin != 470 || n.AwakeMin != 40 || n.StartMinOfDay != 23*60+10 ||
+		!n.Start.Equal(at("2026-10-09", 23, 10)) || !n.End.Equal(at("2026-10-10", 7, 40)) ||
 		*n.DeepMin != 70 || *n.REMMin != 94 || *n.LightMin != 306 || n.Source != "Synthetic Band" || n.Provisional {
 		t.Errorf("night = %+v", n)
 	}
@@ -354,6 +356,59 @@ func TestNightBelongsToTheDayItEnds(t *testing.T) {
 	}
 	if r.Excluded != (Excluded{OtherSource: 1, Naps: 1}) {
 		t.Errorf("excluded = %+v", r.Excluded)
+	}
+}
+
+func TestCachedNightKeepsItsWindow(t *testing.T) {
+	api := &fakeAPI{}
+	// One night starts before midnight, the other after it: both read back
+	// on the right dates, to the minute.
+	api.add(googlehealth.Sleep,
+		sleepRec(at("2026-10-09", 23, 50).Add(40*time.Second), at("2026-10-10", 7, 5).Add(20*time.Second), sleepOpt{deep: 60}),
+		sleepRec(at("2026-10-11", 0, 30), at("2026-10-11", 8, 0), sleepOpt{deep: 60}),
+	)
+	d, st := newData(t, api)
+	live, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-11"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := live.Nights[day("2026-10-10")]; !n.Start.Equal(at("2026-10-09", 23, 50)) || !n.End.Equal(at("2026-10-10", 7, 5)) {
+		t.Errorf("live window %v–%v, want whole minutes", n.Start, n.End)
+	}
+	api.takeCalls()
+	warm, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-11"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resting HR has no records here, so only its fetch repeats.
+	if calls := api.takeCalls(); slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "sleep ") }) {
+		t.Fatalf("settled nights fetched again: %v", calls)
+	}
+	assertSame(t, live, warm)
+	if n := warm.Nights[day("2026-10-11")]; !n.Start.Equal(at("2026-10-11", 0, 30)) || n.Start.Location() != sp {
+		t.Errorf("cached start %v", n.Start)
+	}
+	// A night cached before the end row existed is a miss, not a night without an end.
+	if err := st.DeleteMetric(ctx, day("2026-10-11"), KeySleepEnd); err != nil {
+		t.Fatal(err)
+	}
+	again, err := d.Recovery(ctx, day("2026-10-11"), day("2026-10-11"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := api.takeCalls(); !slices.Contains(calls, "sleep 2026-10-10..2026-10-12") || !again.Nights[day("2026-10-11")].End.Equal(at("2026-10-11", 8, 0)) {
+		t.Errorf("calls %v, night %+v", calls, again.Nights[day("2026-10-11")])
+	}
+	// A stored minute outside a day is a miss too.
+	if err := st.PutMetric(ctx, store.Metric{Date: day("2026-10-11"), Key: KeySleepEnd, Value: 24 * 60, Source: "Synthetic Band",
+		AlgoVersion: metrics.AlgoVersion, Zone: sp.String()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Recovery(ctx, day("2026-10-11"), day("2026-10-11")); err != nil {
+		t.Fatal(err)
+	}
+	if calls := api.takeCalls(); !slices.Contains(calls, "sleep 2026-10-10..2026-10-12") {
+		t.Errorf("a corrupt end minute was read as a night: %v", calls)
 	}
 }
 
@@ -399,7 +454,8 @@ func TestSplitNightIsJoined(t *testing.T) {
 	}
 	n := r.Nights[day("2026-10-10")]
 	if n.InBedMin != 465 || n.AsleepMin != 415 || n.AwakeMin != 50 || *n.DeepMin != 70 || *n.REMMin != 32+51 ||
-		n.StartMinOfDay != 22*60+30 || r.Excluded.ExtraSessions != 0 {
+		n.StartMinOfDay != 22*60+30 || r.Excluded.ExtraSessions != 0 ||
+		!n.Start.Equal(at("2026-10-09", 22, 30)) || !n.End.Equal(at("2026-10-10", 7, 0)) {
 		t.Errorf("night = %+v, excluded %+v", n, r.Excluded)
 	}
 	// The median runs over both parts (36 samples at 40, 57 at 60), not the gap.
@@ -536,6 +592,9 @@ func assertSame(t *testing.T, a, b Recovery) {
 	for d, n := range a.Nights {
 		if m := b.Nights[d]; m.HRVCoverage != n.HRVCoverage || m.Provisional != n.Provisional {
 			t.Errorf("%s: coverage %v vs %v, provisional %v vs %v", d, n.HRVCoverage, m.HRVCoverage, n.Provisional, m.Provisional)
+		}
+		if m := b.Nights[d]; !m.Start.Equal(n.Start) || !m.End.Equal(n.End) {
+			t.Errorf("%s: window %v–%v vs %v–%v", d, n.Start, n.End, m.Start, m.End)
 		}
 	}
 	if fmt.Sprint(a.Sources) != fmt.Sprint(b.Sources) || fmt.Sprint(a.RestingHR) != fmt.Sprint(b.RestingHR) {
@@ -688,7 +747,7 @@ func TestWhatIsCached(t *testing.T) {
 		if n := r.Nights[d10]; n.DeepMin != nil || n.AsleepMin == 0 || n.Provisional {
 			t.Errorf("night %+v", n)
 		}
-		if got := fmt.Sprint(cachedKeys(st, "2026-10-10")); got != "[sleep_asleep_min sleep_awake_min sleep_in_bed_min sleep_start_min_of_day]" {
+		if got := fmt.Sprint(cachedKeys(st, "2026-10-10")); got != "[sleep_asleep_min sleep_awake_min sleep_in_bed_min sleep_start_min_of_day sleep_end_min_of_day]" {
 			t.Errorf("cached %v", got)
 		}
 		api.takeCalls()

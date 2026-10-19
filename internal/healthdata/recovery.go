@@ -30,17 +30,18 @@ const (
 	KeyLight      = "sleep_light_min"
 	KeyREM        = "sleep_rem_min"
 	KeySleepStart = "sleep_start_min_of_day" // wraps at midnight: only for metrics.SleepOnsetConsistency, never a linear mean
+	KeySleepEnd   = "sleep_end_min_of_day"   // wraps at midnight too
 	KeyHRV        = "hrv_rmssd_ms"
 	KeyRestingHR  = "resting_hr_bpm"
 )
 
 // sleepKeys are the per-night rows. KeyAsleep is written last and removed
 // first, so a night is a cache hit only when its write completed.
-var sleepKeys = []string{KeyAsleep, KeyAwake, KeyInBed, KeyDeep, KeyLight, KeyREM, KeySleepStart}
+var sleepKeys = []string{KeyAsleep, KeyAwake, KeyInBed, KeyDeep, KeyLight, KeyREM, KeySleepStart, KeySleepEnd}
 
 var (
-	coreKeys  = []string{KeyAwake, KeyInBed, KeySleepStart} // with KeyAsleep, always present
-	stageKeys = []string{KeyDeep, KeyLight, KeyREM}         // all or none
+	coreKeys  = []string{KeyAwake, KeyInBed, KeySleepStart, KeySleepEnd} // with KeyAsleep, always present
+	stageKeys = []string{KeyDeep, KeyLight, KeyREM}                      // all or none
 )
 
 const (
@@ -95,7 +96,11 @@ type Night struct {
 	AsleepMin, AwakeMin, InBedMin float64
 	DeepMin, LightMin, REMMin     *float64 // nil without final stages
 	StartMinOfDay                 int      // local start time, minutes after midnight
-	HRV                           *float64 // median rMSSD (ms); nil when the samples cover too little of the night
+	// Start and End bound the night in local time, to the whole minute (the
+	// cache keeps minutes); for a split night, the first part's start and
+	// the last part's end.
+	Start, End time.Time
+	HRV        *float64 // median rMSSD (ms); nil when the samples cover too little of the night
 	// HRVCoverage is the share (0..1) of the night's 5-minute slots holding
 	// an HRV sample. With HRV nil and coverage above 0, the value was
 	// withheld for too little coverage (on a recent night, possibly samples
@@ -183,6 +188,8 @@ func (r Recovery) series(key string, baseline bool) ([]metrics.Point, error) {
 		get = night(func(n Night) *float64 { return n.REMMin })
 	case KeySleepStart:
 		get = night(func(n Night) *float64 { v := float64(n.StartMinOfDay); return &v })
+	case KeySleepEnd:
+		get = night(func(n Night) *float64 { v := float64(minuteOfDay(n.End)); return &v })
 	case KeyHRV:
 		get = night(func(n Night) *float64 { return n.HRV })
 	case KeyRestingHR:
@@ -257,7 +264,7 @@ func (d *Data) Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery
 	}
 	var needSleep, needResting []coach.LocalDate
 	for _, day := range days {
-		if n, ok := cached.night(day); ok {
+		if n, ok := cached.night(day, d.loc); ok {
 			r.Nights[day] = n
 			f.sources[n.Source] = true
 		} else {
@@ -289,7 +296,7 @@ func (d *Data) Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery
 
 type cacheRows map[string]map[coach.LocalDate]store.Metric
 
-func (c cacheRows) night(day coach.LocalDate) (Night, bool) {
+func (c cacheRows) night(day coach.LocalDate, loc *time.Location) (Night, bool) {
 	asleep, ok := c[KeyAsleep][day]
 	if !ok {
 		return Night{}, false
@@ -305,6 +312,9 @@ func (c cacheRows) night(day coach.LocalDate) (Night, bool) {
 	n := Night{
 		AsleepMin: asleep.Value, AwakeMin: vals[KeyAwake], InBedMin: vals[KeyInBed],
 		StartMinOfDay: int(vals[KeySleepStart]), Source: asleep.Source,
+	}
+	if n.Start, n.End, ok = window(day, n.StartMinOfDay, int(vals[KeySleepEnd]), loc); !ok {
+		return Night{}, false
 	}
 	var stages []*float64
 	for _, k := range stageKeys {
@@ -526,7 +536,10 @@ func countWithin(parts []session, ts []time.Time) (c int) {
 // night joins the parts and computes the HRV median over the samples inside
 // them. settled is false when any part may still change.
 func (d *Data) night(parts []session, samples []hrvSample) (n Night, settled bool) {
-	n = Night{StartMinOfDay: minuteOfDay(parts[0].start.In(d.loc)), Source: parts[0].source}
+	n = Night{
+		StartMinOfDay: minuteOfDay(parts[0].start.In(d.loc)), Source: parts[0].source,
+		Start: parts[0].start.In(d.loc).Truncate(time.Minute), End: parts[len(parts)-1].end.In(d.loc).Truncate(time.Minute),
+	}
 	settled, staged := true, true
 	var deep, light, rem float64
 	for _, p := range parts {
@@ -624,7 +637,9 @@ func (d *Data) putNight(ctx context.Context, day coach.LocalDate, n Night) {
 			return
 		}
 	}
-	for k, v := range map[string]float64{KeyAwake: n.AwakeMin, KeyInBed: n.InBedMin, KeySleepStart: float64(n.StartMinOfDay)} {
+	for k, v := range map[string]float64{
+		KeyAwake: n.AwakeMin, KeyInBed: n.InBedMin, KeySleepStart: float64(n.StartMinOfDay), KeySleepEnd: float64(minuteOfDay(n.End)),
+	} {
 		if !d.put(ctx, store.Metric{Date: day, Key: k, Value: v, Source: n.Source}) {
 			return
 		}
@@ -769,6 +784,28 @@ func runs(days []coach.LocalDate) [][2]coach.LocalDate {
 }
 
 func minuteOfDay(t time.Time) int { return t.Hour()*60 + t.Minute() }
+
+// window rebuilds a cached night's bounds: it ends on day at endMin, and
+// starts at startMin less than a day before (on day itself when startMin is
+// earlier than endMin). ok is false for minutes outside a day.
+func window(day coach.LocalDate, startMin, endMin int, loc *time.Location) (start, end time.Time, ok bool) {
+	if startMin < 0 || startMin >= 24*60 || endMin < 0 || endMin >= 24*60 {
+		return time.Time{}, time.Time{}, false
+	}
+	midnight, _, err := day.Bounds(loc)
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	at := func(base time.Time, min int) time.Time {
+		return time.Date(base.Year(), base.Month(), base.Day(), 0, min, 0, 0, loc)
+	}
+	end = at(midnight, endMin)
+	start = at(midnight, startMin)
+	if !start.Before(end) {
+		start = at(midnight.AddDate(0, 0, -1), startMin)
+	}
+	return start, end, true
+}
 
 func median(v []float64) float64 {
 	s := slices.Clone(v)

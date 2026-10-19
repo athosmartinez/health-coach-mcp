@@ -65,7 +65,9 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `RestingHR` (`{BPM, Method}`; `WITH_SLEEP` wins a duplicate, then the lower), plus `Skipped` unreadable records,
   `Excluded` counts by reason and `Empty` types (records only from another platform or without a value). `Series(key)`
   gives one `metrics.Point` per day; `BaselineSeries(key)` drops provisional nights and non-`WITH_SLEEP` resting HR.
-  `Excluded` counts only days fetched live in the call. `KeySleepStart` wraps at midnight (circular metrics only).
+  `Excluded` counts only days fetched live in the call. `Start`/`End` bound the night in local time to the minute
+  (a split night: first part's start, last part's end); a cached night rebuilds them from `KeySleepStart`/`KeySleepEnd`
+  (both wrap at midnight: circular metrics only) and is a miss without the end row.
   Cache: settled days (≤ today−3) only; a night is cached when settled, with a final HRV or no samples at all (none
   of its samples left out for another platform or a missing value), and
   written commit-row-last (`KeyAsleep` deleted first, written last; stage/HRV rows written or deleted); resting HR only

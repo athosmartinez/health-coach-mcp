@@ -27,8 +27,12 @@ type fakeHealth struct {
 	sessions  []healthdata.Exercise
 	recovery  healthdata.Recovery  // extra fields copied into every Recovery result
 	exercises healthdata.Exercises // extra fields copied into every Exercises result
-	errs      map[string]error
-	calls     []string
+	// byRange overrides exercises for one requested range ("from..to").
+	byRange         map[string]healthdata.Exercises
+	activitySkipped int
+	bodySkipped     int
+	errs            map[string]error
+	calls           []string
 }
 
 func (f *fakeHealth) call(name string, from, to coach.LocalDate, extra ...any) error {
@@ -59,14 +63,15 @@ func (f *fakeHealth) Activity(_ context.Context, from, to coach.LocalDate) (heal
 	if err := f.call("activity", from, to); err != nil {
 		return healthdata.Activity{}, err
 	}
-	return healthdata.Activity{From: from, To: to, Days: within(f.activity, from, to)}, nil
+	return healthdata.Activity{From: from, To: to, Days: within(f.activity, from, to), Skipped: f.activitySkipped}, nil
 }
 
 func (f *fakeHealth) Body(_ context.Context, from, to coach.LocalDate) (healthdata.Body, error) {
 	if err := f.call("body", from, to); err != nil {
 		return healthdata.Body{}, err
 	}
-	return healthdata.Body{From: from, To: to, Weight: within(f.weight, from, to), BodyFat: map[coach.LocalDate]healthdata.Reading{}}, nil
+	return healthdata.Body{From: from, To: to, Weight: within(f.weight, from, to), BodyFat: map[coach.LocalDate]healthdata.Reading{},
+		Skipped: f.bodySkipped}, nil
 }
 
 func (f *fakeHealth) Exercises(_ context.Context, from, to coach.LocalDate, maxHR bool) (healthdata.Exercises, error) {
@@ -74,6 +79,9 @@ func (f *fakeHealth) Exercises(_ context.Context, from, to coach.LocalDate, maxH
 		return healthdata.Exercises{}, err
 	}
 	e := f.exercises
+	if x, ok := f.byRange[string(from)+".."+string(to)]; ok {
+		e = x
+	}
 	e.From, e.To, e.Sessions = from, to, nil
 	for _, s := range f.sessions {
 		if s.Day >= from && s.Day <= to {

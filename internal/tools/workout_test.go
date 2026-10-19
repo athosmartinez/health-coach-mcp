@@ -1,12 +1,15 @@
 package tools
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
@@ -64,7 +67,7 @@ func TestWorkoutReviewOfADay(t *testing.T) {
 	if got := fmt.Sprint(keys(data)); got != "[date notice recovery_context sessions sessions_omitted week_context]" {
 		t.Errorf("keys %s", got)
 	}
-	if get(data, "notice") != dataNotice || get(data, "date") != "2026-10-14" {
+	if get(data, "notice") != vendorNotice || get(data, "date") != "2026-10-14" {
 		t.Errorf("notice %v, date %v", get(data, "notice"), get(data, "date"))
 	}
 	s := get(data, "sessions", "0")
@@ -106,8 +109,8 @@ func TestWorkoutReviewOfADay(t *testing.T) {
 	// and resting HR 62 against the 27 earlier nights (means 49.9 and 59.9).
 	rc := get(data, "recovery_context")
 	for p, want := range map[string]any{
-		"night_ending": "2026-10-15", "hrv_ms": 52.0, "hrv_delta_pct_vs_28d": 4.2,
-		"resting_hr_bpm": 62.0, "resting_hr_delta_bpm_vs_28d": 2.1,
+		"night_ending": "2026-10-15", "hrv_ms": 52.0, "hrv_delta_pct_vs_28d": 4.2, "hrv_baseline_n_days": 27.0,
+		"resting_hr_bpm": 62.0, "resting_hr_delta_bpm_vs_28d": 2.1, "resting_hr_baseline_n_days": 27.0,
 	} {
 		if got := path(rc, p); got != want {
 			t.Errorf("recovery %s = %v, want %v", p, got, want)
@@ -251,5 +254,113 @@ func TestWorkoutReviewFlagsAndErrors(t *testing.T) {
 		if te.Code != coach.CodeUpstreamUnavailable {
 			t.Errorf("%s error: %+v", method, te)
 		}
+	}
+}
+
+func TestWorkoutReviewExerciseIDLength(t *testing.T) {
+	if maxExerciseID != 256 {
+		t.Fatalf("maxExerciseID = %d, want 256", maxExerciseID)
+	}
+	c := coachSession(t, workoutWeek(t), nil)
+	// At the bound the handler runs (and finds nothing); past it the schema
+	// rejects the call before the handler.
+	if te := c.fails("workout_review", map[string]any{"exercise_id": strings.Repeat("x", 256)}); te.Code != coach.CodeNoData {
+		t.Errorf("256 characters: %+v", te)
+	}
+	res, err := c.cs.CallTool(t.Context(), callParams("workout_review", map[string]any{"exercise_id": strings.Repeat("x", 257)}))
+	if err == nil {
+		if !res.IsError {
+			t.Fatal("257 characters accepted")
+		}
+		var te coach.ToolError
+		if json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &te) == nil && te.Code == coach.CodeNoData {
+			t.Error("257 characters reached the handler")
+		}
+	}
+}
+
+func TestWorkoutReviewOfYesterday(t *testing.T) {
+	// Reviewed the next morning: the night after ends today.
+	data := coachSession(t, workoutWeek(t), nil).ok("workout_review", map[string]any{"date": "2026-10-15"})["data"]
+	rc := get(data, "recovery_context")
+	if get(rc, "night_ending") != string(coachToday) || get(rc, "hrv_ms") != 50.0 || get(rc, "resting_hr_bpm") != 60.0 {
+		t.Errorf("recovery context %v", rc)
+	}
+}
+
+func TestWorkoutReviewRecoveryQuality(t *testing.T) {
+	h := workoutWeek(t)
+	next := date("2026-10-15")
+	n := h.nights[next]
+	n.Provisional, n.HRV, n.HRVCoverage = true, nil, 0.3
+	h.nights[next] = n
+	h.resting[next] = healthdata.RestingHR{BPM: 66, Method: "OTHER"}
+	h.recovery.Skipped = 1
+	out := coachSession(t, h, nil).ok("workout_review", map[string]any{"date": "2026-10-14"})
+	for _, f := range []string{"provisional_sleep", "hrv_low_coverage", "non_standard_resting_hr", "unreadable_records"} {
+		if !hasFlag(out, f) {
+			t.Errorf("flags %v lack %s", out["quality_flags"], f)
+		}
+	}
+	rc := get(out["data"], "recovery_context")
+	if get(rc, "resting_hr_bpm") != 66.0 || get(rc, "resting_hr_delta_bpm_vs_28d") != nil || get(rc, "hrv_ms") != nil {
+		t.Errorf("recovery context %v", rc)
+	}
+
+	// Below 7 nights of baseline the deltas are left out; the counts stay.
+	short := history(t, 4)
+	short.sessions = workoutWeek(t).sessions
+	rc = get(coachSession(t, short, nil).ok("workout_review", map[string]any{"date": "2026-10-14"})["data"], "recovery_context")
+	if get(rc, "hrv_delta_pct_vs_28d") != nil || get(rc, "resting_hr_delta_bpm_vs_28d") != nil ||
+		get(rc, "hrv_baseline_n_days") != 3.0 || get(rc, "hrv_ms") != 52.0 {
+		t.Errorf("short baseline %v", rc)
+	}
+}
+
+func TestWorkoutReviewWeekSignals(t *testing.T) {
+	week := "2026-10-12..2026-10-16"
+	for _, tc := range []struct {
+		name string
+		ex   healthdata.Exercises
+		flag string
+	}{
+		{"unreadable in the week", healthdata.Exercises{Skipped: 1}, "unreadable_records"},
+		{"another platform in the week", healthdata.Exercises{OtherSource: 1}, "other_source_sessions_excluded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := workoutWeek(t)
+			h.byRange = map[string]healthdata.Exercises{week: tc.ex}
+			out := coachSession(t, h, nil).ok("workout_review", map[string]any{"date": "2026-10-14"})
+			if !hasFlag(out, tc.flag) {
+				t.Errorf("flags %v lack %s", out["quality_flags"], tc.flag)
+			}
+		})
+	}
+	// The reviewed day alone can carry them too.
+	h := workoutWeek(t)
+	h.byRange = map[string]healthdata.Exercises{"2026-10-14..2026-10-14": {OtherSource: 1}}
+	if out := coachSession(t, h, nil).ok("workout_review", map[string]any{"date": "2026-10-14"}); !hasFlag(out, "other_source_sessions_excluded") {
+		t.Errorf("flags %v", out["quality_flags"])
+	}
+}
+
+func TestWorkoutReviewLookupWithUnreadableRecords(t *testing.T) {
+	h := workoutWeek(t)
+	h.exercises.Skipped = 1
+	te := coachSession(t, h, nil).fails("workout_review", map[string]any{"exercise_id": "users/me/dataTypes/exercise/dataPoints/missing"})
+	if te.Code != coach.CodeNoData || !strings.Contains(te.Hint, "could not be read") {
+		t.Errorf("error %+v", te)
+	}
+}
+
+func TestWorkoutReviewSumsMinutesPerType(t *testing.T) {
+	h := workoutWeek(t)
+	h.sessions = []healthdata.Exercise{
+		session(t, "a", date("2026-10-12"), 7, "RUNNING", 25.4, nil),
+		session(t, "b", date("2026-10-13"), 7, "RUNNING", 20.3, nil),
+	}
+	wc := get(coachSession(t, h, nil).ok("workout_review", map[string]any{"date": "2026-10-13"})["data"], "week_context")
+	if get(wc, "active_min_by_type", "RUNNING") != 45.7 || get(wc, "sessions") != 2.0 {
+		t.Errorf("week %v", wc)
 	}
 }

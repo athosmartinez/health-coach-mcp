@@ -318,6 +318,31 @@ func TestCoachToolsNeedAHealthSource(t *testing.T) {
 	}
 }
 
+func TestCoachToolsGetTheConfiguredZoneAndClock(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := testDeps()
+	deps.Cfg.TimeZone, deps.Health = loc, noHealth{}
+	// 01:00 UTC on the 17th is still the 16th in São Paulo.
+	deps.Now = func() time.Time { return time.Date(2026, 10, 17, 1, 0, 0, 0, time.UTC) }
+	cs := connect(t, newServer(t, deps))
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "workout_review"})
+	if err != nil || res.IsError {
+		t.Fatalf("workout_review: %v %+v", err, res)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	if !strings.Contains(string(b), `"date":"2026-10-16"`) || !strings.Contains(string(b), `"week_start":"2026-10-12"`) {
+		t.Errorf("result %s", b)
+	}
+	// The night on the 17th is after today there.
+	res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "morning_briefing", Arguments: map[string]any{"date": "2026-10-17"}})
+	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "invalid_input") {
+		t.Errorf("briefing for the 17th: %v %+v", err, res)
+	}
+}
+
 func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
 	if err != nil {

@@ -31,10 +31,14 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   rule (omitted = today, after today = `invalid_input`), quality-flag and source sets, `Versus` (avg, delta, n_days
   of the days before). `briefing.go`: `morning_briefing` (no night on the date = `no_data`; baselines from
   `BaselineSeries` over the 28 days before, the day's own values from the night; readiness via
-  `metrics.AssessReadiness`; `n_days` = the smallest 28-day baseline; sessions by type only, never by name).
+  `metrics.AssessReadiness`; `n_days` = the smallest 28-day baseline; sessions by type only, never by name; a
+  non-standard resting HR is shown without a delta and not judged; a provisional night adds `provisional:sleep` and low
+  confidence; `notice` = `readinessNotice` (referral) + `vendorNotice`). `signalsOf` reads a night's HRV and resting HR
+  with their flags for both tools.
   `workout.go`: `workout_review` (date or `exercise_id`, not both; an ID is looked up in the last 28 days; max HR only
   for the reviewed day; ISO week up to today against the target in force on the day; the night ending the next
-  morning; at most 20 sessions with `sessions_omitted`; names travel with `notice: dataNotice`). Both registered by
+  morning, its deltas null below 7 baseline nights, with the baseline sizes; at most 20 sessions with
+  `sessions_omitted`; names travel with `notice: vendorNotice`). Both registered by
   `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned

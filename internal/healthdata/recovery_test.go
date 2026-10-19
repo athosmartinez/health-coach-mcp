@@ -1501,3 +1501,69 @@ func TestCoveredSlotsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowRebuildsWallClockTimes(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lisbon, err := time.LoadLocation("Europe/Lisbon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wall := func(loc *time.Location, s string) time.Time {
+		v, err := time.ParseInLocation("2006-01-02 15:04", s, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for _, tc := range []struct {
+		name             string
+		loc              *time.Location
+		day              string
+		startMin, endMin int
+		start, end       string
+		ok               bool
+	}{
+		// The clocks change during these nights: the bounds keep their wall-clock times.
+		{"fall back", ny, "2026-11-01", 23 * 60, 7 * 60, "2026-10-31 23:00", "2026-11-01 07:00", true},
+		{"spring forward", ny, "2026-03-08", 23 * 60, 7 * 60, "2026-03-07 23:00", "2026-03-08 07:00", true},
+		{"lisbon spring forward", lisbon, "2026-03-29", 22*60 + 30, 6*60 + 45, "2026-03-28 22:30", "2026-03-29 06:45", true},
+		{"after midnight", sp, "2026-10-11", 30, 8 * 60, "2026-10-11 00:30", "2026-10-11 08:00", true},
+		// Equal minutes are a whole day, never an empty night.
+		{"start equals end", sp, "2026-10-11", 7 * 60, 7 * 60, "2026-10-10 07:00", "2026-10-11 07:00", true},
+		{"start past a day", sp, "2026-10-11", 24 * 60, 7 * 60, "", "", false},
+		{"negative start", sp, "2026-10-11", -1, 7 * 60, "", "", false},
+		{"negative end", sp, "2026-10-11", 0, -1, "", "", false},
+		{"end past a day", sp, "2026-10-11", 0, 24 * 60, "", "", false},
+		{"bad day", sp, "2026-02-30", 0, 60, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start, end, ok := window(day(tc.day), tc.startMin, tc.endMin, tc.loc)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v", ok)
+			}
+			if !ok {
+				return
+			}
+			if !start.Equal(wall(tc.loc, tc.start)) || !end.Equal(wall(tc.loc, tc.end)) {
+				t.Errorf("window %v – %v, want %s – %s", start, end, tc.start, tc.end)
+			}
+		})
+	}
+}
+
+func TestSleepEndSeriesIsTheMinuteOfDay(t *testing.T) {
+	api := &fakeAPI{}
+	api.add(googlehealth.Sleep, sleepRec(at("2026-10-09", 23, 0), at("2026-10-10", 7, 5), sleepOpt{deep: 60}))
+	d, _ := newData(t, api)
+	r, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := r.BaselineSeries(KeySleepEnd)
+	if err != nil || render(s) != "2026-10-10=425 " {
+		t.Errorf("series %s, %v", render(s), err)
+	}
+}

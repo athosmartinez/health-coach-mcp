@@ -343,7 +343,8 @@ in `Targets.InForce`). Output in `coach.Envelope`.
 
 **Verification.** In-memory transport with a fake `Source`: `morning_briefing` returns **exactly** the fields
 `sleep{asleep_min, awake_min, efficiency_pct, stages_min, start, end, vs_7d, vs_28d}`, `hrv{median_ms, delta_pct_vs_28d, z_score_vs_28d}`,
-`resting_hr{bpm, delta_bpm_vs_28d}`, `yesterday_load`, `readiness{level, reasons, confidence}`, `body{weight_kg, date}`;
+`resting_hr{bpm, delta_bpm_vs_28d}`, `yesterday_load`, `readiness{level, reasons, confidence}`, `body{weight_kg, date}`,
+`notice` (readiness referral + vendor-text notice, added in review);
 green/yellow/red/unknown cases; `confidence: low` with 5 nights; day with no sleep → `no_data`; `auth_expired` propagated
 as `IsError`. `workout_review`: zones, week context vs target, `low_hr_for_activity` flag.
 
@@ -357,6 +358,9 @@ as `IsError`. `workout_review`: zones, week context vs target, `low_hr_for_activ
 - `vs_7d`/`vs_28d` compare asleep, awake, efficiency and stages; start and end wrap at midnight and are not averaged.
 - `workout_review`: "that night" is the night ending the morning after the day (`recovery_context.night_ending`),
   null while it has not come. A date after today is `invalid_input`.
+- Review: a resting HR from a non-standard method is shown but neither compared nor judged (`missing:resting_hr`);
+  a provisional night keeps its level with reason `provisional:sleep` and low confidence; HRV z-scores stay on raw
+  rMSSD (a log scale would change Q1's thresholds: revisit with the real week of Step 11).
 
 ---
 

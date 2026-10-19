@@ -787,7 +787,8 @@ func minuteOfDay(t time.Time) int { return t.Hour()*60 + t.Minute() }
 
 // window rebuilds a cached night's bounds: it ends on day at endMin, and
 // starts at startMin less than a day before (on day itself when startMin is
-// earlier than endMin). ok is false for minutes outside a day.
+// earlier than endMin). ok is false for minutes outside a day. In the hour a
+// fall-back clock change repeats, the earlier of the two instants is taken.
 func window(day coach.LocalDate, startMin, endMin int, loc *time.Location) (start, end time.Time, ok bool) {
 	if startMin < 0 || startMin >= 24*60 || endMin < 0 || endMin >= 24*60 {
 		return time.Time{}, time.Time{}, false

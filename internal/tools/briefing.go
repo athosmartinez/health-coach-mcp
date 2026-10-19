@@ -2,11 +2,13 @@ package tools
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
+	"github.com/athosmartinez/health-coach-mcp/internal/googlehealth"
 	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 	"github.com/athosmartinez/health-coach-mcp/internal/metrics"
 )
@@ -27,9 +29,12 @@ func RegisterBriefing(s *mcp.Server, d CoachDeps) {
 			"and awake, efficiency, stages, bedtime and wake time, each against the 7- and 28-day averages), overnight " +
 			"HRV and resting heart rate against the 28-day baseline, yesterday's training load (sessions, Active Zone " +
 			"Minutes, steps), the last weight, and a readiness level (green, yellow or red) with reason codes. Readiness " +
-			"compares the user with their own recent baseline; it is a training cue, not a medical assessment, and " +
-			"reasons such as missing:hrv mean that signal was left out. Values are null when not recorded. Check " +
-			"coverage.confidence before drawing conclusions and mention quality_flags.",
+			"compares the user with their own recent baseline; it is a training cue, not a medical assessment. Reasons " +
+			"such as missing:hrv mean that signal was left out, so a green with missing reasons rests only on the " +
+			"signals left: say so. provisional:sleep means Google is still processing the night and the level may " +
+			"change. unknown means no signal was usable: do not infer a level. readiness.confidence qualifies the " +
+			"level; coverage qualifies the averages. Values are null when not recorded. Mention quality_flags and " +
+			"follow the notice.",
 		Annotations: readOnly,
 	}, briefing{d}.handle)
 }
@@ -46,6 +51,7 @@ type Briefing struct {
 	YesterdayLoad DayLoad           `json:"yesterday_load"`
 	Readiness     metrics.Readiness `json:"readiness"`
 	Body          LastWeight        `json:"body"`
+	Notice        string            `json:"notice"`
 }
 
 // BriefingSleep is the night, in minutes, against the averages before it.
@@ -134,10 +140,7 @@ func (b briefing) handle(ctx context.Context, _ *mcp.CallToolRequest, in briefin
 	}
 	n, ok := rec.Nights[day]
 	if !ok {
-		return zero, coach.ToolError{
-			Code: coach.CodeNoData, Message: "no main sleep recorded for the night ending on that date",
-			Hint: "the band may not have synced yet: open the Fitbit app, then call again",
-		}
+		return zero, noNight(rec)
 	}
 	yesterday, err := day.AddDays(-1)
 	if err != nil {
@@ -163,48 +166,38 @@ func (b briefing) handle(ctx context.Context, _ *mcp.CallToolRequest, in briefin
 	var flags flagSet
 	sources := sourceSet{}
 	sources.add(rec.Sources...)
-	out := Briefing{}
+	out := Briefing{Notice: readinessNotice + " " + vendorNotice}
 	if out.Sleep, err = sleepOf(rec, n, day); err != nil {
 		return zero, err
 	}
-	flags.add(flagProvisionalSleep, n.Provisional)
-	flags.add(flagHRVLowCoverage, n.HRV == nil && n.HRVCoverage > 0)
-
-	hrvBase, err := baselineOf(rec, healthdata.KeyHRV, day)
+	sig, err := signalsOf(rec, day, &flags)
 	if err != nil {
 		return zero, err
 	}
-	z := metrics.ZScore(n.HRV, hrvBase)
-	out.HRV = BriefingHRV{MedianMS: round(n.HRV), DeltaPctVs28d: round(metrics.DeltaPct(n.HRV, hrvBase)), ZScoreVs28d: roundTo(z, 2)}
-
-	rhrBase, err := baselineOf(rec, healthdata.KeyRestingHR, day)
-	if err != nil {
-		return zero, err
-	}
-	var rhr *float64
-	if v, ok := rec.RestingHR[day]; ok {
-		rhr = &v.BPM
-		flags.add(flagNonStandardRHR, !v.Standard())
-	}
-	rhrDelta := metrics.Delta(rhr, rhrBase)
-	out.RestingHR = BriefingRestingHR{BPM: round(rhr), DeltaBPMVs28d: round(rhrDelta)}
+	out.HRV = BriefingHRV{MedianMS: round(sig.hrv), DeltaPctVs28d: round(sig.hrvDeltaPct), ZScoreVs28d: roundTo(sig.hrvZ, 2)}
+	out.RestingHR = BriefingRestingHR{BPM: round(sig.rhr), DeltaBPMVs28d: round(sig.rhrDelta)}
 
 	asleep := n.AsleepMin
 	out.Readiness = metrics.AssessReadiness(metrics.DefaultThresholds(),
-		metrics.Signal{Value: z, Nights: hrvBase.N}, metrics.Signal{Value: rhrDelta, Nights: rhrBase.N}, &asleep)
+		metrics.Signal{Value: sig.hrvZ, Nights: sig.hrvN}, metrics.Signal{Value: sig.rhrDelta, Nights: sig.rhrN}, &asleep)
+	if n.Provisional {
+		// Minutes asleep and HRV may still change after the next sync.
+		out.Readiness.Reasons = append(out.Readiness.Reasons, reasonProvisionalSleep)
+		out.Readiness.Confidence = coach.ConfidenceLow
+	}
 
 	sleepBase, err := baselineOf(rec, healthdata.KeyAsleep, day)
 	if err != nil {
 		return zero, err
 	}
-	nDays := min(sleepBase.N, hrvBase.N, rhrBase.N)
+	nDays := min(sleepBase.N, sig.hrvN, sig.rhrN)
 
 	out.YesterdayLoad = loadOf(act, ex, yesterday, &flags, sources)
 	if d, r, ok := healthdata.Last(body.Weight); ok {
 		out.Body = LastWeight{WeightKg: round(&r.Value), Date: &d}
 		sources.add(r.Source)
 	}
-	flags.add(flagUnreadableRecords, rec.Skipped+act.Skipped+ex.Skipped+body.Skipped > 0)
+	flags.add(flagUnreadableRecords, act.Skipped+ex.Skipped+body.Skipped > 0)
 	// Exercise flags last, after the day-level ones.
 	for _, s := range out.YesterdayLoad.Exercises {
 		for _, f := range s.QualityFlags {
@@ -214,19 +207,27 @@ func (b briefing) handle(ctx context.Context, _ *mcp.CallToolRequest, in briefin
 	return coach.NewEnvelope(out, nDays, sources.list(), flags, b.Now()), nil
 }
 
-func baselineOf(rec healthdata.Recovery, key string, day coach.LocalDate) (metrics.Stats, error) {
-	series, err := rec.BaselineSeries(key)
-	if err != nil {
-		return metrics.Stats{}, err
+// noNight explains a missing night by its likely cause.
+func noNight(rec healthdata.Recovery) coach.ToolError {
+	te := coach.ToolError{
+		Code: coach.CodeNoData, Message: "no main sleep recorded for the night ending on that date",
+		Hint: "the band may not have synced yet: open the Fitbit app, then call again",
 	}
-	return metrics.Baseline(series, day, baselineDays)
+	switch {
+	case rec.Skipped > 0:
+		te.Hint = "some sleep or heart records could not be read; call again later, and report it if it persists"
+	case slices.Contains(rec.Empty, googlehealth.Sleep):
+		te.Hint = "sleep arrived only from another platform (such as Apple Health); the coach reads the band's sleep: " +
+			"check that the band was worn and has synced"
+	}
+	return te
 }
 
 func sleepOf(rec healthdata.Recovery, n healthdata.Night, day coach.LocalDate) (BriefingSleep, error) {
 	s := BriefingSleep{
-		AsleepMin: *round(&n.AsleepMin), AwakeMin: *round(&n.AwakeMin),
+		AsleepMin: round1(n.AsleepMin), AwakeMin: round1(n.AwakeMin),
 		EfficiencyPct: round(efficiency(n.AsleepMin, n.InBedMin)),
-		StagesMin:     StagesMin{Deep: round(n.DeepMin), Light: round(n.LightMin), REM: round(n.REMMin), Awake: *round(&n.AwakeMin)},
+		StagesMin:     StagesMin{Deep: round(n.DeepMin), Light: round(n.LightMin), REM: round(n.REMMin), Awake: round1(n.AwakeMin)},
 		Start:         n.Start, End: n.End,
 	}
 	fields := []struct {
@@ -305,13 +306,16 @@ func loadOf(act healthdata.Activity, ex healthdata.Exercises, day coach.LocalDat
 	if ok {
 		l.AZMMin, l.Steps = round(a.AZM), round(a.Steps)
 	}
-	flags.add(flagNotWorn, !ok || !a.Worn)
+	// A day missing because its row was unreadable is not a day off the
+	// wrist: unreadable_records covers it.
+	flags.add(flagNotWorn, (ok && !a.Worn) || (!ok && act.Skipped == 0))
+	flags.add(flagOtherSourceSessions, ex.OtherSource > 0)
 	for i, s := range ex.Sessions {
 		if i == maxSessions {
 			flags.add(flagSessionsTruncated, true)
 			break
 		}
-		ls := LoadSession{Type: s.Type, Minutes: *round(&s.ActiveMin), QualityFlags: append([]string{}, s.Flags...)}
+		ls := LoadSession{Type: s.Type, Minutes: round1(s.ActiveMin), QualityFlags: append([]string{}, s.Flags...)}
 		if s.HR != nil {
 			ls.AvgHRBPM = round(&s.HR.AvgBPM)
 		}

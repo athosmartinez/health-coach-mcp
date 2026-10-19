@@ -2,12 +2,14 @@ package tools
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
+	"github.com/athosmartinez/health-coach-mcp/internal/googlehealth"
 	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 )
 
@@ -71,7 +73,7 @@ func TestBriefingReturnsExactlyTheContractFields(t *testing.T) {
 	}
 	data := out["data"]
 	for p, want := range map[string]string{
-		"":                        "[body hrv readiness resting_hr sleep yesterday_load]",
+		"":                        "[body hrv notice readiness resting_hr sleep yesterday_load]",
 		"sleep":                   "[asleep_min awake_min efficiency_pct end stages_min start vs_28d vs_7d]",
 		"sleep.stages_min":        "[awake deep light rem]",
 		"sleep.vs_7d":             "[asleep_min awake_min deep_min efficiency_pct light_min rem_min]",
@@ -102,6 +104,9 @@ func TestBriefingReturnsExactlyTheContractFields(t *testing.T) {
 		if got := path(data, p); got != want {
 			t.Errorf("%s = %v, want %v", p, got, want)
 		}
+	}
+	if notice, _ := get(data, "notice").(string); !strings.Contains(notice, readinessNotice) || !strings.Contains(notice, vendorNotice) {
+		t.Errorf("notice %q", notice)
 	}
 	if get(out, "coverage", "n_days") != 28.0 || get(out, "coverage", "confidence") != "high" {
 		t.Errorf("coverage %v", out["coverage"])
@@ -227,7 +232,7 @@ func TestBriefingQualityFlags(t *testing.T) {
 		ActiveMin: 60, HR: &healthdata.ExerciseHR{AvgBPM: 81}, Flags: []string{"low_hr_for_activity"}, Source: "Synthetic Band",
 	}}
 	out := coachSession(t, h, nil).ok("morning_briefing", nil)
-	want := "[provisional_sleep hrv_low_coverage non_standard_resting_hr band_not_worn unreadable_records low_hr_for_activity]"
+	want := "[provisional_sleep hrv_low_coverage non_standard_resting_hr unreadable_records band_not_worn low_hr_for_activity]"
 	if got := fmt.Sprint(out["quality_flags"]); got != want {
 		t.Errorf("flags %s\nwant  %s", got, want)
 	}
@@ -236,8 +241,16 @@ func TestBriefingQualityFlags(t *testing.T) {
 	if fmt.Sprint(keys(ex)) != "[avg_hr_bpm minutes quality_flags type]" || get(ex, "type") != "JIU_JITSU" || get(ex, "avg_hr_bpm") != 81.0 {
 		t.Errorf("exercise %v", ex)
 	}
-	if get(out["data"], "resting_hr", "bpm") != 61.0 {
+	// A resting HR from another method is shown, but neither compared with
+	// the standard-method baseline nor judged.
+	if get(out["data"], "resting_hr", "bpm") != 61.0 || get(out["data"], "resting_hr", "delta_bpm_vs_28d") != nil {
 		t.Errorf("resting hr %v", get(out["data"], "resting_hr"))
+	}
+	// A provisional night may change after sync: readiness says so and
+	// drops to low confidence.
+	r := get(out["data"], "readiness")
+	if fmt.Sprint(get(r, "reasons")) != "[missing:hrv missing:resting_hr provisional:sleep]" || get(r, "confidence") != "low" {
+		t.Errorf("readiness %v", r)
 	}
 }
 
@@ -272,4 +285,161 @@ func TestBriefingErrors(t *testing.T) {
 			t.Errorf("sleep %v, load %v", get(data, "sleep", "end"), get(data, "yesterday_load", "date"))
 		}
 	})
+}
+
+func TestBriefingComparesEachWindow(t *testing.T) {
+	h := history(t, 28)
+	// The last 7 nights differ from the 21 before them, so each window and
+	// each field gives its own average.
+	for i := 1; i <= 28; i++ {
+		d := addDays(t, coachToday, -i)
+		hrv := h.nights[d].HRV
+		if i <= 7 {
+			h.nights[d] = night(t, d, 420, 480, hrv)
+		} else {
+			h.nights[d] = night(t, d, 480, 500, hrv)
+		}
+	}
+	vs := get(coachSession(t, h, nil).ok("morning_briefing", nil)["data"], "sleep")
+	// Tonight: asleep 480 of 520, awake 40, efficiency 92.3, deep and REM 96, light 288.
+	for p, want := range map[string]float64{
+		"vs_7d.asleep_min.avg": 420, "vs_7d.asleep_min.delta": 60,
+		"vs_7d.awake_min.avg": 60, "vs_7d.awake_min.delta": -20,
+		"vs_7d.efficiency_pct.avg": 87.5, "vs_7d.efficiency_pct.delta": 4.8,
+		"vs_7d.deep_min.avg": 84, "vs_7d.deep_min.delta": 12,
+		"vs_7d.light_min.avg": 252, "vs_7d.light_min.delta": 36,
+		"vs_7d.rem_min.avg": 84, "vs_7d.rem_min.delta": 12, "vs_7d.rem_min.n_days": 7,
+		"vs_28d.asleep_min.avg": 465, "vs_28d.asleep_min.delta": 15,
+		"vs_28d.awake_min.avg": 30, "vs_28d.awake_min.delta": 10,
+		"vs_28d.efficiency_pct.avg": 93.9, "vs_28d.efficiency_pct.delta": -1.6,
+		"vs_28d.deep_min.avg": 93, "vs_28d.deep_min.delta": 3,
+		"vs_28d.light_min.avg": 279, "vs_28d.light_min.delta": 9,
+		"vs_28d.rem_min.avg": 93, "vs_28d.rem_min.delta": 3, "vs_28d.rem_min.n_days": 28,
+	} {
+		if got := path(vs, p); got != want {
+			t.Errorf("%s = %v, want %v", p, got, want)
+		}
+	}
+}
+
+func TestBriefingSignalsUseTheirOwnBaselines(t *testing.T) {
+	h := history(t, 28)
+	// HRV on 10 nights, resting HR on 5: coverage is the smallest baseline,
+	// and readiness judges HRV but not resting HR.
+	for i := 11; i <= 28; i++ {
+		d := addDays(t, coachToday, -i)
+		n := h.nights[d]
+		n.HRV, n.HRVCoverage = nil, 0
+		h.nights[d] = n
+	}
+	for i := 6; i <= 28; i++ {
+		delete(h.resting, addDays(t, coachToday, -i))
+	}
+	n := h.nights[coachToday]
+	n.HRV = f64(47)
+	h.nights[coachToday] = n
+	out := coachSession(t, h, nil).ok("morning_briefing", nil)
+	data := out["data"]
+	if get(out, "coverage", "n_days") != 5.0 {
+		t.Errorf("coverage %v", out["coverage"])
+	}
+	if got := fmt.Sprint(get(data, "readiness", "reasons")); got != "[hrv_below_baseline missing:resting_hr]" {
+		t.Errorf("reasons %s", got)
+	}
+	// 10 nights alternating 48/52: mean 50, sd 2.11; 47 is z −1.42, −6%.
+	if get(data, "hrv", "z_score_vs_28d") != -1.42 || get(data, "hrv", "delta_pct_vs_28d") != -6.0 {
+		t.Errorf("hrv %v", get(data, "hrv"))
+	}
+}
+
+func TestBriefingNoNightHints(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tweak func(h *fakeHealth)
+		hint  string
+	}{
+		{"not synced", func(*fakeHealth) {}, "synced"},
+		{"unreadable", func(h *fakeHealth) { h.recovery.Skipped = 1 }, "could not be read"},
+		{"another platform", func(h *fakeHealth) { h.recovery.Empty = []googlehealth.DataType{googlehealth.Sleep} }, "another platform"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := history(t, 3)
+			delete(h.nights, coachToday)
+			tc.tweak(h)
+			te := coachSession(t, h, nil).fails("morning_briefing", nil)
+			if te.Code != coach.CodeNoData || !strings.Contains(te.Hint, tc.hint) {
+				t.Errorf("error %+v, want a hint about %q", te, tc.hint)
+			}
+		})
+	}
+}
+
+func TestBriefingLoadFlags(t *testing.T) {
+	yesterday := addDays(t, coachToday, -1)
+	for _, tc := range []struct {
+		name  string
+		tweak func(h *fakeHealth)
+		flags string
+	}{
+		// The day's row was dropped as unreadable: not evidence the band was off.
+		{"unreadable activity", func(h *fakeHealth) { h.activitySkipped = 1 }, "[unreadable_records]"},
+		{"unreadable sessions", func(h *fakeHealth) { h.exercises.Skipped = 1 }, "[unreadable_records]"},
+		{"unreadable weight", func(h *fakeHealth) { h.bodySkipped = 1 }, "[unreadable_records]"},
+		{"recorded but not worn", func(h *fakeHealth) { h.activity[yesterday] = healthdata.ActivityDay{TotalKcal: f64(1700)} }, "[band_not_worn]"},
+		{"sessions from another platform", func(h *fakeHealth) { h.exercises.OtherSource = 2 }, "[other_source_sessions_excluded]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := history(t, 28)
+			h.activity[yesterday] = healthdata.ActivityDay{Steps: f64(8000), Worn: true}
+			if tc.name == "unreadable activity" {
+				delete(h.activity, yesterday)
+			}
+			tc.tweak(h)
+			out := coachSession(t, h, nil).ok("morning_briefing", nil)
+			if got := fmt.Sprint(out["quality_flags"]); got != tc.flags {
+				t.Errorf("flags %s, want %s", got, tc.flags)
+			}
+		})
+	}
+}
+
+func TestBriefingSessionsAndSources(t *testing.T) {
+	h := history(t, 28)
+	yesterday := addDays(t, coachToday, -1)
+	h.activity[yesterday] = healthdata.ActivityDay{Steps: f64(8000), Worn: true}
+	h.recovery.Sources = []string{"Band B"}
+	h.weight[yesterday] = healthdata.Reading{Value: 80, Source: "Scale"}
+	for i := range maxSessions + 3 {
+		s := session(t, fmt.Sprint(i), yesterday, 0, "WALKING", 10, nil, "no_hr_data")
+		s.Source = "Band A"
+		h.sessions = append(h.sessions, s)
+	}
+	out := coachSession(t, h, nil).ok("morning_briefing", nil)
+	if n := len(get(out["data"], "yesterday_load", "exercises").([]any)); n != maxSessions {
+		t.Errorf("listed %d sessions", n)
+	}
+	// Each flag once, however many sessions carry it.
+	if got := fmt.Sprint(out["quality_flags"]); got != "[sessions_truncated no_hr_data]" {
+		t.Errorf("flags %s", got)
+	}
+	if got := fmt.Sprint(out["sources"]); got != "[Band A Band B Scale]" {
+		t.Errorf("sources %s", got)
+	}
+}
+
+func TestRounding(t *testing.T) {
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if roundTo(&v, 1) != nil {
+			t.Errorf("roundTo(%v) is not nil", v)
+		}
+		if got := round1(v); !math.IsNaN(got) && !math.IsInf(got, 0) {
+			t.Errorf("round1(%v) = %v, want it unchanged", v, got)
+		}
+	}
+	if roundTo(nil, 1) != nil || *roundTo(f64(1.25), 1) != 1.3 || *roundTo(f64(-1.474), 2) != -1.47 || round1(2.04) != 2 {
+		t.Error("rounding")
+	}
+	if efficiency(400, 0) != nil || *efficiency(450, 500) != 90 {
+		t.Error("efficiency")
+	}
 }

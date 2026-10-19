@@ -420,6 +420,7 @@ func TestTypeTable(t *testing.T) {
 		page, cap int
 	}{
 		Sleep:                     {civilEnd, L | R, 25, 0},
+		HeartRate:                 {physical, L | R, 10000, 0},
 		HeartRateVariability:      {physical, L | R, 10000, 0},
 		DailyHeartRateVariability: {date, L | R, 10000, 0},
 		DailyRestingHeartRate:     {date, L | R, 10000, 0},
@@ -524,5 +525,59 @@ func TestRejectedRequestIsLogged(t *testing.T) {
 	}
 	if strings.Contains(out, "near") {
 		t.Errorf("log quotes the body: %q", out)
+	}
+}
+
+func TestListBetween(t *testing.T) {
+	api := newFakeAPI(t, func(w http.ResponseWriter, n int, _ request) {
+		if n == 1 { // n counts requests from 1
+			reply(w, 200, map[string]any{"dataPoints": []any{map[string]any{"a": 1}}, "nextPageToken": "p2"})
+			return
+		}
+		reply(w, 200, map[string]any{"dataPoints": []any{map[string]any{"a": 2}}})
+	})
+	c, _ := newTestClient(t, api, &fakeTokens{})
+	start := time.Date(2026, 10, 10, 19, 0, 0, 0, saoPaulo)
+	got, err := c.ListBetween(context.Background(), HeartRate, start, start.Add(97*time.Minute))
+	if err != nil || len(got) != 2 {
+		t.Fatalf("ListBetween = %v, %v", got, err)
+	}
+	r := api.requests()[0]
+	want := `heart_rate.sample_time.physical_time >= "2026-10-10T22:00:00Z" AND heart_rate.sample_time.physical_time < "2026-10-10T23:37:00Z"`
+	if r.method != http.MethodGet || r.path != "/users/me/dataTypes/heart-rate/dataPoints" || r.query["filter"] != want || r.query["pageSize"] != "10000" {
+		t.Errorf("request = %+v", r)
+	}
+	if api.requests()[1].query["pageToken"] != "p2" {
+		t.Error("the second page was not requested with the token")
+	}
+	for name, call := range map[string]func() error{
+		"a civil-time type": func() error {
+			_, err := c.ListBetween(context.Background(), Steps, start, start.Add(time.Hour))
+			return err
+		},
+		"a daily type": func() error {
+			_, err := c.ListBetween(context.Background(), DailyRestingHeartRate, start, start.Add(time.Hour))
+			return err
+		},
+		"an empty window": func() error { _, err := c.ListBetween(context.Background(), HeartRate, start, start); return err },
+		"over a day": func() error {
+			_, err := c.ListBetween(context.Background(), HeartRate, start, start.Add(25*time.Hour))
+			return err
+		},
+		"an unknown type": func() error {
+			_, err := c.ListBetween(context.Background(), "bogus", start, start.Add(time.Hour))
+			return err
+		},
+	} {
+		if call() == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if len(api.requests()) != 2 {
+		t.Error("a rejected window reached the API")
+	}
+	// Exactly a day is allowed.
+	if _, err := c.ListBetween(context.Background(), HeartRate, start, start.Add(24*time.Hour)); err != nil {
+		t.Errorf("a full day: %v", err)
 	}
 }

@@ -165,6 +165,21 @@ func (c *Client) Reconcile(ctx context.Context, dt DataType, from, to coach.Loca
 	return c.listLike(ctx, dt, opReconcile, "/dataPoints:reconcile", from, to)
 }
 
+// ListBetween returns the data points of a physical-time type (heart rate,
+// HRV, weight) sampled in [start, end), at most a day: for a workout's
+// window, without listing the whole day.
+func (c *Client) ListBetween(ctx context.Context, dt DataType, start, end time.Time) ([]json.RawMessage, error) {
+	info, err := lookup(dt, opList)
+	if err != nil {
+		return nil, err
+	}
+	f, err := windowFilter(dt, info, start, end)
+	if err != nil {
+		return nil, err
+	}
+	return c.page(ctx, dt, info, "/dataPoints", f)
+}
+
 func (c *Client) listLike(ctx context.Context, dt DataType, op operation, suffix string, from, to coach.LocalDate) ([]json.RawMessage, error) {
 	info, err := lookup(dt, op)
 	if err != nil {
@@ -174,6 +189,10 @@ func (c *Client) listLike(ctx context.Context, dt DataType, op operation, suffix
 	if err != nil {
 		return nil, err
 	}
+	return c.page(ctx, dt, info, suffix, f)
+}
+
+func (c *Client) page(ctx context.Context, dt DataType, info typeInfo, suffix, f string) ([]json.RawMessage, error) {
 	path := "/users/me/dataTypes/" + string(dt) + suffix
 	return c.collect(dt, "dataPoints", func(token string) ([]byte, error) {
 		q := url.Values{"filter": {f}, "pageSize": {strconv.Itoa(info.pageSize)}}

@@ -149,9 +149,66 @@ func mustJSON(v any) json.RawMessage {
 type fakeAPI struct {
 	mu      sync.Mutex
 	records map[googlehealth.DataType][]json.RawMessage
+	rollups map[googlehealth.DataType][]json.RawMessage
 	calls   []string
 	err     error
 	loose   bool // return every record, ignoring the range, like a sloppy filter
+}
+
+// addRollup stores daily rollup rows, filtered by their civil start date.
+func (f *fakeAPI) addRollup(dt googlehealth.DataType, rows ...json.RawMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.rollups == nil {
+		f.rollups = map[googlehealth.DataType][]json.RawMessage{}
+	}
+	f.rollups[dt] = append(f.rollups[dt], rows...)
+}
+
+func (f *fakeAPI) DailyRollup(_ context.Context, dt googlehealth.DataType, from, to coach.LocalDate) ([]json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("rollup %s %s..%s", dt, from, to))
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []json.RawMessage
+	for _, raw := range f.rollups[dt] {
+		var r struct {
+			Start civilDate `json:"civilStartTime"`
+		}
+		day := coach.LocalDate("")
+		if json.Unmarshal(raw, &r) == nil {
+			day, _ = r.Start.day()
+		}
+		if f.loose || day == "" || (day >= from && day <= to) {
+			out = append(out, raw)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeAPI) ListBetween(_ context.Context, dt googlehealth.DataType, start, end time.Time) ([]json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("between %s %s..%s", dt, start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339)))
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []json.RawMessage
+	for _, raw := range f.records[dt] {
+		var r struct {
+			HeartRate *struct {
+				SampleTime struct{ PhysicalTime time.Time } `json:"sampleTime"`
+			} `json:"heartRate"`
+		}
+		if json.Unmarshal(raw, &r) == nil && r.HeartRate != nil {
+			if t := r.HeartRate.SampleTime.PhysicalTime; !t.Before(start) && t.Before(end) {
+				out = append(out, raw)
+			}
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeAPI) add(dt googlehealth.DataType, recs ...json.RawMessage) {
@@ -191,6 +248,20 @@ func recordDay(dt googlehealth.DataType, raw json.RawMessage) coach.LocalDate {
 		RHR *struct {
 			Date struct{ Year, Month, Day int } `json:"date"`
 		} `json:"dailyRestingHeartRate"`
+		Exercise *struct {
+			Interval struct{ StartTime time.Time } `json:"interval"`
+		} `json:"exercise"`
+		Food *struct {
+			Interval struct{ StartTime time.Time } `json:"interval"`
+		} `json:"nutritionLog"`
+		Weight *struct {
+			SampleTime struct{ PhysicalTime time.Time } `json:"sampleTime"`
+		} `json:"weight"`
+		Steps *struct {
+			Interval struct {
+				Start civilDate `json:"civilStartTime"`
+			} `json:"interval"`
+		} `json:"steps"`
 	}
 	if json.Unmarshal(raw, &r) != nil {
 		return ""
@@ -202,6 +273,15 @@ func recordDay(dt googlehealth.DataType, raw json.RawMessage) coach.LocalDate {
 		return coach.DateOf(r.HRV.SampleTime.PhysicalTime, sp)
 	case dt == googlehealth.DailyRestingHeartRate && r.RHR != nil:
 		return coach.LocalDate(fmt.Sprintf("%04d-%02d-%02d", r.RHR.Date.Year, r.RHR.Date.Month, r.RHR.Date.Day))
+	case dt == googlehealth.Exercise && r.Exercise != nil && !r.Exercise.Interval.StartTime.IsZero():
+		return coach.DateOf(r.Exercise.Interval.StartTime, sp)
+	case dt == googlehealth.NutritionLog && r.Food != nil && !r.Food.Interval.StartTime.IsZero():
+		return coach.DateOf(r.Food.Interval.StartTime, sp)
+	case dt == googlehealth.Weight && r.Weight != nil && !r.Weight.SampleTime.PhysicalTime.IsZero():
+		return coach.DateOf(r.Weight.SampleTime.PhysicalTime, sp)
+	case dt == googlehealth.Steps && r.Steps != nil:
+		d, _ := r.Steps.Interval.Start.day()
+		return d
 	}
 	return ""
 }
@@ -1000,7 +1080,7 @@ func TestRangeAndErrors(t *testing.T) {
 	for name, rng := range map[string][2]string{
 		"reversed": {"2026-10-10", "2026-10-09"},
 		"invalid":  {"2026-10-32", "2026-10-09"},
-		"too long": {"2026-01-01", "2026-12-31"},
+		"too long": {"2025-01-01", "2026-12-31"},
 		"bad to":   {"2026-10-01", "x"},
 	} {
 		if _, err := d.Recovery(ctx, day(rng[0]), day(rng[1])); err == nil {

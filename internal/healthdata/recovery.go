@@ -58,14 +58,17 @@ const (
 	// maxSplitGap: main-sleep records ending on the same day with at most
 	// this much awake time between them are one night split by a wake-up.
 	maxSplitGap = 3 * time.Hour
-	// MaxRangeDays bounds one Recovery call (28-day baselines with slack).
-	MaxRangeDays     = 120
+	// MaxRangeDays bounds one call: a year of daily points, enough for the
+	// 180-point metric series and 28-day baselines with slack.
+	MaxRangeDays     = 366
 	restingWithSleep = "WITH_SLEEP"
 )
 
 // Fetcher is the part of googlehealth.Client this package uses.
 type Fetcher interface {
 	List(ctx context.Context, dt googlehealth.DataType, from, to coach.LocalDate) ([]json.RawMessage, error)
+	DailyRollup(ctx context.Context, dt googlehealth.DataType, from, to coach.LocalDate) ([]json.RawMessage, error)
+	ListBetween(ctx context.Context, dt googlehealth.DataType, start, end time.Time) ([]json.RawMessage, error)
 }
 
 // Cache is the part of store.Store this package uses.
@@ -78,6 +81,10 @@ type Cache interface {
 // Source is what the coach tools read.
 type Source interface {
 	Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery, error)
+	Activity(ctx context.Context, from, to coach.LocalDate) (Activity, error)
+	Body(ctx context.Context, from, to coach.LocalDate) (Body, error)
+	Exercises(ctx context.Context, from, to coach.LocalDate, maxHR bool) (Exercises, error)
+	Nutrition(ctx context.Context, from, to coach.LocalDate) (Nutrition, error)
 }
 
 // Night is the main sleep ending on a local day (CAPABILITY I4): of that day's
@@ -244,7 +251,7 @@ func (d *Data) Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery
 	r := Recovery{From: from, To: to, Nights: map[coach.LocalDate]Night{}, RestingHR: map[coach.LocalDate]RestingHR{}}
 	f := &fetch{r: &r, settled: settled, sources: map[string]bool{}, empty: map[googlehealth.DataType]bool{}}
 
-	cached, err := d.readCache(ctx, from, min(to, settled))
+	cached, err := d.readCache(ctx, from, min(to, settled), append(slices.Clone(sleepKeys), KeyHRV, KeyRestingHR)...)
 	if err != nil {
 		return Recovery{}, err
 	}
@@ -321,15 +328,15 @@ func (c cacheRows) night(day coach.LocalDate) (Night, bool) {
 	return n, true
 }
 
-// readCache loads every key for the settled days [from, to], keeping only
-// rows computed in the configured zone; an empty range (to before from:
-// nothing settled yet) reads nothing.
-func (d *Data) readCache(ctx context.Context, from, to coach.LocalDate) (cacheRows, error) {
+// readCache loads keys for the settled days [from, to], keeping only rows
+// computed in the configured zone; an empty range (to before from: nothing
+// settled yet) reads nothing.
+func (d *Data) readCache(ctx context.Context, from, to coach.LocalDate, keys ...string) (cacheRows, error) {
 	rows := cacheRows{}
 	if to < from {
 		return rows, nil
 	}
-	for _, k := range append(slices.Clone(sleepKeys), KeyHRV, KeyRestingHR) {
+	for _, k := range keys {
 		ms, err := d.cache.MetricRange(ctx, k, from, to, metrics.AlgoVersion)
 		if err != nil {
 			return nil, fmt.Errorf("healthdata: read cache: %w", err)

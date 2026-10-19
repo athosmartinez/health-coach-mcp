@@ -34,7 +34,7 @@ coverage and source, so any model gives consistent advice.
 | # | Invariant | Origin |
 |---|---|---|
 | I1 | Every aggregate metric returns `n_days` (coverage) and `confidence` (`low` < 7 days, `medium` 7–20, `high` ≥ 21 for 28d baselines). | 1 week of history today |
-| I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` (merges overlaps) or filter on the primary source (`Google Fitbit Air`). | Real data: steps arrive from Fitbit Air **and** `com.apple.health.*` |
+| I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` or daily rollup (both merge overlaps; the daily rollup is one total per local day) or filter on the primary source (`Google Fitbit Air`). | Real data: steps arrive from Fitbit Air **and** `com.apple.health.*` |
 | I3 | A missing day is `null`, never `0`. | ghealth behavior (presence-aware types) |
 | I4 | The "day" is the **local day** in the configured time zone (default `America/Sao_Paulo`); sleep belongs to the day it **ends**. | Timestamps arrive `-03:00`; sleep runs 23:00→09:24 |
 | I5 | Units: kg, kcal, g, bpm, ms, min. Conversion happens in the MCP, not in the LLM. | `weightGrams`, `rootMeanSquareOfSuccessiveDifferencesMilliseconds` |
@@ -283,7 +283,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 |---|---|---|---|
 | Q5 | Publish the OAuth app as "In production" unverified to avoid the 7-day expiry? | Yes, after the first week of use | Stable operation |
 | Q6 | Daily SpO2 came back empty | Recheck in 3–5 nights; if it stays empty, drop it from the MVP | none (optional) |
-| Q7 | Primary source per metric when there's overlap (Fitbit Air vs Apple Health) | `reconcile` for steps/distance/calories; Fitbit Air for HR/HRV/sleep | aggregates |
+| Q7 | Primary source per metric when there's overlap (Fitbit Air vs Apple Health) | daily rollup (merged) for steps/AZM/calories; Fitbit Air for HR/HRV/sleep/exercise/nutrition; every platform for weight and body fat (a scale may sync through the phone) | aggregates |
 
 ## 9. Handoff
 

@@ -77,7 +77,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 4a OAuth: login, token, refresh | `feat/googlehealth-auth` | 1 | default | ☑ #4 |
 | 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☑ #6 |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☑ #5 |
-| 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☐ |
+| 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☑ #7 |
 | 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☐ |
 | 7 `morning_briefing` + `workout_review` | `feat/briefing-workout-tools` | 3, 6b | default | ☐ |
 | 8 `nutrition_day` | `feat/nutrition-tool` | 3, 6b | default | ☐ |
@@ -309,9 +309,22 @@ not cached; changing `algoVersion` forces a refetch; deleting the table → iden
 zones, `manual_entry` if there's no HR), `Nutrition(date)` (items + totals; totals with partial coverage
 flagged — e.g. protein present in only some items), `Weight(range)`, `BodyFat(range)`.
 Check the low-HR list (`metrics.IsVigorous`) against the `exerciseType` values the API really returns (only
-`JIU_JITSU` is confirmed), and `metrics.IsMainMeal` against the real `mealType` values.
+`JIU_JITSU` is confirmed), and `metrics.IsMainMeal` against the real `mealType` values. *(Real data, 2026-10-17,
+structure and counts only: the daily rollup is a merged total per local civil day, not a sum of the band and the
+phone (it equals `reconcile` summed on 11 of 14 days, within 1% on 2), so steps, AZM and total calories come from
+`dailyRollUp`; AZM rollup sums are already Active Zone Minutes (cardio/peak count 2), and a day the band recorded
+steps without a rollup row is 0 AZM; manual exercise entries still carry band HR and zones, so `manual_entry` comes
+from `recordingMethod=MANUAL` and `no_hr_data` from a missing average; max HR comes from `heart-rate` samples in the
+session window (`ListBetween`, ~1 sample/2 s), only when asked; real exercise types: STRENGTH_TRAINING, JIU_JITSU,
+MARTIAL_ARTS, PILATES, RUNNING, TREADMILL, CORE_TRAINING — TREADMILL stays out of the low-HR list (it may be a
+walk); real meal types BREAKFAST/LUNCH/DINNER/SNACK; carbs and fat from the item totals (the list repeats carbs);
+weight from every platform (the Apple reading is a separate scale reading), the day's first reading (morning
+weigh-in; `AlgoVersion` 2); body fat empty. PR #8 review: max HR is the highest 5-sample median, for at most 31
+sessions per call; `ActivityDay.Worn` lets nutrition_day leave non-worn days out of energy balance; nutrition series
+carry complete totals only.)*
 
-**Verification.** Fake API: steps from 2 sources not doubled; exercise without HR → `manual_entry`;
+**Verification.** Fake API: steps from 2 sources not doubled; exercise without HR → `no_hr_data`, logged by hand
+→ `manual_entry`;
 average HR 81 in 60 min of JIU_JITSU → `low_hr_for_activity`; today with `partial_day`; nutrition with protein
 in 1 of 3 items → partial total.
 

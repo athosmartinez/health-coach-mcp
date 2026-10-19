@@ -187,6 +187,7 @@ func TestListFiltersAndPageSizes(t *testing.T) {
 		{ActiveZoneMinutes, `active_zone_minutes.interval.civil_start_time >= "2026-10-01T00:00:00" AND active_zone_minutes.interval.civil_start_time < "2026-10-08T00:00:00"`, "10000"},
 		{Weight, `weight.sample_time.physical_time >= "2026-10-01T03:00:00Z" AND weight.sample_time.physical_time < "2026-10-08T03:00:00Z"`, "10000"},
 		{BodyFat, `body_fat.sample_time.physical_time >= "2026-10-01T03:00:00Z" AND body_fat.sample_time.physical_time < "2026-10-08T03:00:00Z"`, "10000"},
+		{HeartRate, `heart_rate.sample_time.physical_time >= "2026-10-01T03:00:00Z" AND heart_rate.sample_time.physical_time < "2026-10-08T03:00:00Z"`, "10000"},
 		{HeartRateVariability, `heart_rate_variability.sample_time.physical_time >= "2026-10-01T03:00:00Z" AND heart_rate_variability.sample_time.physical_time < "2026-10-08T03:00:00Z"`, "10000"},
 		{DailyRestingHeartRate, `daily_resting_heart_rate.date >= "2026-10-01" AND daily_resting_heart_rate.date < "2026-10-08"`, "10000"},
 		{DailyHeartRateVariability, `daily_heart_rate_variability.date >= "2026-10-01" AND daily_heart_rate_variability.date < "2026-10-08"`, "10000"},
@@ -335,7 +336,7 @@ func TestOperationsAreCheckedLocally(t *testing.T) {
 		"rollup of sleep":  func() error { _, err := c.DailyRollup(ctx, Sleep, day("2026-10-01"), day("2026-10-01")); return err },
 		"list of calories": func() error { _, err := c.List(ctx, TotalCalories, day("2026-10-01"), day("2026-10-01")); return err },
 		"unknown type": func() error {
-			_, err := c.List(ctx, DataType("heart-rate"), day("2026-10-01"), day("2026-10-01"))
+			_, err := c.List(ctx, DataType("blood-glucose"), day("2026-10-01"), day("2026-10-01"))
 			return err
 		},
 		"path in the type": func() error {

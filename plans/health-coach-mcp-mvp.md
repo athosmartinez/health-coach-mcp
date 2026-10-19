@@ -78,7 +78,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☑ #6 |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☑ #5 |
 | 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☑ #7 |
-| 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☐ |
+| 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☑ #8 |
 | 7 `morning_briefing` + `workout_review` | `feat/briefing-workout-tools` | 3, 6b | default | ☐ |
 | 8 `nutrition_day` | `feat/nutrition-tool` | 3, 6b | default | ☐ |
 | 9 `weekly_report` + `metric_series` | `feat/weekly-series-tools` | 7, 8 | default | ☐ |

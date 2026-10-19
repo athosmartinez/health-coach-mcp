@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -109,9 +110,9 @@ func (c memClient) fails(name string, args map[string]any) rejection {
 	return rejection{preHandler: true, text: text}
 }
 
-func listTools(t *testing.T, c memClient) map[string]*mcp.Tool {
+func listTools(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 	t.Helper()
-	res, err := c.cs.ListTools(context.Background(), nil)
+	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func schemaOf(t *testing.T, v any) *jsonschema.Schema {
 }
 
 func TestMemoryToolsListingSchemasAndAnnotations(t *testing.T) {
-	byName := listTools(t, memorySession(t))
+	byName := listTools(t, memorySession(t).cs)
 	var names []string
 	for n := range byName {
 		names = append(names, n)
@@ -267,7 +268,9 @@ func TestSchemasHaveNoBooleanProperties(t *testing.T) {
 			walk(path+"."+key, m[key])
 		}
 	}
-	for name, tool := range listTools(t, memorySession(t)) {
+	all := listTools(t, memorySession(t).cs)
+	maps.Copy(all, listTools(t, coachSession(t, &fakeHealth{}, nil).cs))
+	for name, tool := range all {
 		for kind, schema := range map[string]any{"input": tool.InputSchema, "output": tool.OutputSchema} {
 			b, _ := json.Marshal(schema)
 			var v any

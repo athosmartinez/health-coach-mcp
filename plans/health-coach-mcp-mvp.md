@@ -350,6 +350,14 @@ as `IsError`. `workout_review`: zones, week context vs target, `low_hr_for_activ
 **Exit criteria.** Real manual call: valid envelope, readiness ≠ `unknown` after ≥ 7 nights, no value in the logs.
 **Rollback.** Revert.
 
+**Notes (decided in Step 7).**
+- A night is required (no night → `no_data`), so the night's own sleep always gives readiness a signal: `unknown`
+  cannot come out of `morning_briefing`. The "unknown" case is covered by the case with only sleep usable
+  (`missing:hrv`, `missing:resting_hr`, `confidence: low`).
+- `vs_7d`/`vs_28d` compare asleep, awake, efficiency and stages; start and end wrap at midnight and are not averaged.
+- `workout_review`: "that night" is the night ending the morning after the day (`recovery_context.night_ending`),
+  null while it has not come. A date after today is `invalid_input`.
+
 ---
 
 ## Step 8 — `nutrition_day`

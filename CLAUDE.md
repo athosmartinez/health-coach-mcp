@@ -27,6 +27,15 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - `internal/tools/` — tool implementations; `Register` (the only way to add a tool; infers input and
   output schemas with the domain schemas) and `MustInputSchema` (enums, date pattern). `memory.go`:
   the 11 coach memory tools (CAPABILITY §4.2), registered by `server.New` when `Deps.Store` is set.
+  `coach.go`: `CoachDeps` (Health source, optional `Targets`; `ErrNotFound` = no target, never an error), the date
+  rule (omitted = today, after today = `invalid_input`), quality-flag and source sets, `Versus` (avg, delta, n_days
+  of the days before). `briefing.go`: `morning_briefing` (no night on the date = `no_data`; baselines from
+  `BaselineSeries` over the 28 days before, the day's own values from the night; readiness via
+  `metrics.AssessReadiness`; `n_days` = the smallest 28-day baseline; sessions by type only, never by name).
+  `workout.go`: `workout_review` (date or `exercise_id`, not both; an ID is looked up in the last 28 days; max HR only
+  for the reviewed day; ISO week up to today against the target in force on the day; the night ending the next
+  morning; at most 20 sessions with `sessions_omitted`; names travel with `notice: dataNotice`). Both registered by
+  `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the

@@ -20,6 +20,7 @@ import (
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 	"github.com/athosmartinez/health-coach-mcp/internal/version"
@@ -277,6 +278,43 @@ func TestMemoryToolsNeedAStore(t *testing.T) {
 	}))
 	if !slices.Equal(got, want) {
 		t.Errorf("with a store: %v, want %v", got, want)
+	}
+}
+
+// noHealth is a healthdata.Source with no data at all.
+type noHealth struct{}
+
+func (noHealth) Recovery(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Recovery, error) {
+	return healthdata.Recovery{}, nil
+}
+func (noHealth) Activity(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Activity, error) {
+	return healthdata.Activity{}, nil
+}
+func (noHealth) Body(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Body, error) {
+	return healthdata.Body{}, nil
+}
+func (noHealth) Exercises(context.Context, coach.LocalDate, coach.LocalDate, bool) (healthdata.Exercises, error) {
+	return healthdata.Exercises{}, nil
+}
+func (noHealth) Nutrition(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Nutrition, error) {
+	return healthdata.Nutrition{}, nil
+}
+
+func TestCoachToolsNeedAHealthSource(t *testing.T) {
+	deps := testDeps()
+	deps.Health = noHealth{}
+	cs := connect(t, newServer(t, deps))
+	if got := toolNames(t, cs); !slices.Equal(got, []string{"morning_briefing", "server_info", "workout_review"}) {
+		t.Errorf("with a health source: %v", got)
+	}
+	// Without a store the workout review still works, with no target.
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "workout_review"})
+	if err != nil || res.IsError {
+		t.Fatalf("workout_review without a store: %v %+v", err, res)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	if !strings.Contains(string(b), `"weekly_sessions_target":null`) {
+		t.Errorf("result %s", b)
 	}
 }
 

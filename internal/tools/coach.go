@@ -60,11 +60,14 @@ func (d CoachDeps) target(ctx context.Context, day coach.LocalDate) (*store.Targ
 
 // Quality flags the coach-moment tools add to metrics' own.
 const (
-	flagProvisionalSleep  = "provisional_sleep" // Google has not finished processing the night
-	flagHRVLowCoverage    = "hrv_low_coverage"  // HRV withheld: samples cover too little of the night
-	flagNonStandardRHR    = "non_standard_resting_hr"
-	flagUnreadableRecords = "unreadable_records" // some records could not be read and were left out
-	flagUnusableRecords   = "unusable_records"   // records arrived for a type but none could be used
+	flagProvisionalSleep = "provisional_sleep" // Google has not finished processing the night
+	flagHRVLowCoverage   = "hrv_low_coverage"  // HRV withheld: samples cover too little of the night
+	flagNonStandardRHR   = "non_standard_resting_hr"
+	// flagUnreadableRecords: some records could not be read and were left
+	// out. Recovery.Empty (records only from another platform) is not a
+	// flag: whether a fetch sees it depends on how the range splits between
+	// cache and live, so identical calls would disagree.
+	flagUnreadableRecords = "unreadable_records"
 	flagNotWorn           = "band_not_worn"      // no band data on the day: totals are estimates
 	flagSessionsTruncated = "sessions_truncated" // more sessions than one response carries
 	flagMaxHROmitted      = "max_hr_omitted"     // some sessions left without a max heart rate

@@ -205,7 +205,6 @@ func (b briefing) handle(ctx context.Context, _ *mcp.CallToolRequest, in briefin
 		sources.add(r.Source)
 	}
 	flags.add(flagUnreadableRecords, rec.Skipped+act.Skipped+ex.Skipped+body.Skipped > 0)
-	flags.add(flagUnusableRecords, len(rec.Empty) > 0)
 	// Exercise flags last, after the day-level ones.
 	for _, s := range out.YesterdayLoad.Exercises {
 		for _, f := range s.QualityFlags {

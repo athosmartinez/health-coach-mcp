@@ -43,6 +43,16 @@ func (d Deps) withDefaults() Deps {
 	return d
 }
 
+// coach returns the coach-moment tools' deps. Targets stays a nil interface
+// without a store, so the tools see "no target" instead of a nil *Store.
+func (d Deps) coach() tools.CoachDeps {
+	c := tools.CoachDeps{Health: d.Health, Now: d.Now, Loc: d.Cfg.TimeZone}
+	if d.Store != nil {
+		c.Targets = d.Store
+	}
+	return c
+}
+
 func (d Deps) validate() error {
 	// No default zone: a silent fallback would shift every daily aggregate.
 	if d.Cfg.TimeZone == nil {
@@ -66,6 +76,10 @@ func New(deps Deps) (*mcp.Server, error) {
 	registerServerInfo(s)
 	if deps.Store != nil {
 		tools.RegisterMemory(s, tools.MemoryDeps{Store: deps.Store, Now: deps.Now, Loc: deps.Cfg.TimeZone})
+	}
+	if deps.Health != nil {
+		tools.RegisterBriefing(s, deps.coach())
+		tools.RegisterWorkout(s, deps.coach())
 	}
 
 	return s, nil

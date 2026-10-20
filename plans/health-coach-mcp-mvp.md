@@ -78,7 +78,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 4b API client: requests, pagination, retry, errors | `feat/googlehealth-client` | 4a | default | ☑ #6 |
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☑ #5 |
 | 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☑ #7 |
-| 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☐ |
+| 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☑ #8 |
 | 7 `morning_briefing` + `workout_review` | `feat/briefing-workout-tools` | 3, 6b | default | ☐ |
 | 8 `nutrition_day` | `feat/nutrition-tool` | 3, 6b | default | ☐ |
 | 9 `weekly_report` + `metric_series` | `feat/weekly-series-tools` | 7, 8 | default | ☐ |
@@ -343,12 +343,24 @@ in `Targets.InForce`). Output in `coach.Envelope`.
 
 **Verification.** In-memory transport with a fake `Source`: `morning_briefing` returns **exactly** the fields
 `sleep{asleep_min, awake_min, efficiency_pct, stages_min, start, end, vs_7d, vs_28d}`, `hrv{median_ms, delta_pct_vs_28d, z_score_vs_28d}`,
-`resting_hr{bpm, delta_bpm_vs_28d}`, `yesterday_load`, `readiness{level, reasons, confidence}`, `body{weight_kg, date}`;
+`resting_hr{bpm, delta_bpm_vs_28d}`, `yesterday_load`, `readiness{level, reasons, confidence}`, `body{weight_kg, date}`,
+`notice` (readiness referral + vendor-text notice, added in review);
 green/yellow/red/unknown cases; `confidence: low` with 5 nights; day with no sleep → `no_data`; `auth_expired` propagated
 as `IsError`. `workout_review`: zones, week context vs target, `low_hr_for_activity` flag.
 
 **Exit criteria.** Real manual call: valid envelope, readiness ≠ `unknown` after ≥ 7 nights, no value in the logs.
 **Rollback.** Revert.
+
+**Notes (decided in Step 7).**
+- A night is required (no night → `no_data`), so the night's own sleep always gives readiness a signal: `unknown`
+  cannot come out of `morning_briefing`. The "unknown" case is covered by the case with only sleep usable
+  (`missing:hrv`, `missing:resting_hr`, `confidence: low`).
+- `vs_7d`/`vs_28d` compare asleep, awake, efficiency and stages; start and end wrap at midnight and are not averaged.
+- `workout_review`: "that night" is the night ending the morning after the day (`recovery_context.night_ending`),
+  null while it has not come. A date after today is `invalid_input`.
+- Review: a resting HR from a non-standard method is shown but neither compared nor judged (`missing:resting_hr`);
+  a provisional night keeps its level with reason `provisional:sleep` and low confidence; HRV z-scores stay on raw
+  rMSSD (a log scale would change Q1's thresholds: revisit with the real week of Step 11).
 
 ---
 
@@ -430,3 +442,5 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   Step 4 → 4a/4b and 6 → 6a/6b; OAuth `offline`+`consent`, refresh token preserved, 127.0.0.1; HRV by
   sleep window; missing readiness signals don't count; R4 middleware and R6 guard in Step 1; per-connection
   pragmas via DSN; objective exit criteria; Step 10 after 9.
+- 2026-10-19 — Step 7: `morning_briefing` returns the night's `start`/`end`, so `healthdata.Night` carries `Start`/`End`
+  and the cache gains the `sleep_end_min_of_day` key (a cached night without it is a miss and is fetched again).

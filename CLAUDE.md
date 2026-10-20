@@ -27,6 +27,19 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - `internal/tools/` — tool implementations; `Register` (the only way to add a tool; infers input and
   output schemas with the domain schemas) and `MustInputSchema` (enums, date pattern). `memory.go`:
   the 11 coach memory tools (CAPABILITY §4.2), registered by `server.New` when `Deps.Store` is set.
+  `coach.go`: `CoachDeps` (Health source, optional `Targets`; `ErrNotFound` = no target, never an error), the date
+  rule (omitted = today, after today = `invalid_input`), quality-flag and source sets, `Versus` (avg, delta, n_days
+  of the days before). `briefing.go`: `morning_briefing` (no night on the date = `no_data`; baselines from
+  `BaselineSeries` over the 28 days before, the day's own values from the night; readiness via
+  `metrics.AssessReadiness`; `n_days` = the smallest 28-day baseline; sessions by type only, never by name; a
+  non-standard resting HR is shown without a delta and not judged; a provisional night adds `provisional:sleep` and low
+  confidence; `notice` = `readinessNotice` (referral) + `vendorNotice`). `signalsOf` reads a night's HRV and resting HR
+  with their flags for both tools.
+  `workout.go`: `workout_review` (date or `exercise_id`, not both; an ID is looked up in the last 28 days; max HR only
+  for the reviewed day; ISO week up to today against the target in force on the day; the night ending the next
+  morning, its deltas null below 7 baseline nights, with the baseline sizes; at most 20 sessions with
+  `sessions_omitted`; names travel with `notice: vendorNotice`). Both registered by
+  `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the
@@ -65,7 +78,9 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `RestingHR` (`{BPM, Method}`; `WITH_SLEEP` wins a duplicate, then the lower), plus `Skipped` unreadable records,
   `Excluded` counts by reason and `Empty` types (records only from another platform or without a value). `Series(key)`
   gives one `metrics.Point` per day; `BaselineSeries(key)` drops provisional nights and non-`WITH_SLEEP` resting HR.
-  `Excluded` counts only days fetched live in the call. `KeySleepStart` wraps at midnight (circular metrics only).
+  `Excluded` counts only days fetched live in the call. `Start`/`End` bound the night in local time to the minute
+  (a split night: first part's start, last part's end); a cached night rebuilds them from `KeySleepStart`/`KeySleepEnd`
+  (both wrap at midnight: circular metrics only) and is a miss without the end row.
   Cache: settled days (≤ today−3) only; a night is cached when settled, with a final HRV or no samples at all (none
   of its samples left out for another platform or a missing value), and
   written commit-row-last (`KeyAsleep` deleted first, written last; stage/HRV rows written or deleted); resting HR only

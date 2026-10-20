@@ -20,6 +20,7 @@ import (
 
 	"github.com/athosmartinez/health-coach-mcp/internal/coach"
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
+	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 	"github.com/athosmartinez/health-coach-mcp/internal/version"
@@ -277,6 +278,68 @@ func TestMemoryToolsNeedAStore(t *testing.T) {
 	}))
 	if !slices.Equal(got, want) {
 		t.Errorf("with a store: %v, want %v", got, want)
+	}
+}
+
+// noHealth is a healthdata.Source with no data at all.
+type noHealth struct{}
+
+func (noHealth) Recovery(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Recovery, error) {
+	return healthdata.Recovery{}, nil
+}
+func (noHealth) Activity(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Activity, error) {
+	return healthdata.Activity{}, nil
+}
+func (noHealth) Body(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Body, error) {
+	return healthdata.Body{}, nil
+}
+func (noHealth) Exercises(context.Context, coach.LocalDate, coach.LocalDate, bool) (healthdata.Exercises, error) {
+	return healthdata.Exercises{}, nil
+}
+func (noHealth) Nutrition(context.Context, coach.LocalDate, coach.LocalDate) (healthdata.Nutrition, error) {
+	return healthdata.Nutrition{}, nil
+}
+
+func TestCoachToolsNeedAHealthSource(t *testing.T) {
+	deps := testDeps()
+	deps.Health = noHealth{}
+	cs := connect(t, newServer(t, deps))
+	if got := toolNames(t, cs); !slices.Equal(got, []string{"morning_briefing", "server_info", "workout_review"}) {
+		t.Errorf("with a health source: %v", got)
+	}
+	// Without a store the workout review still works, with no target.
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "workout_review"})
+	if err != nil || res.IsError {
+		t.Fatalf("workout_review without a store: %v %+v", err, res)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	if !strings.Contains(string(b), `"weekly_sessions_target":null`) {
+		t.Errorf("result %s", b)
+	}
+}
+
+func TestCoachToolsGetTheConfiguredZoneAndClock(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := testDeps()
+	deps.Cfg.TimeZone, deps.Health = loc, noHealth{}
+	// 01:00 UTC on the 17th is still the 16th in São Paulo.
+	deps.Now = func() time.Time { return time.Date(2026, 10, 17, 1, 0, 0, 0, time.UTC) }
+	cs := connect(t, newServer(t, deps))
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "workout_review"})
+	if err != nil || res.IsError {
+		t.Fatalf("workout_review: %v %+v", err, res)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	if !strings.Contains(string(b), `"date":"2026-10-16"`) || !strings.Contains(string(b), `"week_start":"2026-10-12"`) {
+		t.Errorf("result %s", b)
+	}
+	// The night on the 17th is after today there.
+	res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "morning_briefing", Arguments: map[string]any{"date": "2026-10-17"}})
+	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "invalid_input") {
+		t.Errorf("briefing for the 17th: %v %+v", err, res)
 	}
 }
 

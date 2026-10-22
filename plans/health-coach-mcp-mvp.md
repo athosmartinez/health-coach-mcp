@@ -421,6 +421,19 @@ SDK/`invalid_input` error; enum rejects `heart_rate_raw`.
 **Exit criteria.** Real report for last week has every section with `coverage.n_days` ≥ 5 and `trend` filled in for weight, resting HR, HRV and sleep.
 **Rollback.** Revert.
 
+**Notes (implementation).**
+- Coverage is per metric (`n_days` for each window): one envelope count cannot show a section resting on 2 days.
+- `checkFood` (nutrition.go) is the one day rule for food: `weekly_report` adherence uses it, so a day never counts
+  as a missed target when `nutrition_day` would say the log cannot show it. `healthdata.Nutrition` gained
+  `OtherSourceDays`; unreadable food records have no readable day, so they only raise `unreadable_records`.
+- Weight: one EWMA over the 90 fetched days, read at each week's last weigh-in; a week without a weigh-in is null
+  (trend `unknown`), never the carried value. Stale weight (deferred from Step 8): `weight_age_days` and
+  `stale_weight` past 14 days (user choice), in both `nutrition_day` and `weekly_report`.
+- Decisions: `store.NoteFilter.Until` (same related_date-else-creation-day rule as Since), capped at 20.
+- `metric_series`: protein keeps a partial total as a lower bound with `complete=false` (user choice); enum and
+  required-field errors are SDK schema errors (server test), the 180-point and 366-day limits are `invalid_input`.
+- Deferred to a refactor PR after this step: the `Stages`/`HRVNight`/typed-series-key reshapes carried from PR #7.
+
 ---
 
 ## Step 10 — MCP prompts + `coach://guardrails` resource
@@ -470,3 +483,5 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
 - 2026-10-19 — Step 7: `morning_briefing` returns the night's `start`/`end`, so `healthdata.Night` carries `Start`/`End`
   and the cache gains the `sleep_end_min_of_day` key (a cached night without it is a miss and is fetched again).
 - 2026-10-21 — Step 8: `healthdata.FoodItem` carries its `Source` label so `nutrition_day` lists the food log's source.
+- 2026-10-21 — Step 9: `store.NoteFilter.Until`, `healthdata.Nutrition.OtherSourceDays`, `tools.CoachDeps.Notes`;
+  stale weight added to `nutrition_day`.

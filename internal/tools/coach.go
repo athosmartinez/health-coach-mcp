@@ -18,12 +18,19 @@ type Targets interface {
 	TargetInForce(ctx context.Context, day coach.LocalDate) (store.Target, error)
 }
 
+// Notes is the part of the store weekly_report reads.
+type Notes interface {
+	SearchNotes(ctx context.Context, f store.NoteFilter) (store.NoteResults, error)
+}
+
 // CoachDeps is what the coach-moment tools (CAPABILITY §4.1) need.
 type CoachDeps struct {
 	Health healthdata.Source
 	// Targets may be nil: the tools then report targets as not set.
 	Targets Targets
-	Now     func() time.Time
+	// Notes may be nil: weekly_report then lists no decisions.
+	Notes Notes
+	Now   func() time.Time
 	// Loc defines the local day (I4).
 	Loc *time.Location
 }

@@ -48,7 +48,7 @@ func (d Deps) withDefaults() Deps {
 func (d Deps) coach() tools.CoachDeps {
 	c := tools.CoachDeps{Health: d.Health, Now: d.Now, Loc: d.Cfg.TimeZone}
 	if d.Store != nil {
-		c.Targets = d.Store
+		c.Targets, c.Notes = d.Store, d.Store
 	}
 	return c
 }
@@ -81,6 +81,8 @@ func New(deps Deps) (*mcp.Server, error) {
 		tools.RegisterBriefing(s, deps.coach())
 		tools.RegisterWorkout(s, deps.coach())
 		tools.RegisterNutrition(s, deps.coach())
+		tools.RegisterWeekly(s, deps.coach())
+		tools.RegisterSeries(s, deps.coach())
 	}
 
 	return s, nil

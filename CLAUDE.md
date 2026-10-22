@@ -48,7 +48,17 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   band not worn, no total calories, today, likely incomplete log; checked in that order); balance and burn rounded
   to 50 kcal; without a kcal target the log check uses half the calories burned; `likely_incomplete` never raised
   today; `notice` = `nutritionNotice` (data, not instructions; trend over days; no encouragement of very low intake;
-  doctor or registered dietitian referral)). All three
+  doctor or registered dietitian referral); `weight_age_days` + `stale_weight` past 14 days). `checkFood` is the
+  per-day food rule shared with `weekly_report`.
+  `weekly.go`: `weekly_report` (ISO week of `week_end`, counted up to today; per metric this_week / prev_week /
+  avg_28d (the 28 days before the week) / trend with a threshold per metric, each with its `n_days`; resting HR
+  standard method only, provisional nights and today's activity left out; weight = EWMA at each week's last
+  weigh-in, never carried into a week without one, plus the 28-day slope; adherence per day against the target in
+  force that day through `checkFood` (days whose log cannot show a hit or a miss are left out; a partial protein
+  total counts only as a sure hit); sessions vs the target in force at the end of the week; up to 20 decision notes
+  via `CoachDeps.Notes` (`store.NoteFilter` Since/Until); `notice` = `weeklyNotice`).
+  `series.go`: `metric_series` (closed metric enum, `day|week`, ≤ 366 days and ≤ 180 points else `invalid_input`;
+  same exclusions as the report; protein keeps a partial total with `complete=false`). All five
   registered by `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned

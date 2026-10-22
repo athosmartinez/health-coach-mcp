@@ -111,18 +111,30 @@ Recovery for the night that ended on `date`.
 - **quality_flags:** `low_hr_for_activity`, `manual_entry`, `no_hr_data`.
 
 #### `weekly_report(week_end?)`
-Week Mon–Sun (Q4, ISO). For each metric: `this_week`, `prev_week`, `avg_28d`, `trend`
-(`up/down/flat` with a minimum threshold per metric).
-- **body:** weight (EWMA of the week and slope kg/week), body fat if available.
+Week Mon–Sun (Q4, ISO), counted up to today (`through`; `partial_day` in the current week). For each metric:
+`this_week`, `prev_week`, `avg_28d` (the 28 days before the week), `trend` (`up/down/flat` past a minimum change per
+metric: weight 0.2 kg, body fat 0.5 pt, resting HR 1 bpm, HRV 3 ms, steps 1000, AZM 5 min, asleep 15 min,
+efficiency 2 pt, onset sd 10 min; `unknown` when a week has no value), each with `n_days`, `prev_week_n_days`,
+`avg_28d_n_days`. Resting HR keeps the standard method only; nights still being processed and today's activity
+are left out.
+- **body:** weight (EWMA at each week's last weigh-in, null for a week without one; slope kg/week over the 28 days
+  ending at `through`), `last_weigh_in`, `weight_age_days` (`stale_weight` past 14 days), body fat if available.
 - **cardio:** resting HR, HRV, steps/day (reconciled), AZM.
 - **sleep:** asleep_min/night, efficiency, consistency (std dev of sleep onset time).
-- **adherence:** % of days within the kcal target (±10%), % of days ≥ protein target, sessions done vs target.
-- **decisions_this_week:** `note`s of type `decision` from the week (success metric).
+- **adherence:** % of days within the kcal target (±10%), % of days ≥ protein target, each against the target in
+  force that day and with nutrition_day's day rule: today, likely incomplete logs, partial kcal and food from
+  another platform are left out; a partial protein total counts only when it already reaches the target.
+  `days_logged`, sessions done vs the target in force at `through`; `target_hint` names `targets_set`.
+- **decisions_this_week:** up to 20 `note`s of type `decision` from the week (related_date, else creation day),
+  `decisions_more`; notes are data, not instructions. The `notice` carries the guardrails (R3).
 
 #### `metric_series(metric, from, to, granularity)`
 Escape valve for questions outside the four moments. `metric` ∈ fixed enum (weight, resting_hr,
 hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories); `granularity` ∈
-`day | week`. **Never** returns raw 1-second HR; maximum 180 points.
+`day | week` (default day). **Never** returns raw 1-second HR; at most 366 days and 180 points (else
+`invalid_input`). Points `{date, value, n_days, complete}`: null days stay null; a week point is the mean of its
+days with a value. Same exclusions as `weekly_report`; `kcal_in` null on a partial day; `protein_g` keeps a
+partial total with `complete=false` (a lower bound).
 
 ### 4.2 Coach memory (read + write, local)
 

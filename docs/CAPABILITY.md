@@ -88,11 +88,21 @@ Recovery for the night that ended on `date`.
 - **body:** last weight and its date.
 
 #### `nutrition_day(date?)`
-- **totals:** kcal, protein_g, carb_g, fat_g, fiber_g, sugar_g, sodium_mg (whatever the log provides).
-- **per_meal:** grouped by `mealType` (BREAKFAST/LUNCH/DINNER/SNACK) with items.
-- **targets:** target in force (I6) and `delta` for kcal and protein; `protein_g_per_kg` (last weight).
-- **energy_balance:** `intake_kcal − total_calories_kcal` (API `total-calories`), estimated deficit.
-- **logging_completeness:** `meals_logged`, flag `likely_incomplete` if kcal < 50% of target or no main meal.
+- **totals:** kcal, protein_g, carb_g, fat_g, fiber_g, sugar_g, sodium_mg (whatever the log provides), each with
+  `items_reporting` and `complete` (false = some items lack it, a lower bound); null when no item reports it.
+- **per_meal:** grouped by `mealType` (BREAKFAST/LUNCH/DINNER/SNACK, then other types, then `UNSPECIFIED`) with
+  items and per-meal totals; at most 60 items listed (`items_omitted`), totals over all.
+- **targets:** target in force (I6) and `delta` for kcal and protein; `protein_g_per_kg` (last weight). The kcal
+  delta only from a complete total; a partial protein total still gives the delta and per kg, marked
+  `protein_g_lower_bound`; no target → null fields + `target_hint` naming `targets_set`.
+- **energy_balance:** `intake_kcal − total_calories_kcal` (API `total-calories`), negative = estimated deficit,
+  rounded to 50 kcal. Null when it would show a deficit that did not happen, with `unavailable` (in order:
+  `intake_partial`, `other_source_food`, `unreadable_food`, `band_not_worn`, `no_total_calories`, `partial_day`,
+  `log_likely_incomplete`). The kcal delta is null for the intake reasons too (`kcal_delta_unavailable`).
+- **logging_completeness:** `meals_logged` (distinct meal types), flag `likely_incomplete` if kcal < 50% of target
+  (of total calories without a target) or no main meal: meals not logged or very low intake; never raised today
+  (`partial_day`). A day with no item is `no_data`. The output `notice` carries the guardrails (R3): trend over
+  days, no encouragement of very low intake, doctor or registered dietitian referral.
 
 #### `workout_review(date? | exercise_id?)`
 - **sessions[]:** type, duration, average/max HR, `heart_rate_zone_durations`, kcal, AZM.

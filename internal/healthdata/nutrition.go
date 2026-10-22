@@ -34,6 +34,8 @@ type FoodItem struct {
 	Name string
 	Meal string // BREAKFAST, LUNCH, DINNER or SNACK
 	At   time.Time
+	// Source labels the device or platform that logged it.
+	Source string
 	// Nutrients holds only what the item reports: a nutrient left out is
 	// unknown, not zero.
 	Nutrients map[string]float64
@@ -223,7 +225,7 @@ func parseFood(raw json.RawMessage) (item FoodItem, err error) {
 	if r.DataSource.Platform != primaryPlatform {
 		return item, errOtherSource
 	}
-	item.Name, item.Meal = clean(n.FoodDisplayName), clean(n.MealType)
+	item.Name, item.Meal, item.Source = clean(n.FoodDisplayName), clean(n.MealType), r.DataSource.label()
 	if resourceName.MatchString(r.Name) {
 		item.ID = r.Name
 	}

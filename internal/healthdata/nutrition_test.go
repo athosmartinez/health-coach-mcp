@@ -106,7 +106,7 @@ func TestNutritionTotals(t *testing.T) {
 		t.Error("a nutrient no item reports has a total")
 	}
 	item := nd.Items[1]
-	if item.Name != "Synthetic food" || item.ID == "" || item.Nutrients[NutrientProtein] != 40 || len(item.Nutrients) != 5 {
+	if item.Name != "Synthetic food" || item.ID == "" || item.Source != "FITBIT" || item.Nutrients[NutrientProtein] != 40 || len(item.Nutrients) != 5 {
 		t.Errorf("lunch = %+v", item)
 	}
 	// Series only carry complete totals: protein known for 1 of 3 items

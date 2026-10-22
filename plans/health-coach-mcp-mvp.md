@@ -79,7 +79,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 5 Metrics engine (pure) | `feat/metrics` | 1 | strongest | ☑ #5 |
 | 6a Data: sleep, HRV, resting HR + cache | `feat/data-recovery` | 2, 4b, 5 | strongest | ☑ #7 |
 | 6b Data: steps, AZM, exercise, nutrition, calories, weight, body fat | `feat/data-activity` | 6a | strongest | ☑ #8 |
-| 7 `morning_briefing` + `workout_review` | `feat/briefing-workout-tools` | 3, 6b | default | ☐ |
+| 7 `morning_briefing` + `workout_review` | `feat/briefing-workout-tools` | 3, 6b | default | ☑ #9 |
 | 8 `nutrition_day` | `feat/nutrition-tool` | 3, 6b | default | ☐ |
 | 9 `weekly_report` + `metric_series` | `feat/weekly-series-tools` | 7, 8 | default | ☐ |
 | 10 MCP prompts + `coach://guardrails` | `feat/prompts-guardrails` | 9 | default | ☐ |
@@ -379,6 +379,31 @@ protein → partial total; only snacks → `likely_incomplete`.
 **Exit criteria.** For a closed day, `totals.kcal` and `protein_g` within **±2%** of what the Google Health app shows.
 **Rollback.** Revert.
 
+**Notes (implementation).**
+- A day without food items is `no_data`, never a 0 kcal day: the balance would read as a large deficit. The hint
+  names the cause (unreadable records, food only from another platform, nothing logged).
+- Totals keep the healthdata rule: a total misses items when `complete` is false and is then a lower bound. The kcal
+  delta and the energy balance read a complete kcal total only. Protein is a lower bound instead (user decision after
+  the real-data probe: on 5 of 10 days 1–3 items had no protein entry, nearly all under 50 kcal), so the protein delta
+  and `protein_g_per_kg` come from the partial total with `protein_g_lower_bound`. `partial_nutrient_totals` is raised for
+  kcal and protein only (fiber, sugar and sodium are often absent from items, and no target reads them).
+  `kcal_pct_of_target` uses the logged kcal even when partial, so a very low day stays visible.
+- `energy_balance` is null with `unavailable` = `intake_partial`, `other_source_food`, `unreadable_food`,
+  `band_not_worn` (or no activity row with no unreadable records), `no_total_calories`, `partial_day` or
+  `log_likely_incomplete`, in that order; the kcal delta is null for the intake reasons (`kcal_delta_unavailable`).
+  Review: each of these gaps would read as a deficit that did not happen, today included (both totals are still
+  running). `likely_incomplete` is never raised today ("partial day doesn't count as a failure"); without a kcal
+  target it compares intake with half the calories burned. Balance and burn round to 50 kcal (both estimates miss by
+  hundreds). The wording treats a likely incomplete day as "not logged or very low intake: ask which", and
+  `nutritionNotice` carries the guardrails in the output (no encouragement of very low intake, referral to a doctor
+  or registered dietitian). Deferred to Step 9: a stale-weight flag for `protein_g_per_kg` (the weight can be up to
+  90 days old; `weight_date` shows it).
+- `meals_logged` counts distinct meal types. `coverage.n_days` is 1: a single day, no baseline.
+- Food names are user-typed or from a food database: `notice` = `nutritionNotice`; at most 60 items per response
+  (`items_omitted`, `food_items_truncated`), in time order across the day.
+- Known gap (healthdata): an `energy` object without `kcal` reads as 0 kcal (proto3 drops a zero), so if the API
+  renamed that sub-field every item would read as 0 kcal instead of unknown. Watch for it in the Step 11 week.
+
 ---
 
 ## Step 9 — `weekly_report` + `metric_series`
@@ -444,3 +469,4 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   pragmas via DSN; objective exit criteria; Step 10 after 9.
 - 2026-10-19 — Step 7: `morning_briefing` returns the night's `start`/`end`, so `healthdata.Night` carries `Start`/`End`
   and the cache gains the `sleep_end_min_of_day` key (a cached night without it is a miss and is fetched again).
+- 2026-10-21 — Step 8: `healthdata.FoodItem` carries its `Source` label so `nutrition_day` lists the food log's source.

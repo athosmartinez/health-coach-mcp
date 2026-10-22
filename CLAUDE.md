@@ -38,8 +38,18 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `workout.go`: `workout_review` (date or `exercise_id`, not both; an ID is looked up in the last 28 days; max HR only
   for the reviewed day; ISO week up to today against the target in force on the day; the night ending the next
   morning, its deltas null below 7 baseline nights, with the baseline sizes; at most 20 sessions with
-  `sessions_omitted`; names travel with `notice: vendorNotice`). Both registered by
-  `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
+  `sessions_omitted`; names travel with `notice: vendorNotice`).
+  `nutrition.go`: `nutrition_day` (no item on the date = `no_data`, hint by cause; totals per nutrient with
+  `items_reporting`/`complete`, null when no item reports it; per_meal in BREAKFAST, LUNCH, DINNER, SNACK order, then
+  other types, then `UNSPECIFIED` (types compared via `metrics.NormalizeMealType`); at most 60 items listed, totals
+  over all; the protein delta and `protein_g_per_kg` from a partial total marked `protein_g_lower_bound`; the kcal
+  delta and the energy balance null whenever they would show a deficit that did not happen, with the reason in
+  `kcal_delta_unavailable` / `energy_balance.unavailable` (partial kcal, food from another platform or unreadable,
+  band not worn, no total calories, today, likely incomplete log; checked in that order); balance and burn rounded
+  to 50 kcal; without a kcal target the log check uses half the calories burned; `likely_incomplete` never raised
+  today; `notice` = `nutritionNotice` (data, not instructions; trend over days; no encouragement of very low intake;
+  doctor or registered dietitian referral)). All three
+  registered by `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned
   targets, health items, labs upsert by date+analyte, preferences, notes with FTS5) and the

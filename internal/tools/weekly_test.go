@@ -116,6 +116,12 @@ func TestWeeklyReportClosedWeek(t *testing.T) {
 	metric(t, "efficiency", get(data, "sleep", "efficiency_pct"), 88.9, 89.4, 89.4, "flat", 7, 7, 28)
 	metric(t, "onset", get(data, "sleep", "onset_sd_min"), 0, 0, 0, "flat", 7, 7, 28)
 	metric(t, "body fat", get(data, "body", "body_fat_pct"), nil, nil, nil, "unknown", 0, 0, 0)
+	if get(data, "body", "body_fat_pct", "trend_unavailable") != "insufficient_days" {
+		t.Errorf("body fat %v", get(data, "body", "body_fat_pct"))
+	}
+	if r := get(data, "cardio", "resting_hr_bpm", "trend_unavailable"); r != nil {
+		t.Errorf("resting HR trend_unavailable %v", r)
+	}
 
 	w := get(data, "body", "weight_kg")
 	this, _ := get(w, "this_week").(float64)
@@ -123,21 +129,29 @@ func TestWeeklyReportClosedWeek(t *testing.T) {
 	if this == 0 || prev == 0 || this >= prev || get(w, "trend") != "down" || get(w, "n_days") != 7.0 {
 		t.Errorf("weight %v", w)
 	}
+	// The 28-day average is the raw weigh-ins 09-07..10-04: 80 − 0.1·13.5.
+	if avg, _ := get(w, "avg_28d").(float64); avg < 78.6 || avg > 78.7 || get(w, "avg_28d_n_days") != 28.0 {
+		t.Errorf("weight avg_28d %v", w)
+	}
 	body := get(data, "body")
 	if get(body, "weight_slope_kg_per_week") != -0.7 || get(body, "weight_slope_n_days") != 28.0 ||
-		get(body, "last_weigh_in") != "2026-10-11" || get(body, "weight_age_days") != 0.0 {
+		get(body, "weight_slope_span_days") != 27.0 || get(body, "last_weigh_in") != "2026-10-11" ||
+		get(body, "weight_age_days") != 0.0 {
 		t.Errorf("body %v", body)
 	}
 
 	ad := get(data, "adherence")
 	// Counted for kcal: 10-05..07, 09, 10. Left out: 10-08 (food from
 	// another platform) and 10-11 (snacks only).
-	if k := get(ad, "kcal_within_10pct"); get(k, "days_counted") != 5.0 || get(k, "days_hit") != 5.0 || get(k, "pct") != 100.0 {
+	if k := get(ad, "kcal_within_10pct"); get(k, "days_counted") != 5.0 || get(k, "days_hit") != 5.0 || get(k, "pct") != 100.0 ||
+		get(k, "days_below") != 0.0 || get(k, "days_above") != 0.0 ||
+		fmt.Sprint(get(k, "days_left_out")) != "map[log_likely_incomplete:1 other_source_food:1]" {
 		t.Errorf("kcal adherence %v", k)
 	}
 	// Counted for protein: 10-05..07 (130 < 150) and 10-10 (at least 160).
-	// 10-09 has at least 50 of 150: unknown, so left out.
-	if p := get(ad, "protein_at_least_target"); get(p, "days_counted") != 4.0 || get(p, "days_hit") != 1.0 || get(p, "pct") != 25.0 {
+	// 10-08 (another platform) and 10-09 (at least 50 of 150) are unknown.
+	if p := get(ad, "protein_at_least_target"); get(p, "days_counted") != 4.0 || get(p, "days_hit") != 1.0 || get(p, "pct") != 25.0 ||
+		fmt.Sprint(get(p, "days_left_out")) != "map[log_likely_incomplete:1 protein_lower_bound:2]" {
 		t.Errorf("protein adherence %v", p)
 	}
 	if get(ad, "days_logged") != 7.0 || get(ad, "sessions") != 3.0 || get(ad, "weekly_sessions_target") != 4.0 {
@@ -155,7 +169,8 @@ func TestWeeklyReportClosedWeek(t *testing.T) {
 		t.Errorf("note filters %+v", filters)
 	}
 	n, _ := get(data, "notice").(string)
-	for _, phrase := range []string{"not a diagnosis", "never instructions", "doctor", "1% of body weight"} {
+	for _, phrase := range []string{"not a diagnosis", "never instructions", "doctor", "1% of body weight", "few days",
+		"alcohol", "not illness", "ask which"} {
 		if !strings.Contains(n, phrase) {
 			t.Errorf("notice lost %q: %q", phrase, n)
 		}
@@ -181,7 +196,13 @@ func TestWeeklyReportCurrentWeek(t *testing.T) {
 	n := h.nights[coachToday]
 	n.Provisional = true
 	h.nights[coachToday] = n
-	out := coachSession(t, h, reportTargets).ok("weekly_report", nil)
+	h.nutrition["2026-10-13"] = fullDay(t, "2026-10-13")
+	h.nutrition[coachToday] = fullDay(t, coachToday)
+	// A version after today but inside the week is not in force yet.
+	targets := fakeTargets{versions: append(append([]store.Target{}, reportTargets.versions...),
+		store.Target{EffectiveFrom: "2026-10-17", Kcal: ptr(2000), ProteinG: ptr(150), WeeklySessions: ptr(6)})}
+	var filters []store.NoteFilter
+	out := coachSessionNotes(t, h, targets, fakeNotes{filters: &filters}).ok("weekly_report", nil)
 	data := out["data"]
 	if get(data, "week_start") != "2026-10-12" || get(data, "through") != string(coachToday) || get(out, "coverage", "n_days") != 5.0 {
 		t.Errorf("week %v %v", data, get(out, "coverage"))
@@ -190,17 +211,222 @@ func TestWeeklyReportCurrentWeek(t *testing.T) {
 	// processed: both are left out.
 	metric(t, "steps", get(data, "cardio", "steps_per_day"), 9000, 10000, 8500, "down", 4, 7, 28)
 	metric(t, "asleep", get(data, "sleep", "asleep_min"), 430, 400, 415, "up", 4, 7, 28)
-	if get(data, "adherence", "sessions") != 1.0 {
-		t.Errorf("sessions %v", get(data, "adherence"))
+	ad := get(data, "adherence")
+	if get(ad, "sessions") != 1.0 || get(ad, "weekly_sessions_target") != 4.0 {
+		t.Errorf("sessions %v", ad)
+	}
+	// Today's log is still growing: left out of both, never a miss.
+	if k := get(ad, "kcal_within_10pct"); get(k, "days_counted") != 1.0 || fmt.Sprint(get(k, "days_left_out")) != "map[partial_day:1]" {
+		t.Errorf("kcal adherence %v", k)
+	}
+	if p := get(ad, "protein_at_least_target"); get(p, "days_counted") != 1.0 || fmt.Sprint(get(p, "days_left_out")) != "map[partial_day:1]" {
+		t.Errorf("protein adherence %v", p)
+	}
+	// Weight is read up to today, not up to the Sunday.
+	body := get(data, "body")
+	if get(body, "last_weigh_in") != string(coachToday) || get(body, "weight_age_days") != 0.0 ||
+		get(body, "weight_slope_n_days") != 28.0 || get(body, "weight_slope_span_days") != 27.0 || get(body, "weight_slope_kg_per_week") != -0.7 {
+		t.Errorf("body %v", body)
 	}
 	for _, f := range []string{"partial_day", "provisional_sleep"} {
 		if !hasFlag(out, f) {
 			t.Errorf("flags %v lack %s", get(out, "quality_flags"), f)
 		}
 	}
-	// No store for notes: no decisions, not an error.
+	if len(filters) != 1 || filters[0].Since != "2026-10-12" || filters[0].Until != coachToday {
+		t.Errorf("note filters %+v", filters)
+	}
 	if fmt.Sprint(get(data, "decisions_this_week")) != "[]" {
 		t.Errorf("decisions %v", get(data, "decisions_this_week"))
+	}
+}
+
+func TestWeeklyReportProvisionalFlagOnlyForTheWeek(t *testing.T) {
+	h := weeklyHealth(t)
+	n := h.nights["2026-09-10"]
+	n.Provisional = true
+	h.nights["2026-09-10"] = n
+	out := coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})
+	if hasFlag(out, "provisional_sleep") {
+		t.Errorf("a baseline night raised the flag: %v", get(out, "quality_flags"))
+	}
+	n = h.nights["2026-10-07"]
+	n.Provisional = true
+	h.nights["2026-10-07"] = n
+	out = coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})
+	if !hasFlag(out, "provisional_sleep") {
+		t.Errorf("flags %v", get(out, "quality_flags"))
+	}
+}
+
+func TestWeeklyReportTrendNeedsDays(t *testing.T) {
+	h := weeklyHealth(t)
+	// Three nights this week: too few for a trend.
+	for _, d := range []coach.LocalDate{"2026-10-08", "2026-10-09", "2026-10-10", "2026-10-11"} {
+		delete(h.nights, d)
+	}
+	// Resting HR from 10-01 only: 4 days last week, but a 4-day baseline.
+	for d := historyStart; d < "2026-10-01"; d = addDays(t, d, 1) {
+		delete(h.resting, d)
+	}
+	data := coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})["data"]
+	for _, c := range []struct {
+		section, key, reason string
+	}{
+		{"sleep", "asleep_min", "insufficient_days"},
+		{"sleep", "efficiency_pct", "insufficient_days"},
+		{"sleep", "onset_sd_min", "insufficient_days"},
+		{"cardio", "hrv_ms", "insufficient_days"},
+		{"cardio", "resting_hr_bpm", "insufficient_baseline"},
+	} {
+		m := get(data, c.section, c.key)
+		if get(m, "trend") != "unknown" || get(m, "trend_unavailable") != c.reason || get(m, "this_week") == nil {
+			t.Errorf("%s %v, want unknown for %s", c.key, m, c.reason)
+		}
+	}
+	if m := get(data, "cardio", "steps_per_day"); get(m, "trend") != "up" {
+		t.Errorf("steps %v", m)
+	}
+}
+
+func TestWeeklyReportTrendNoise(t *testing.T) {
+	h := weeklyHealth(t)
+	// Resting HR swings 50/66 before the previous week: a 2 bpm change
+	// between weeks is inside that spread.
+	for i, d := 0, historyStart; d < prevWeekStart; i, d = i+1, addDays(t, d, 1) {
+		h.resting[d] = healthdata.RestingHR{BPM: 50 + 16*float64(i%2), Method: "WITH_SLEEP"}
+	}
+	data := coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})["data"]
+	if m := get(data, "cardio", "resting_hr_bpm"); get(m, "trend") != "flat" || get(m, "trend_unavailable") != nil {
+		t.Errorf("resting HR %v", m)
+	}
+}
+
+// constantHealth has the same value every day before the week under review
+// and value+delta in it, for one metric; the other metrics stay constant.
+func constantHealth(t *testing.T, metric string, delta float64) *fakeHealth {
+	t.Helper()
+	h := &fakeHealth{
+		nights: map[coach.LocalDate]healthdata.Night{}, resting: map[coach.LocalDate]healthdata.RestingHR{},
+		activity: map[coach.LocalDate]healthdata.ActivityDay{}, weight: map[coach.LocalDate]healthdata.Reading{},
+		bodyFat: map[coach.LocalDate]healthdata.Reading{},
+	}
+	for i, d := 0, historyStart; d <= weekEnd; i, d = i+1, addDays(t, d, 1) {
+		in := func(m string) float64 {
+			if m == metric && d >= weekStart {
+				return delta
+			}
+			return 0
+		}
+		inBed := 470.0
+		if metric == "onset" && d >= weekStart {
+			inBed += delta * float64(1-2*(i%2)) // bedtimes alternate ±delta
+		}
+		h.nights[d] = night(t, d, 420+in("asleep"), inBed+in("asleep"), f64(50+in("hrv")))
+		h.resting[d] = healthdata.RestingHR{BPM: 60 + in("resting"), Method: "WITH_SLEEP"}
+		h.activity[d] = healthdata.ActivityDay{Steps: f64(8000 + in("steps")), AZM: f64(20 + in("azm")), TotalKcal: f64(2600), Worn: true}
+		h.weight[d] = healthdata.Reading{Value: 80 + in("weight"), Source: "Synthetic scale"}
+		h.bodyFat[d] = healthdata.Reading{Value: 20 + in("fat"), Source: "Synthetic scale"}
+	}
+	return h
+}
+
+func TestWeeklyReportTrendThresholds(t *testing.T) {
+	for _, c := range []struct {
+		metric, section, key string
+		threshold            float64
+	}{
+		{"resting", "cardio", "resting_hr_bpm", trendRestingHRBPM},
+		{"hrv", "cardio", "hrv_ms", trendHRVMS},
+		{"steps", "cardio", "steps_per_day", trendSteps},
+		{"azm", "cardio", "azm_per_day", trendAZMMin},
+		{"asleep", "sleep", "asleep_min", trendAsleepMin},
+		{"fat", "body", "body_fat_pct", trendBodyFatPct},
+		// The smoothed weight moves 87% of the way in a week of daily
+		// weigh-ins: 1.5× the threshold still passes it, 0.5× does not.
+		{"weight", "body", "weight_kg", trendWeightKg},
+	} {
+		for factor, want := range map[float64]string{1.5: "up", 0.5: "flat", -0.5: "flat", -1.5: "down"} {
+			h := constantHealth(t, c.metric, factor*c.threshold)
+			m := get(coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})["data"], c.section, c.key)
+			if get(m, "trend") != want {
+				t.Errorf("%s at %v× the threshold: %v, want %s", c.metric, factor, m, want)
+			}
+		}
+	}
+	// Bedtime spread grows from 0: past the threshold it is up.
+	for delta, want := range map[float64]string{1.5 * trendOnsetSDMin: "up", 0.5 * trendOnsetSDMin: "flat"} {
+		m := get(coachSession(t, constantHealth(t, "onset", delta), reportTargets).ok("weekly_report",
+			map[string]any{"week_end": string(weekEnd)})["data"], "sleep", "onset_sd_min")
+		if get(m, "trend") != want {
+			t.Errorf("onset spread ±%v: %v, want %s", delta, m, want)
+		}
+	}
+}
+
+func TestWeeklyReportWeightSlopeNeedsSpread(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		days    []coach.LocalDate
+		set     bool
+		n, span float64
+	}{
+		{"three weigh-ins", []coach.LocalDate{"2026-09-20", "2026-10-01", "2026-10-11"}, false, 3, 21},
+		{"four in 10 days", []coach.LocalDate{"2026-10-02", "2026-10-05", "2026-10-08", "2026-10-11"}, false, 4, 9},
+		{"four over 14 days", []coach.LocalDate{"2026-09-27", "2026-10-02", "2026-10-07", "2026-10-11"}, true, 4, 14},
+	} {
+		h := weeklyHealth(t)
+		h.weight = map[coach.LocalDate]healthdata.Reading{}
+		for i, d := range c.days {
+			h.weight[d] = healthdata.Reading{Value: 80 - 0.2*float64(i), Source: "Synthetic scale"}
+		}
+		body := get(coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)}), "data", "body")
+		if (get(body, "weight_slope_kg_per_week") != nil) != c.set || get(body, "weight_slope_n_days") != c.n ||
+			get(body, "weight_slope_span_days") != c.span {
+			t.Errorf("%s: body %v", c.name, body)
+		}
+	}
+}
+
+func TestWeeklyReportAdherenceDetail(t *testing.T) {
+	h := weeklyHealth(t)
+	h.nutrition["2026-10-05"] = foodDay(t, "2026-10-05", // 1700 kcal: below the band; protein 150 complete
+		foodSpec{12, "LUNCH", map[string]float64{"kcal": 900, "protein_g": 80}, nil},
+		foodSpec{20, "DINNER", map[string]float64{"kcal": 800, "protein_g": 70}, nil})
+	h.nutrition["2026-10-06"] = foodDay(t, "2026-10-06", // 2500 kcal: above; protein 100 complete
+		foodSpec{12, "LUNCH", map[string]float64{"kcal": 1300, "protein_g": 50}, nil},
+		foodSpec{20, "DINNER", map[string]float64{"kcal": 1200, "protein_g": 50}, nil})
+	h.nutrition["2026-10-07"] = foodDay(t, "2026-10-07", // at least 150 of 150: a sure hit
+		foodSpec{12, "LUNCH", map[string]float64{"kcal": 1000, "protein_g": 150}, nil},
+		foodSpec{20, "DINNER", map[string]float64{"kcal": 1000}, nil})
+	delete(h.nutrition, "2026-10-10")
+	ad := get(coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)}), "data", "adherence")
+	// Counted: 10-05 below, 10-06 above, 10-07 and 10-09 within.
+	if k := get(ad, "kcal_within_10pct"); get(k, "days_counted") != 4.0 || get(k, "days_hit") != 2.0 || get(k, "pct") != 50.0 ||
+		get(k, "days_below") != 1.0 || get(k, "days_above") != 1.0 ||
+		fmt.Sprint(get(k, "days_left_out")) != "map[log_likely_incomplete:1 other_source_food:1]" {
+		t.Errorf("kcal adherence %v", k)
+	}
+	if p := get(ad, "protein_at_least_target"); get(p, "days_counted") != 3.0 || get(p, "days_hit") != 2.0 || get(p, "pct") != 66.7 ||
+		fmt.Sprint(get(p, "days_left_out")) != "map[log_likely_incomplete:1 protein_lower_bound:2]" {
+		t.Errorf("protein adherence %v", p)
+	}
+	if get(ad, "days_logged") != 6.0 {
+		t.Errorf("adherence %v", ad)
+	}
+}
+
+func TestWeeklyReportPartialTargets(t *testing.T) {
+	targets := fakeTargets{versions: []store.Target{{EffectiveFrom: "2026-10-01", Kcal: ptr(2000)}}}
+	ad := get(coachSession(t, weeklyHealth(t), targets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)}), "data", "adherence")
+	if h, _ := get(ad, "target_hint").(string); !strings.Contains(h, "No protein, weekly sessions target") {
+		t.Errorf("hint %q", h)
+	}
+	if k := get(ad, "kcal_within_10pct"); get(k, "days_counted") != 5.0 {
+		t.Errorf("kcal adherence %v", k)
+	}
+	if p := get(ad, "protein_at_least_target"); get(p, "days_counted") != 0.0 || get(p, "days_left_out", "no_target") != 6.0 {
+		t.Errorf("protein adherence %v", p)
 	}
 }
 
@@ -228,6 +454,12 @@ func TestWeeklyReportWeekWithoutWeighIn(t *testing.T) {
 		t.Errorf("body %v flags %v", get(out, "data", "body"), get(out, "quality_flags"))
 	}
 
+	h.weight["2026-09-27"] = healthdata.Reading{Value: 80, Source: "Synthetic scale"}
+	out = coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})
+	if get(out, "data", "body", "weight_age_days") != 14.0 || hasFlag(out, "stale_weight") {
+		t.Errorf("14 days: body %v flags %v", get(out, "data", "body"), get(out, "quality_flags"))
+	}
+
 	h.weight = nil
 	out = coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)})
 	body := get(out, "data", "body")
@@ -248,6 +480,10 @@ func TestWeeklyReportWithoutTargets(t *testing.T) {
 			}
 			if h, _ := get(ad, "target_hint").(string); get(ad, "weekly_sessions_target") != nil || !strings.Contains(h, "targets_set") {
 				t.Errorf("adherence %v", ad)
+			}
+			// The log reasons come first: 10-08 and 10-11 keep theirs.
+			if got := fmt.Sprint(get(ad, "kcal_within_10pct", "days_left_out")); got != "map[log_likely_incomplete:1 no_target:5 other_source_food:1]" {
+				t.Errorf("kcal left out %s", got)
 			}
 		})
 	}
@@ -286,6 +522,33 @@ func TestWeeklyReportFlagsExcludedRecords(t *testing.T) {
 	for _, f := range []string{"unreadable_records", "other_source_food_excluded", "other_source_sessions_excluded"} {
 		if !hasFlag(out, f) {
 			t.Errorf("flags %v lack %s", get(out, "quality_flags"), f)
+		}
+	}
+	// An unreadable food record has no known day: any day may miss it, as in
+	// nutrition_day. Only 10-10's protein (at least 160 of 150) is sure.
+	ad := get(out, "data", "adherence")
+	if k := get(ad, "kcal_within_10pct"); get(k, "days_counted") != 0.0 ||
+		fmt.Sprint(get(k, "days_left_out")) != "map[other_source_food:1 unreadable_food:6]" {
+		t.Errorf("kcal adherence %v", k)
+	}
+	if p := get(ad, "protein_at_least_target"); get(p, "days_counted") != 1.0 || get(p, "days_hit") != 1.0 ||
+		fmt.Sprint(get(p, "days_left_out")) != "map[log_likely_incomplete:1 protein_lower_bound:5]" {
+		t.Errorf("protein adherence %v", p)
+	}
+}
+
+func TestWeeklyReportUnreadableRecordsPerSource(t *testing.T) {
+	for name, set := range map[string]func(*fakeHealth){
+		"recovery":  func(h *fakeHealth) { h.recovery.Skipped = 1 },
+		"activity":  func(h *fakeHealth) { h.activitySkipped = 1 },
+		"body":      func(h *fakeHealth) { h.bodySkipped = 1 },
+		"nutrition": func(h *fakeHealth) { h.nutritionSkip = 1 },
+		"exercises": func(h *fakeHealth) { h.exercises.Skipped = 1 },
+	} {
+		h := weeklyHealth(t)
+		set(h)
+		if out := coachSession(t, h, reportTargets).ok("weekly_report", map[string]any{"week_end": string(weekEnd)}); !hasFlag(out, "unreadable_records") {
+			t.Errorf("%s: flags %v", name, get(out, "quality_flags"))
 		}
 	}
 }

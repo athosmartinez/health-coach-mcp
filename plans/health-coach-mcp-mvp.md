@@ -484,4 +484,7 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   and the cache gains the `sleep_end_min_of_day` key (a cached night without it is a miss and is fetched again).
 - 2026-10-21 — Step 8: `healthdata.FoodItem` carries its `Source` label so `nutrition_day` lists the food log's source.
 - 2026-10-21 — Step 9: `store.NoteFilter.Until`, `healthdata.Nutrition.OtherSourceDays`, `tools.CoachDeps.Notes`;
-  stale weight added to `nutrition_day`.
+  stale weight added to `nutrition_day`. Review: trends need 4 days per week and pass the 28-day noise
+  (k = 1 standard error of the difference); weight slope needs 4 weigh-ins over 14 days; adherence counts
+  left-out days by reason and kcal misses by direction (`metrics.Adherence.Below/Above`); `metric_series` food
+  uses `checkFood` per day.

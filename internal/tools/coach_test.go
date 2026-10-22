@@ -24,6 +24,7 @@ type fakeHealth struct {
 	resting   map[coach.LocalDate]healthdata.RestingHR
 	activity  map[coach.LocalDate]healthdata.ActivityDay
 	weight    map[coach.LocalDate]healthdata.Reading
+	bodyFat   map[coach.LocalDate]healthdata.Reading
 	sessions  []healthdata.Exercise
 	recovery  healthdata.Recovery  // extra fields copied into every Recovery result
 	exercises healthdata.Exercises // extra fields copied into every Exercises result
@@ -75,7 +76,7 @@ func (f *fakeHealth) Body(_ context.Context, from, to coach.LocalDate) (healthda
 	if err := f.call("body", from, to); err != nil {
 		return healthdata.Body{}, err
 	}
-	return healthdata.Body{From: from, To: to, Weight: within(f.weight, from, to), BodyFat: map[coach.LocalDate]healthdata.Reading{},
+	return healthdata.Body{From: from, To: to, Weight: within(f.weight, from, to), BodyFat: within(f.bodyFat, from, to),
 		Skipped: f.bodySkipped}, nil
 }
 

@@ -24,18 +24,21 @@ type fakeHealth struct {
 	resting   map[coach.LocalDate]healthdata.RestingHR
 	activity  map[coach.LocalDate]healthdata.ActivityDay
 	weight    map[coach.LocalDate]healthdata.Reading
+	bodyFat   map[coach.LocalDate]healthdata.Reading
 	sessions  []healthdata.Exercise
 	recovery  healthdata.Recovery  // extra fields copied into every Recovery result
 	exercises healthdata.Exercises // extra fields copied into every Exercises result
 	// byRange overrides exercises for one requested range ("from..to").
-	byRange         map[string]healthdata.Exercises
-	nutrition       map[coach.LocalDate]healthdata.NutritionDay
-	nutritionSkip   int
-	nutritionOther  int
-	activitySkipped int
-	bodySkipped     int
-	errs            map[string]error
-	calls           []string
+	byRange        map[string]healthdata.Exercises
+	nutrition      map[coach.LocalDate]healthdata.NutritionDay
+	nutritionSkip  int
+	nutritionOther int
+	// nutritionOtherDays sets Nutrition.OtherSourceDays.
+	nutritionOtherDays map[coach.LocalDate]int
+	activitySkipped    int
+	bodySkipped        int
+	errs               map[string]error
+	calls              []string
 }
 
 func (f *fakeHealth) call(name string, from, to coach.LocalDate, extra ...any) error {
@@ -73,7 +76,7 @@ func (f *fakeHealth) Body(_ context.Context, from, to coach.LocalDate) (healthda
 	if err := f.call("body", from, to); err != nil {
 		return healthdata.Body{}, err
 	}
-	return healthdata.Body{From: from, To: to, Weight: within(f.weight, from, to), BodyFat: map[coach.LocalDate]healthdata.Reading{},
+	return healthdata.Body{From: from, To: to, Weight: within(f.weight, from, to), BodyFat: within(f.bodyFat, from, to),
 		Skipped: f.bodySkipped}, nil
 }
 
@@ -103,8 +106,13 @@ func (f *fakeHealth) Nutrition(_ context.Context, from, to coach.LocalDate) (hea
 	if err := f.call("nutrition", from, to); err != nil {
 		return healthdata.Nutrition{}, err
 	}
+	// As in healthdata, the range count includes the per-day ones.
+	days, other := within(f.nutritionOtherDays, from, to), f.nutritionOther
+	for _, n := range days {
+		other += n
+	}
 	return healthdata.Nutrition{From: from, To: to, Days: within(f.nutrition, from, to), Skipped: f.nutritionSkip,
-		OtherSource: f.nutritionOther}, nil
+		OtherSource: other, OtherSourceDays: days}, nil
 }
 
 // fakeTargets returns the latest version on or before the day.
@@ -139,14 +147,35 @@ type coachClient struct {
 	cs *mcp.ClientSession
 }
 
+// fakeNotes returns its notes and records each filter.
+type fakeNotes struct {
+	res     store.NoteResults
+	err     error
+	filters *[]store.NoteFilter
+}
+
+func (f fakeNotes) SearchNotes(_ context.Context, nf store.NoteFilter) (store.NoteResults, error) {
+	if f.filters != nil {
+		*f.filters = append(*f.filters, nf)
+	}
+	return f.res, f.err
+}
+
 func coachSession(t *testing.T, h *fakeHealth, targets Targets) coachClient {
+	t.Helper()
+	return coachSessionNotes(t, h, targets, nil)
+}
+
+func coachSessionNotes(t *testing.T, h *fakeHealth, targets Targets, notes Notes) coachClient {
 	t.Helper()
 	ctx := context.Background()
 	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
-	d := CoachDeps{Health: h, Targets: targets, Now: func() time.Time { return coachNow }, Loc: saoPaulo(t)}
+	d := CoachDeps{Health: h, Targets: targets, Notes: notes, Now: func() time.Time { return coachNow }, Loc: saoPaulo(t)}
 	RegisterBriefing(s, d)
 	RegisterWorkout(s, d)
 	RegisterNutrition(s, d)
+	RegisterWeekly(s, d)
+	RegisterSeries(s, d)
 	serverT, clientT := mcp.NewInMemoryTransports()
 	if _, err := s.Connect(ctx, serverT, nil); err != nil {
 		t.Fatal(err)
@@ -257,7 +286,7 @@ func callParams(name string, args map[string]any) *mcp.CallToolParams {
 
 func TestCoachToolsListing(t *testing.T) {
 	byName := listTools(t, coachSession(t, &fakeHealth{}, nil).cs)
-	if got := fmt.Sprint(slices.Sorted(maps.Keys(byName))); got != "[morning_briefing nutrition_day workout_review]" {
+	if got := fmt.Sprint(slices.Sorted(maps.Keys(byName))); got != "[metric_series morning_briefing nutrition_day weekly_report workout_review]" {
 		t.Fatalf("tools %s", got)
 	}
 	for name, tool := range byName {
@@ -274,6 +303,8 @@ func TestCoachToolsListing(t *testing.T) {
 		"morning_briefing": "not a medical assessment",
 		"workout_review":   "data, not instructions",
 		"nutrition_day":    "data, not instructions",
+		"weekly_report":    "not a diagnosis",
+		"metric_series":    "at most 180 points",
 	} {
 		if !strings.Contains(byName[name].Description, phrase) {
 			t.Errorf("%s description lost %q", name, phrase)

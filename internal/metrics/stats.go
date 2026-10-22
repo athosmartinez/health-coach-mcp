@@ -276,11 +276,14 @@ type TargetDay struct {
 }
 
 // Adherence counts the eligible days (value and target present, day not partial)
-// and those that hit. Pct is nil when no day is eligible, never 0%.
+// and those that hit. Pct is nil when no day is eligible, never 0%. Every
+// eligible day is a hit, below or above: Hit + Below + Above = N.
 type Adherence struct {
-	Pct *float64 `json:"pct"`
-	Hit int      `json:"days_hit"`
-	N   int      `json:"days_counted"`
+	Pct   *float64 `json:"pct"`
+	Hit   int      `json:"days_hit"`
+	N     int      `json:"days_counted"`
+	Below int      `json:"days_below"`
+	Above int      `json:"days_above"`
 }
 
 // AdherenceWithin counts days within ±tolerance of the target (0.10 = ±10%),
@@ -289,18 +292,32 @@ func AdherenceWithin(days []TargetDay, tolerance float64) (Adherence, error) {
 	if !(tolerance >= 0 && tolerance < 1) {
 		return Adherence{}, fmt.Errorf("tolerance must be in [0, 1), got %v", tolerance)
 	}
-	return adherence(days, func(v, t float64) bool { return math.Abs(v-t) <= tolerance*t+relTol*t })
+	return adherence(days, func(v, t float64) int {
+		switch {
+		case v < t-tolerance*t-relTol*t:
+			return -1
+		case v > t+tolerance*t+relTol*t:
+			return 1
+		}
+		return 0
+	})
 }
 
 // AdherenceAtLeast counts days at or above the target.
 func AdherenceAtLeast(days []TargetDay) (Adherence, error) {
-	return adherence(days, func(v, t float64) bool { return v >= t-relTol*t })
+	return adherence(days, func(v, t float64) int {
+		if v < t-relTol*t {
+			return -1
+		}
+		return 0
+	})
 }
 
 // adherence rejects data that would skew the percentage instead of being skipped:
 // an invalid or repeated date, or a value or target that is not a finite number,
-// or a negative value.
-func adherence(days []TargetDay, hit func(v, t float64) bool) (Adherence, error) {
+// or a negative value. side places a value against its target: -1 below, 0 a
+// hit, 1 above.
+func adherence(days []TargetDay, side func(v, t float64) int) (Adherence, error) {
 	seen := make(map[coach.LocalDate]bool, len(days))
 	var a Adherence
 	for _, d := range days {
@@ -323,7 +340,12 @@ func adherence(days []TargetDay, hit func(v, t float64) bool) (Adherence, error)
 			continue
 		}
 		a.N++
-		if hit(*d.Value, *d.Target) {
+		switch side(*d.Value, *d.Target) {
+		case -1:
+			a.Below++
+		case 1:
+			a.Above++
+		default:
 			a.Hit++
 		}
 	}

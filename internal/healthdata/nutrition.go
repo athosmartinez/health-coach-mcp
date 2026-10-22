@@ -67,10 +67,14 @@ func (n NutritionDay) Complete(nutrient string) bool {
 
 // Nutrition holds the logged days of [From, To]; a day without items is absent.
 type Nutrition struct {
-	From, To    coach.LocalDate
-	Days        map[coach.LocalDate]NutritionDay
+	From, To coach.LocalDate
+	Days     map[coach.LocalDate]NutritionDay
+	// Skipped counts unreadable records; their day is unknown.
 	Skipped     int
 	OtherSource int
+	// OtherSourceDays counts per day the records left out for coming from
+	// another platform, so a day's intake can be known to miss food.
+	OtherSourceDays map[coach.LocalDate]int
 }
 
 // Series returns one point per day with the day's total of nutrient, nil on a
@@ -120,7 +124,7 @@ func (d *Data) Nutrition(ctx context.Context, from, to coach.LocalDate) (Nutriti
 		return Nutrition{}, err
 	}
 	today := coach.Today(d.now(), d.loc)
-	out := Nutrition{From: from, To: to, Days: map[coach.LocalDate]NutritionDay{}}
+	out := Nutrition{From: from, To: to, Days: map[coach.LocalDate]NutritionDay{}, OtherSourceDays: map[coach.LocalDate]int{}}
 	for _, raw := range raws {
 		item, err := parseFood(raw)
 		if item.At.IsZero() {
@@ -134,6 +138,7 @@ func (d *Data) Nutrition(ctx context.Context, from, to coach.LocalDate) (Nutriti
 		switch {
 		case errors.Is(err, errOtherSource):
 			out.OtherSource++
+			out.OtherSourceDays[day]++
 			continue
 		case err != nil:
 			out.Skipped++

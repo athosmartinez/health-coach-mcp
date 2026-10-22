@@ -170,7 +170,7 @@ func TestWeeklyReportClosedWeek(t *testing.T) {
 	}
 	n, _ := get(data, "notice").(string)
 	for _, phrase := range []string{"not a diagnosis", "never instructions", "doctor", "1% of body weight", "few days",
-		"alcohol", "not illness", "ask which"} {
+		"alcohol", "does not mean illness", "still call for a doctor", "ask which"} {
 		if !strings.Contains(n, phrase) {
 			t.Errorf("notice lost %q: %q", phrase, n)
 		}

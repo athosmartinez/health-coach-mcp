@@ -130,8 +130,10 @@ func TestNutritionDayClosedDay(t *testing.T) {
 			t.Errorf("targets.%s = %v, want %v", k, get(targets, k), want)
 		}
 	}
-	if _, ok := targets.(map[string]any)["target_hint"]; ok {
-		t.Errorf("hint with a target set: %v", targets)
+	for _, k := range []string{"target_hint", "kcal_delta_unavailable"} {
+		if _, ok := targets.(map[string]any)[k]; ok {
+			t.Errorf("%s with a full day and a target: %v", k, targets)
+		}
 	}
 
 	eb := get(data, "energy_balance")
@@ -155,7 +157,8 @@ func TestNutritionDayClosedDay(t *testing.T) {
 	if get(out, "coverage", "n_days") != 1.0 {
 		t.Errorf("coverage %v", get(out, "coverage"))
 	}
-	if n, _ := get(data, "notice").(string); !strings.Contains(n, "never as instructions") {
+	if n, _ := get(data, "notice").(string); !strings.Contains(n, "never as instructions") ||
+		!strings.Contains(n, "registered dietitian") || !strings.Contains(n, "read it as a trend") {
 		t.Errorf("notice %q", n)
 	}
 	want := []string{"nutrition 2026-10-14..2026-10-14", "activity 2026-10-14..2026-10-14", "body 2026-07-17..2026-10-14"}
@@ -250,7 +253,8 @@ func TestNutritionDayItemWithoutKcal(t *testing.T) {
 		get(eb, "total_calories_kcal") != 2600.0 {
 		t.Errorf("energy balance %v", eb)
 	}
-	if get(data, "targets", "kcal_delta") != nil || get(data, "targets", "protein_g_delta") != -60.0 ||
+	if get(data, "targets", "kcal_delta") != nil || get(data, "targets", "kcal_delta_unavailable") != "intake_partial" ||
+		get(data, "targets", "protein_g_delta") != -60.0 ||
 		get(data, "targets", "protein_g_lower_bound") != false {
 		t.Errorf("targets %v", get(data, "targets"))
 	}
@@ -282,8 +286,12 @@ func TestNutritionDayOnlySnacks(t *testing.T) {
 	// The intake behind a likely incomplete log is too low: its balance would
 	// read as a large deficit.
 	eb := get(data, "energy_balance")
-	if get(eb, "balance_kcal") != nil || get(eb, "unavailable") != "log_likely_incomplete" || get(eb, "intake_kcal") != 550.0 {
+	if get(eb, "balance_kcal") != nil || get(eb, "unavailable") != "log_likely_incomplete" || get(eb, "intake_kcal") != 550.0 ||
+		get(eb, "total_calories_kcal") != 2600.0 {
 		t.Errorf("energy balance %v", eb)
+	}
+	if tg := get(data, "targets"); get(tg, "kcal_delta") != nil || get(tg, "kcal_delta_unavailable") != "log_likely_incomplete" {
+		t.Errorf("targets %v", tg)
 	}
 	if !hasFlag(out, "likely_incomplete_nutrition") || hasFlag(out, "partial_day") {
 		t.Errorf("flags %v", get(out, "quality_flags"))
@@ -303,8 +311,13 @@ func TestNutritionDayTodayIsPartial(t *testing.T) {
 	if get(lc, "likely_incomplete") != false || get(lc, "has_main_meal") != false || get(lc, "kcal_pct_of_target") != 10.0 {
 		t.Errorf("logging %v", lc)
 	}
-	if get(data, "energy_balance", "balance_kcal") != -1300.0 {
-		t.Errorf("energy balance %v", get(data, "energy_balance"))
+	// Intake and burn are running totals: no deficit until the day closes.
+	if eb := get(data, "energy_balance"); get(eb, "balance_kcal") != nil || get(eb, "unavailable") != "partial_day" ||
+		get(eb, "intake_kcal") != 200.0 || get(eb, "total_calories_kcal") != 1500.0 {
+		t.Errorf("energy balance %v", eb)
+	}
+	if tg := get(data, "targets"); get(tg, "kcal_delta") != nil || get(tg, "kcal_delta_unavailable") != "partial_day" {
+		t.Errorf("targets %v", tg)
 	}
 	if !hasFlag(out, "partial_day") || hasFlag(out, "likely_incomplete_nutrition") {
 		t.Errorf("flags %v", get(out, "quality_flags"))
@@ -438,12 +451,31 @@ func TestNutritionDayNothingLogged(t *testing.T) {
 }
 
 func TestNutritionDayFlagsExcludedAndUnreadableRecords(t *testing.T) {
-	h := nutritionHealth(t)
-	h.nutritionSkip, h.nutritionOther = 1, 1
-	out := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})
-	if !hasFlag(out, "unreadable_records") || !hasFlag(out, "other_source_food_excluded") {
-		t.Errorf("flags %v", get(out, "quality_flags"))
+	for name, c := range map[string]struct {
+		skipped, other int
+		reason         string
+	}{
+		"both":         {1, 1, "other_source_food"},
+		"other source": {0, 1, "other_source_food"},
+		"unreadable":   {1, 0, "unreadable_food"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := nutritionHealth(t)
+			h.nutritionSkip, h.nutritionOther = c.skipped, c.other
+			out := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})
+			// Food missing from the log would read as a deficit.
+			data := out["data"]
+			if get(data, "energy_balance", "balance_kcal") != nil || get(data, "energy_balance", "unavailable") != c.reason ||
+				get(data, "targets", "kcal_delta") != nil || get(data, "targets", "kcal_delta_unavailable") != c.reason {
+				t.Errorf("data %v %v", get(data, "energy_balance"), get(data, "targets"))
+			}
+			if hasFlag(out, "unreadable_records") != (c.skipped > 0) || hasFlag(out, "other_source_food_excluded") != (c.other > 0) {
+				t.Errorf("flags %v", get(out, "quality_flags"))
+			}
+		})
 	}
+	h := nutritionHealth(t)
+	var out map[string]any
 	h = nutritionHealth(t)
 	h.bodySkipped = 1
 	out = coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})
@@ -467,5 +499,182 @@ func TestNutritionDayInputAndErrors(t *testing.T) {
 	if te := coachSession(t, nutritionHealth(t), fakeTargets{err: errors.New("synthetic failure")}).
 		fails("nutrition_day", map[string]any{"date": string(closedDay)}); te.Code != coach.CodeInternal {
 		t.Errorf("targets failure %+v", te)
+	}
+}
+
+func TestNutritionDayUnavailableReasonOrder(t *testing.T) {
+	snacks := func(t *testing.T, kcal bool) healthdata.NutritionDay {
+		second := map[string]float64{"protein_g": 10}
+		if kcal {
+			second["kcal"] = 250
+		}
+		return foodDay(t, closedDay,
+			foodSpec{10, "SNACK", map[string]float64{"kcal": 300, "protein_g": 20}, nil},
+			foodSpec{15, "SNACK", second, nil})
+	}
+	for name, c := range map[string]struct {
+		kcalOnEveryItem bool
+		activity        healthdata.ActivityDay
+		other           int
+		want            string
+	}{
+		"partial intake over not worn":       {false, healthdata.ActivityDay{TotalKcal: f64(1700)}, 0, "intake_partial"},
+		"partial intake over incomplete log": {false, healthdata.ActivityDay{TotalKcal: f64(2600), Worn: true}, 0, "intake_partial"},
+		"other source over not worn":         {true, healthdata.ActivityDay{TotalKcal: f64(1700)}, 1, "other_source_food"},
+		"not worn over incomplete log":       {true, healthdata.ActivityDay{TotalKcal: f64(1700)}, 0, "band_not_worn"},
+		"no burn over incomplete log":        {true, healthdata.ActivityDay{Worn: true}, 0, "no_total_calories"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := nutritionHealth(t)
+			h.nutrition[closedDay] = snacks(t, c.kcalOnEveryItem)
+			h.activity[closedDay], h.nutritionOther = c.activity, c.other
+			out := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})
+			if got := get(out, "data", "energy_balance", "unavailable"); got != c.want {
+				t.Errorf("unavailable = %v, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestNutritionDayWithoutTargetSmallLog(t *testing.T) {
+	h := nutritionHealth(t)
+	// One coffee logged as breakfast passes the main-meal check.
+	h.nutrition[closedDay] = foodDay(t, closedDay, foodSpec{8, "BREAKFAST", map[string]float64{"kcal": 30, "protein_g": 1}, nil})
+	out := coachSession(t, h, nil).ok("nutrition_day", map[string]any{"date": string(closedDay)})
+	data := out["data"]
+	if get(data, "logging_completeness", "likely_incomplete") != true || get(data, "logging_completeness", "kcal_pct_of_target") != nil {
+		t.Errorf("logging %v", get(data, "logging_completeness"))
+	}
+	if get(data, "energy_balance", "balance_kcal") != nil || get(data, "energy_balance", "unavailable") != "log_likely_incomplete" {
+		t.Errorf("energy balance %v", get(data, "energy_balance"))
+	}
+	// Without a target there is no delta, so no reason for one either.
+	if _, ok := get(data, "targets").(map[string]any)["kcal_delta_unavailable"]; ok {
+		t.Errorf("targets %v", get(data, "targets"))
+	}
+	if !hasFlag(out, "likely_incomplete_nutrition") {
+		t.Errorf("flags %v", get(out, "quality_flags"))
+	}
+	// The full day stays complete without a target: 2200 of 2600 burned.
+	out = coachSession(t, nutritionHealth(t), nil).ok("nutrition_day", map[string]any{"date": string(closedDay)})
+	if get(out, "data", "logging_completeness", "likely_incomplete") != false || get(out, "data", "energy_balance", "balance_kcal") != -400.0 {
+		t.Errorf("full day %v", get(out, "data", "energy_balance"))
+	}
+}
+
+func TestNutritionDayNoItemReportsProtein(t *testing.T) {
+	h := nutritionHealth(t)
+	h.nutrition[closedDay] = foodDay(t, closedDay,
+		foodSpec{12, "LUNCH", map[string]float64{"kcal": 1100}, nil},
+		foodSpec{20, "DINNER", map[string]float64{"kcal": 1000}, nil})
+	out := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})
+	data := out["data"]
+	if v, ok := get(data, "totals").(map[string]any)["protein_g"]; !ok || v != nil {
+		t.Errorf("protein total %v", v)
+	}
+	tg := get(data, "targets")
+	if get(tg, "protein_g_delta") != nil || get(tg, "protein_g_per_kg") != nil || get(tg, "protein_g_lower_bound") != false ||
+		get(tg, "kcal_delta") != 100.0 {
+		t.Errorf("targets %v", tg)
+	}
+	if !hasFlag(out, "partial_nutrient_totals") {
+		t.Errorf("flags %v", get(out, "quality_flags"))
+	}
+}
+
+func TestNutritionDayTargetHints(t *testing.T) {
+	for name, c := range map[string]struct {
+		target   store.Target
+		has, not string
+	}{
+		"protein only": {store.Target{EffectiveFrom: "2026-10-01", ProteinG: ptr(150)}, "No kcal target", "protein"},
+		"neither":      {store.Target{EffectiveFrom: "2026-10-01", WeeklySessions: ptr(4)}, "No kcal or protein target", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := coachSession(t, nutritionHealth(t), fakeTargets{versions: []store.Target{c.target}}).
+				ok("nutrition_day", map[string]any{"date": string(closedDay)})
+			tg := get(out, "data", "targets")
+			hint, _ := get(tg, "target_hint").(string)
+			if !strings.Contains(hint, c.has) || !strings.Contains(hint, "targets_set") || (c.not != "" && strings.Contains(hint, c.not)) {
+				t.Errorf("hint %q", hint)
+			}
+			if get(tg, "kcal_target") != nil || get(tg, "kcal_delta") != nil || get(out, "data", "logging_completeness", "kcal_pct_of_target") != nil {
+				t.Errorf("targets %v", tg)
+			}
+			if wantDelta := c.target.ProteinG != nil; (get(tg, "protein_g_delta") != nil) != wantDelta {
+				t.Errorf("protein delta %v", get(tg, "protein_g_delta"))
+			}
+		})
+	}
+}
+
+func TestNutritionDayRounding(t *testing.T) {
+	h := nutritionHealth(t)
+	h.nutrition[closedDay] = foodDay(t, closedDay,
+		foodSpec{12, "LUNCH", map[string]float64{"kcal": 1100.04, "protein_g": 0.1}, nil},
+		foodSpec{20, "DINNER", map[string]float64{"kcal": 1000.06, "protein_g": 0.2}, nil})
+	h.activity[closedDay] = healthdata.ActivityDay{TotalKcal: f64(2626.4), Worn: true}
+	h.weight = map[coach.LocalDate]healthdata.Reading{"2026-10-13": {Value: 80.04}}
+	data := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})["data"]
+	for path, want := range map[string]any{
+		"totals.kcal.value":                       2100.1,
+		"totals.protein_g.value":                  0.3,
+		"per_meal.0.items.0.nutrients.kcal":       1100.0,
+		"targets.kcal_delta":                      100.1,
+		"targets.protein_g_delta":                 -149.7,
+		"targets.weight_kg":                       80.0,
+		"energy_balance.total_calories_kcal":      2650.0, // nearest 50
+		"energy_balance.balance_kcal":             -550.0, // 2100.1 − 2626.4 = −526.3
+		"logging_completeness.kcal_pct_of_target": 105.0,
+	} {
+		if got := get(data, strings.Split(path, ".")...); got != want {
+			t.Errorf("%s = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestNutritionDayItemTimeIsLocal(t *testing.T) {
+	h := nutritionHealth(t)
+	nd := fullDay(t, closedDay)
+	nd.Items[1].At = nd.Items[1].At.UTC() // the API sends UTC instants
+	h.nutrition[closedDay] = nd
+	data := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})["data"]
+	if got := get(data, "per_meal", "1", "items", "0", "time"); got != "2026-10-14T12:00:00-03:00" {
+		t.Errorf("time %v", got)
+	}
+}
+
+func TestNutritionDayMealTypeSpelling(t *testing.T) {
+	h := nutritionHealth(t)
+	h.nutrition[closedDay] = foodDay(t, closedDay,
+		foodSpec{8, "lunch", map[string]float64{"kcal": 100}, nil},
+		foodSpec{9, " LUNCH ", map[string]float64{"kcal": 100}, nil},
+		foodSpec{10, "Late snack", map[string]float64{"kcal": 100}, nil},
+		foodSpec{11, "LATE-SNACK", map[string]float64{"kcal": 100}, nil},
+		foodSpec{12, "ZZZ", map[string]float64{"kcal": 100}, nil},
+		foodSpec{13, "  ", map[string]float64{"kcal": 100}, nil},
+	)
+	data := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})["data"]
+	var meals []string
+	for _, m := range get(data, "per_meal").([]any) {
+		meals = append(meals, fmt.Sprint(get(m, "meal_type"), "x", len(get(m, "items").([]any))))
+	}
+	if fmt.Sprint(meals) != "[LUNCHx2 LATE_SNACKx2 ZZZx1 UNSPECIFIEDx1]" {
+		t.Errorf("meals %v", meals)
+	}
+}
+
+func TestPerNutrientHasEveryNutrient(t *testing.T) {
+	seen := map[*int]bool{}
+	var p PerNutrient[int]
+	for _, k := range healthdata.Nutrients {
+		f := p.field(k)
+		if f == nil || seen[f] {
+			t.Errorf("nutrient %s has no slot of its own", k)
+		}
+		seen[f] = true
+	}
+	if p.field("alcohol_g") != nil {
+		t.Error("unknown nutrient has a slot")
 	}
 }

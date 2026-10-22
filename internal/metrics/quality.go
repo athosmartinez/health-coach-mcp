@@ -41,6 +41,10 @@ func IsVigorous(exerciseType string) bool { return vigorousTypes[normalize(exerc
 // IsMainMeal reports whether a meal type counts as a main meal.
 func IsMainMeal(mealType string) bool { return mainMeals[normalize(mealType)] }
 
+// NormalizeMealType is the form meal types are compared in: upper case, with
+// spaces and hyphens as underscores ("Late snack" = LATE_SNACK).
+func NormalizeMealType(mealType string) string { return normalize(mealType) }
+
 // Exercise is the part of a session the quality checks read.
 type Exercise struct {
 	Type        string

@@ -388,11 +388,18 @@ protein → partial total; only snacks → `likely_incomplete`.
   and `protein_g_per_kg` come from the partial total with `protein_g_lower_bound`. `partial_nutrient_totals` is raised for
   kcal and protein only (fiber, sugar and sodium are often absent from items, and no target reads them).
   `kcal_pct_of_target` uses the logged kcal even when partial, so a very low day stays visible.
-- `energy_balance` is null with `unavailable` = `intake_partial`, `band_not_worn` (or no activity row with no
-  unreadable records), `no_total_calories` or `log_likely_incomplete`, in that order. Today it is computed and the
-  envelope carries `partial_day`; `likely_incomplete` is never raised today ("partial day doesn't count as a failure").
+- `energy_balance` is null with `unavailable` = `intake_partial`, `other_source_food`, `unreadable_food`,
+  `band_not_worn` (or no activity row with no unreadable records), `no_total_calories`, `partial_day` or
+  `log_likely_incomplete`, in that order; the kcal delta is null for the intake reasons (`kcal_delta_unavailable`).
+  Review: each of these gaps would read as a deficit that did not happen, today included (both totals are still
+  running). `likely_incomplete` is never raised today ("partial day doesn't count as a failure"); without a kcal
+  target it compares intake with half the calories burned. Balance and burn round to 50 kcal (both estimates miss by
+  hundreds). The wording treats a likely incomplete day as "not logged or very low intake: ask which", and
+  `nutritionNotice` carries the guardrails in the output (no encouragement of very low intake, referral to a doctor
+  or registered dietitian). Deferred to Step 9: a stale-weight flag for `protein_g_per_kg` (the weight can be up to
+  90 days old; `weight_date` shows it).
 - `meals_logged` counts distinct meal types. `coverage.n_days` is 1: a single day, no baseline.
-- Food names are user-typed or from a food database: `notice` = `foodNotice`; at most 60 items per response
+- Food names are user-typed or from a food database: `notice` = `nutritionNotice`; at most 60 items per response
   (`items_omitted`, `food_items_truncated`), in time order across the day.
 - Known gap (healthdata): an `energy` object without `kcal` reads as 0 kcal (proto3 drops a zero), so if the API
   renamed that sub-field every item would read as 0 kcal instead of unknown. Watch for it in the Step 11 week.

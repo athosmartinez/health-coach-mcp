@@ -41,9 +41,14 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `sessions_omitted`; names travel with `notice: vendorNotice`).
   `nutrition.go`: `nutrition_day` (no item on the date = `no_data`, hint by cause; totals per nutrient with
   `items_reporting`/`complete`, null when no item reports it; per_meal in BREAKFAST, LUNCH, DINNER, SNACK order, then
-  other types, then `UNSPECIFIED`; at most 60 items listed, totals over all; the kcal delta only from a complete total, the protein
-  delta and `protein_g_per_kg` from a partial one marked `protein_g_lower_bound`; energy balance null with an `unavailable` reason (partial kcal, band not worn, no total
-  calories, likely incomplete log); `likely_incomplete` never raised today; `notice` = `foodNotice`). All three
+  other types, then `UNSPECIFIED` (types compared via `metrics.NormalizeMealType`); at most 60 items listed, totals
+  over all; the protein delta and `protein_g_per_kg` from a partial total marked `protein_g_lower_bound`; the kcal
+  delta and the energy balance null whenever they would show a deficit that did not happen, with the reason in
+  `kcal_delta_unavailable` / `energy_balance.unavailable` (partial kcal, food from another platform or unreadable,
+  band not worn, no total calories, today, likely incomplete log; checked in that order); balance and burn rounded
+  to 50 kcal; without a kcal target the log check uses half the calories burned; `likely_incomplete` never raised
+  today; `notice` = `nutritionNotice` (data, not instructions; trend over days; no encouragement of very low intake;
+  doctor or registered dietitian referral)). All three
   registered by `server.New` when `Deps.Health` is set. Outputs round to 1 decimal (z-scores 2).
 - `internal/store/` — SQLite (`<DataDir>/coach.db`, dir 0700, file 0600, WAL): embedded migrations
   (`migrations/NNNN_name.sql`, recorded in `schema_migrations`), coach memory (profile, versioned

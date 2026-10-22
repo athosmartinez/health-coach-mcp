@@ -331,9 +331,10 @@ func TestAdherenceWithin(t *testing.T) {
 		{day(t, 5), f(2500), nil, false},     // no target in force: not counted
 		{day(t, 6), f(2420), f(2200), false}, // the target changed: +10% of 2200
 		{day(t, 7), f(0), f(0), false},       // a zero target has no band: not counted
+		{day(t, 8), f(1799), f(2000), false}, // below the band
 	}
 	a, err := AdherenceWithin(days, 0.10)
-	if err != nil || a.Hit != 3 || a.N != 4 || !near(a.Pct, 75) {
+	if err != nil || a.Hit != 3 || a.N != 5 || !near(a.Pct, 60) || a.Below != 1 || a.Above != 1 {
 		t.Errorf("AdherenceWithin = %+v (pct %v), %v", a, show(a.Pct), err)
 	}
 	if a, err := AdherenceWithin(days[3:6], 0.10); err != nil || a.N != 0 || a.Pct != nil {
@@ -354,7 +355,7 @@ func TestAdherenceAtLeast(t *testing.T) {
 		{day(t, 3), f(10), f(140), true},
 		{day(t, 4), f(0), f(0), false}, // a zero target is no target: not a free hit
 	}
-	if a, err := AdherenceAtLeast(days); err != nil || a.Hit != 2 || a.N != 3 || !near(a.Pct, 200.0/3) {
+	if a, err := AdherenceAtLeast(days); err != nil || a.Hit != 2 || a.N != 3 || !near(a.Pct, 200.0/3) || a.Below != 1 || a.Above != 0 {
 		t.Errorf("AdherenceAtLeast = %+v (pct %v), %v", a, show(a.Pct), err)
 	}
 	if a, err := AdherenceAtLeast(nil); err != nil || a.N != 0 || a.Pct != nil {

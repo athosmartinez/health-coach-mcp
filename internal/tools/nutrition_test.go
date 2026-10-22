@@ -124,7 +124,7 @@ func TestNutritionDayClosedDay(t *testing.T) {
 	for k, want := range map[string]any{
 		"effective_from": "2026-10-01", "kcal_target": 2000.0, "kcal_delta": 200.0, "protein_g_target": 150.0,
 		"protein_g_delta": -20.0, "protein_g_per_kg": 1.63, "weight_kg": 80.0, "weight_date": "2026-10-13",
-		"protein_g_lower_bound": false,
+		"protein_g_lower_bound": false, "weight_age_days": 1.0,
 	} {
 		if get(targets, k) != want {
 			t.Errorf("targets.%s = %v, want %v", k, get(targets, k), want)
@@ -676,5 +676,20 @@ func TestPerNutrientHasEveryNutrient(t *testing.T) {
 	}
 	if p.field("alcohol_g") != nil {
 		t.Error("unknown nutrient has a slot")
+	}
+}
+
+func TestNutritionDayStaleWeight(t *testing.T) {
+	for _, c := range []struct {
+		weighed coach.LocalDate
+		age     float64
+		stale   bool
+	}{{"2026-09-30", 14, false}, {"2026-09-29", 15, true}} {
+		h := nutritionHealth(t)
+		h.weight = map[coach.LocalDate]healthdata.Reading{c.weighed: {Value: 80}}
+		out := coachSession(t, h, nutritionTarget).ok("nutrition_day", map[string]any{"date": string(closedDay)})
+		if get(out, "data", "targets", "weight_age_days") != c.age || hasFlag(out, "stale_weight") != c.stale {
+			t.Errorf("weighed %s: targets %v flags %v", c.weighed, get(out, "data", "targets"), get(out, "quality_flags"))
+		}
 	}
 }

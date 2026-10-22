@@ -142,7 +142,7 @@ func TestNutritionDaysAndToday(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(n.Days) != 3 || n.OtherSource != 1 || n.Skipped != 1 {
+	if len(n.Days) != 3 || n.OtherSource != 1 || n.Skipped != 1 || fmt.Sprint(n.OtherSourceDays) != "map[2026-10-14:1]" {
 		t.Fatalf("nutrition = %+v", n)
 	}
 	// The implausible kcal is dropped alone: the item and its carbs stay,

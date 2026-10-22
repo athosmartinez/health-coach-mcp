@@ -27,6 +27,9 @@ const (
 	flagPartialNutrientTotals = "partial_nutrient_totals"
 	flagRejectedNutrients     = "rejected_nutrient_values" // implausible or repeated values left out of their items
 	flagFoodTruncated         = "food_items_truncated"     // more items than one response carries
+	// flagStaleWeight: the last weigh-in is older than staleWeightDays, so
+	// values per kilogram may be off.
+	flagStaleWeight = "stale_weight"
 	// flagOtherSourceFood: food logged on another platform (such as Apple
 	// Health) is left out, so the day may look lighter.
 	flagOtherSourceFood = "other_source_food_excluded"
@@ -60,6 +63,9 @@ const (
 		"registered dietitian. Never prescribe a diet for a medical condition."
 	targetsSetHint = " Ask the user and, once they confirm, record it with targets_set."
 )
+
+// staleWeightDays is the weigh-in age past which stale_weight is raised.
+const staleWeightDays = 14
 
 // mealOrder is the order of the known meal types; other types follow, sorted.
 var mealOrder = []string{"BREAKFAST", "LUNCH", "DINNER", "SNACK"}
@@ -177,7 +183,10 @@ type NutritionTargets struct {
 	ProteinGLowerBound bool             `json:"protein_g_lower_bound"`
 	WeightKg           *float64         `json:"weight_kg"`
 	WeightDate         *coach.LocalDate `json:"weight_date"`
-	TargetHint         string           `json:"target_hint,omitempty"`
+	// WeightAgeDays is the days from the weigh-in to the day; past
+	// staleWeightDays the envelope carries stale_weight.
+	WeightAgeDays *int   `json:"weight_age_days"`
+	TargetHint    string `json:"target_hint,omitempty"`
 }
 
 // EnergyBalance is intake minus the band's total calories for the day;
@@ -245,32 +254,6 @@ func (n nutrition) handle(ctx context.Context, _ *mcp.CallToolRequest, in nutrit
 	out := NutritionReview{Date: day, ItemsLogged: len(nd.Items), Totals: totalsOf(nd.Items), Notice: nutritionNotice}
 	out.PerMeal, out.ItemsOmitted = n.meals(nd.Items, sources)
 
-	kcal := complete(out.Totals.Kcal)
-	var protein *float64
-	if p := out.Totals.ProteinG; p != nil {
-		protein = &p.Value
-	}
-	out.Targets = targetsOf(target, kcal, protein)
-	out.Targets.ProteinGLowerBound = out.Totals.ProteinG != nil && !out.Totals.ProteinG.Complete
-	if d, r, ok := healthdata.Last(body.Weight); ok {
-		out.Targets.WeightKg, out.Targets.WeightDate = round(&r.Value), &d
-		if protein != nil && r.Value > 0 {
-			out.Targets.ProteinGPerKg = roundTo(ptr(*protein/r.Value), 2)
-		}
-		sources.add(r.Source)
-	}
-
-	mealTypes := make([]string, len(out.PerMeal))
-	for i, m := range out.PerMeal {
-		mealTypes[i] = m.MealType
-	}
-	var logged, targetKcal *float64
-	if out.Totals.Kcal != nil {
-		logged = &out.Totals.Kcal.Value
-	}
-	if target != nil && target.Kcal != nil {
-		targetKcal = ptr(float64(*target.Kcal))
-	}
 	a, actOK := act.Days[day]
 	// A day missing because its row was unreadable is not a day off the
 	// wrist: unreadable_records covers it.
@@ -279,29 +262,35 @@ func (n nutrition) handle(ctx context.Context, _ *mcp.CallToolRequest, in nutrit
 	if !notWorn {
 		burned = a.TotalKcal
 	}
+	fc := checkFood(nd.Items, food.OtherSource, food.Skipped, target, burned, partial)
 
-	check := metrics.CheckLogging(logged, targetKcal, mealTypes)
-	likely := check.LikelyIncomplete
-	// Without a kcal target, half the day's burn is the reference: one small
-	// item logged as breakfast would otherwise pass as a full day.
-	if targetKcal == nil && logged != nil && burned != nil && *burned > 0 && *logged < *burned/2 {
-		likely = true
+	out.Targets = targetsOf(target, fc.kcal, fc.protein)
+	out.Targets.ProteinGLowerBound = fc.protein != nil && !fc.proteinComplete
+	if target != nil && target.Kcal != nil && fc.kcalGap() != "" {
+		out.Targets.KcalDelta, out.Targets.KcalDeltaUnavailable = nil, fc.kcalGap()
+	}
+	if d, r, ok := healthdata.Last(body.Weight); ok {
+		out.Targets.WeightKg, out.Targets.WeightDate = round(&r.Value), &d
+		age, err := weightAge(d, day)
+		if err != nil {
+			return zero, err
+		}
+		out.Targets.WeightAgeDays = &age
+		flags.add(flagStaleWeight, age > staleWeightDays)
+		if fc.protein != nil && r.Value > 0 {
+			out.Targets.ProteinGPerKg = roundTo(ptr(*fc.protein/r.Value), 2)
+		}
+		sources.add(r.Source)
 	}
 	out.LoggingCompleteness = LoggingCompleteness{
-		MealsLogged: len(out.PerMeal), HasMainMeal: check.HasMainMeal,
-		LikelyIncomplete: likely && !partial, KcalPctOfTarget: round(check.KcalPctOfTarget),
+		MealsLogged: len(out.PerMeal), HasMainMeal: fc.logging.HasMainMeal,
+		LikelyIncomplete: fc.logging.LikelyIncomplete && !partial, KcalPctOfTarget: round(fc.logging.KcalPctOfTarget),
 	}
-
-	intakeGap := firstOf(intakeReason(kcal, food), dayReason(partial, likely))
-	if target != nil && target.Kcal != nil && intakeGap != "" {
-		out.Targets.KcalDelta, out.Targets.KcalDeltaUnavailable = nil, intakeGap
-	}
-	out.EnergyBalance = balanceOf(kcal, burned, notWorn,
-		firstOf(intakeReason(kcal, food), burnReason(notWorn, burned), dayReason(partial, likely)))
+	out.EnergyBalance = balanceOf(fc.kcal, burned, notWorn, firstOf(fc.intakeGap, burnReason(notWorn, burned), fc.dayGap))
 
 	flags.add(metrics.FlagPartialDay, partial)
 	flags.add(metrics.FlagLikelyIncompleteNutrition, out.LoggingCompleteness.LikelyIncomplete)
-	flags.add(flagPartialNutrientTotals, kcal == nil || complete(out.Totals.ProteinG) == nil)
+	flags.add(flagPartialNutrientTotals, fc.kcal == nil || !fc.proteinComplete)
 	flags.add(flagRejectedNutrients, nd.Rejected > 0)
 	flags.add(flagFoodTruncated, out.ItemsOmitted > 0)
 	flags.add(flagOtherSourceFood, food.OtherSource > 0)
@@ -449,17 +438,65 @@ func balanceOf(intake, burned *float64, notWorn bool, reason string) EnergyBalan
 	return b
 }
 
-// intakeReason is why the logged kcal is not the day's intake.
-func intakeReason(kcal *float64, food healthdata.Nutrition) string {
-	switch {
-	case kcal == nil:
-		return reasonIntakePartial
-	case food.OtherSource > 0:
-		return reasonOtherSource
-	case food.Skipped > 0:
-		return reasonUnreadableFood
+// foodCheck is one day's food log judged by the rules both nutrition_day and
+// weekly_report apply, so a day never counts as a deficit or a missed target
+// in one tool when the other says the log cannot show it.
+type foodCheck struct {
+	kcal            *float64 // complete kcal total; nil when an item lacks kcal
+	protein         *float64 // protein logged, a lower bound unless proteinComplete; nil when no item reports it
+	proteinComplete bool
+	// logging is the log check before the rule for today: without a kcal
+	// target, intake under half the calories burned is likely incomplete.
+	logging   metrics.Logging
+	intakeGap string // why the logged kcal is not the day's intake
+	dayGap    string // partial_day or log_likely_incomplete
+}
+
+// kcalGap is why a kcal comparison (delta, adherence) is left out.
+func (f foodCheck) kcalGap() string { return firstOf(f.intakeGap, f.dayGap) }
+
+// checkFood judges a day's items. otherSource and skipped count records left
+// out of the day; burned is the band's total calories, nil when not worn.
+func checkFood(items []healthdata.FoodItem, otherSource, skipped int, target *store.Target, burned *float64, partial bool) foodCheck {
+	totals := totalsOf(items)
+	var fc foodCheck
+	fc.kcal = complete(totals.Kcal)
+	if p := totals.ProteinG; p != nil {
+		fc.protein, fc.proteinComplete = &p.Value, p.Complete
 	}
-	return ""
+	var logged, targetKcal *float64
+	if totals.Kcal != nil {
+		logged = &totals.Kcal.Value
+	}
+	if target != nil && target.Kcal != nil {
+		targetKcal = ptr(float64(*target.Kcal))
+	}
+	mealTypes := make([]string, len(items))
+	for i, it := range items {
+		mealTypes[i] = it.Meal
+	}
+	fc.logging = metrics.CheckLogging(logged, targetKcal, mealTypes)
+	// Without a kcal target, half the day's burn is the reference: one small
+	// item logged as breakfast would otherwise pass as a full day.
+	if targetKcal == nil && logged != nil && burned != nil && *burned > 0 && *logged < *burned/2 {
+		fc.logging.LikelyIncomplete = true
+	}
+	switch {
+	case fc.kcal == nil:
+		fc.intakeGap = reasonIntakePartial
+	case otherSource > 0:
+		fc.intakeGap = reasonOtherSource
+	case skipped > 0:
+		fc.intakeGap = reasonUnreadableFood
+	}
+	fc.dayGap = dayReason(partial, fc.logging.LikelyIncomplete)
+	return fc
+}
+
+// weightAge is the days from the weigh-in to the day.
+func weightAge(weighed, day coach.LocalDate) (int, error) {
+	n, err := daysBetween(weighed, day)
+	return n - 1, err
 }
 
 func burnReason(notWorn bool, burned *float64) string {

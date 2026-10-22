@@ -759,6 +759,46 @@ func TestSearchNotesSinceUsesZone(t *testing.T) {
 	}
 }
 
+func TestSearchNotesUntil(t *testing.T) {
+	// Created 2026-10-14 01:00 UTC = 2026-10-13 22:00 in São Paulo.
+	s, err := Open(ctx, t.TempDir()+"/coach.db", func() time.Time { return time.Date(2026, 10, 14, 1, 0, 0, 0, time.UTC) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	addNote(t, s, Note{Kind: "decision", Text: "early", RelatedDate: "2026-10-10"})
+	addNote(t, s, Note{Kind: "decision", Text: "late", RelatedDate: "2026-10-20"})
+	addNote(t, s, Note{Kind: "decision", Text: "undated"})
+	brt, _ := time.LoadLocation("America/Sao_Paulo")
+	texts := func(f NoteFilter) string {
+		var out []string
+		for _, n := range search(t, s, f).Notes {
+			out = append(out, n.Text)
+		}
+		slices.Sort(out)
+		return strings.Join(out, ",")
+	}
+	for _, c := range []struct {
+		f    NoteFilter
+		want string
+	}{
+		{NoteFilter{Until: "2026-10-12", Loc: brt}, "early"},
+		{NoteFilter{Until: "2026-10-13", Loc: brt}, "early,undated"}, // created on local Oct 13
+		{NoteFilter{Until: "2026-10-13"}, "early"},                   // Oct 14 in UTC
+		{NoteFilter{Since: "2026-10-11", Until: "2026-10-20", Loc: brt}, "late,undated"},
+		{NoteFilter{Since: "2026-10-20", Until: "2026-10-20", Loc: brt}, "late"},
+	} {
+		if got := texts(c.f); got != c.want {
+			t.Errorf("%+v = %q, want %q", c.f, got, c.want)
+		}
+	}
+	for _, f := range []NoteFilter{{Until: "bad"}, {Since: "2026-10-12", Until: "2026-10-11"}} {
+		if _, err := s.SearchNotes(ctx, f); !isInvalidInput(err) {
+			t.Errorf("SearchNotes(%+v) err = %v, want invalid_input", f, err)
+		}
+	}
+}
+
 func TestFTSSyntaxErrorMapping(t *testing.T) {
 	if err := ftsSyntaxError(errors.New(`SQL logic error: fts5: syntax error near "AND"`)); !isInvalidInput(err) {
 		t.Errorf("syntax error = %v, want invalid_input", err)

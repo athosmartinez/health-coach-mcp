@@ -100,7 +100,9 @@ type NoteFilter struct {
 	Kind string
 	// Since keeps notes whose related_date, or creation day when unset, is on or after it.
 	Since coach.LocalDate
-	// Loc is the zone used to turn Since into an instant for created_at (default UTC).
+	// Until keeps notes whose related_date, or creation day when unset, is on or before it.
+	Until coach.LocalDate
+	// Loc is the zone used to turn Since and Until into instants for created_at (default UTC).
 	Loc *time.Location
 	// Query is free text; every word must appear (FTS5, words matched as phrases).
 	Query string
@@ -126,11 +128,22 @@ func (s *Store) SearchNotes(ctx context.Context, f NoteFilter) (res NoteResults,
 		where = append(where, "n.kind = ?")
 		args = append(args, f.Kind)
 	}
-	if f.Since != "" {
-		loc := f.Loc
-		if loc == nil {
-			loc = time.UTC
+	loc := f.Loc
+	if loc == nil {
+		loc = time.UTC
+	}
+	if f.Since != "" && f.Until != "" && f.Until < f.Since {
+		return NoteResults{}, invalid("until must not be before since")
+	}
+	if f.Until != "" {
+		_, end, err := f.Until.Bounds(loc)
+		if err != nil {
+			return NoteResults{}, invalid("until must be YYYY-MM-DD")
 		}
+		where = append(where, "(n.related_date <= ? OR (n.related_date IS NULL AND n.created_at < ?))")
+		args = append(args, string(f.Until), end.UTC().Format(timeLayout))
+	}
+	if f.Since != "" {
 		start, _, err := f.Since.Bounds(loc)
 		if err != nil {
 			return NoteResults{}, invalid("since must be YYYY-MM-DD")

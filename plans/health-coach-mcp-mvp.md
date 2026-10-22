@@ -382,8 +382,10 @@ protein → partial total; only snacks → `likely_incomplete`.
 **Notes (implementation).**
 - A day without food items is `no_data`, never a 0 kcal day: the balance would read as a large deficit. The hint
   names the cause (unreadable records, food only from another platform, nothing logged).
-- Totals keep the healthdata rule: a total misses items when `complete` is false and is then a lower bound. Target
-  deltas, `protein_g_per_kg` and the energy balance read complete totals only; `partial_nutrient_totals` is raised for
+- Totals keep the healthdata rule: a total misses items when `complete` is false and is then a lower bound. The kcal
+  delta and the energy balance read a complete kcal total only. Protein is a lower bound instead (user decision after
+  the real-data probe: on 5 of 10 days 1–3 items had no protein entry, nearly all under 50 kcal), so the protein delta
+  and `protein_g_per_kg` come from the partial total with `protein_g_lower_bound`. `partial_nutrient_totals` is raised for
   kcal and protein only (fiber, sugar and sodium are often absent from items, and no target reads them).
   `kcal_pct_of_target` uses the logged kcal even when partial, so a very low day stays visible.
 - `energy_balance` is null with `unavailable` = `intake_partial`, `band_not_worn` (or no activity row with no

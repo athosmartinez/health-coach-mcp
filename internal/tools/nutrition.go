@@ -22,7 +22,7 @@ const maxFoodItems = 60
 // Quality flags of the food log.
 const (
 	// flagPartialNutrientTotals: an item lacks kcal or protein, so that total
-	// is a lower bound and its target delta is left out.
+	// is a lower bound.
 	flagPartialNutrientTotals = "partial_nutrient_totals"
 	flagRejectedNutrients     = "rejected_nutrient_values" // implausible or repeated values left out of their items
 	flagFoodTruncated         = "food_items_truncated"     // more items than one response carries
@@ -58,7 +58,8 @@ func RegisterNutrition(s *mcp.Server, d CoachDeps) {
 			"difference, protein per kilogram of the last weight, the energy balance (kcal logged minus total calories " +
 			"burned; negative is an estimated deficit) and how complete the log looks. Totals hold only what was " +
 			"logged: a total with complete=false misses some items and is a lower bound, and a nutrient no item " +
-			"reports is null, not zero. Total calories is the band's estimate, so one day's balance is rough; read it " +
+			"reports is null, not zero. protein_g_lower_bound marks the protein delta and per kg as lower bounds; " +
+			"the kcal delta and the balance are null instead. Total calories is the band's estimate, so one day's balance is rough; read it " +
 			"as a trend over days. energy_balance.unavailable says why there is no balance. Today is partial_day: the " +
 			"log can still grow, so a missing meal is not a failure yet. likely_incomplete means meals were probably " +
 			"not logged; ask before treating the day as under-eating. Coach the habit, never prescribe a diet for a " +
@@ -143,20 +144,24 @@ type FoodEntry struct {
 }
 
 // NutritionTargets is the target version in force on the day. A delta is the
-// day's total minus the target, null when either is missing or the total is
-// partial.
+// day's total minus the target, null when either is missing.
 type NutritionTargets struct {
-	EffectiveFrom  *coach.LocalDate `json:"effective_from"`
-	KcalTarget     *int             `json:"kcal_target"`
-	KcalDelta      *float64         `json:"kcal_delta"`
-	ProteinGTarget *int             `json:"protein_g_target"`
-	ProteinGDelta  *float64         `json:"protein_g_delta"`
+	EffectiveFrom *coach.LocalDate `json:"effective_from"`
+	KcalTarget    *int             `json:"kcal_target"`
+	// KcalDelta is null when an item lacks kcal: a partial kcal total would
+	// read as a deficit.
+	KcalDelta      *float64 `json:"kcal_delta"`
+	ProteinGTarget *int     `json:"protein_g_target"`
+	ProteinGDelta  *float64 `json:"protein_g_delta"`
 	// ProteinGPerKg is the day's protein over the last weight on or before
-	// the day; null when the protein total is partial.
-	ProteinGPerKg *float64         `json:"protein_g_per_kg"`
-	WeightKg      *float64         `json:"weight_kg"`
-	WeightDate    *coach.LocalDate `json:"weight_date"`
-	TargetHint    string           `json:"target_hint,omitempty"`
+	// the day.
+	ProteinGPerKg *float64 `json:"protein_g_per_kg"`
+	// ProteinGLowerBound: some items lack protein (mostly low-kcal items such
+	// as oil or coffee), so the protein delta and per kg are lower bounds.
+	ProteinGLowerBound bool             `json:"protein_g_lower_bound"`
+	WeightKg           *float64         `json:"weight_kg"`
+	WeightDate         *coach.LocalDate `json:"weight_date"`
+	TargetHint         string           `json:"target_hint,omitempty"`
 }
 
 // EnergyBalance is intake minus the band's total calories for the day;
@@ -223,8 +228,13 @@ func (n nutrition) handle(ctx context.Context, _ *mcp.CallToolRequest, in nutrit
 	out := NutritionReview{Date: day, ItemsLogged: len(nd.Items), Totals: totalsOf(nd.Items), Notice: foodNotice}
 	out.PerMeal, out.ItemsOmitted = n.meals(nd.Items, sources)
 
-	kcal, protein := complete(out.Totals.Kcal), complete(out.Totals.ProteinG)
+	kcal := complete(out.Totals.Kcal)
+	var protein *float64
+	if p := out.Totals.ProteinG; p != nil {
+		protein = &p.Value
+	}
 	out.Targets = targetsOf(target, kcal, protein)
+	out.Targets.ProteinGLowerBound = out.Totals.ProteinG != nil && !out.Totals.ProteinG.Complete
 	if d, r, ok := healthdata.Last(body.Weight); ok {
 		out.Targets.WeightKg, out.Targets.WeightDate = round(&r.Value), &d
 		if protein != nil && r.Value > 0 {
@@ -258,7 +268,7 @@ func (n nutrition) handle(ctx context.Context, _ *mcp.CallToolRequest, in nutrit
 
 	flags.add(metrics.FlagPartialDay, partial)
 	flags.add(metrics.FlagLikelyIncompleteNutrition, out.LoggingCompleteness.LikelyIncomplete)
-	flags.add(flagPartialNutrientTotals, kcal == nil || protein == nil)
+	flags.add(flagPartialNutrientTotals, kcal == nil || complete(out.Totals.ProteinG) == nil)
 	flags.add(flagRejectedNutrients, nd.Rejected > 0)
 	flags.add(flagFoodTruncated, out.ItemsOmitted > 0)
 	flags.add(flagOtherSourceFood, food.OtherSource > 0)

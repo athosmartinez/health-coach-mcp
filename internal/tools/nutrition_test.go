@@ -124,6 +124,7 @@ func TestNutritionDayClosedDay(t *testing.T) {
 	for k, want := range map[string]any{
 		"effective_from": "2026-10-01", "kcal_target": 2000.0, "kcal_delta": 200.0, "protein_g_target": 150.0,
 		"protein_g_delta": -20.0, "protein_g_per_kg": 1.63, "weight_kg": 80.0, "weight_date": "2026-10-13",
+		"protein_g_lower_bound": false,
 	} {
 		if get(targets, k) != want {
 			t.Errorf("targets.%s = %v, want %v", k, get(targets, k), want)
@@ -222,9 +223,11 @@ func TestNutritionDayItemWithoutProtein(t *testing.T) {
 	if p := get(data, "totals", "protein_g"); get(p, "value") != 80.0 || get(p, "items_reporting") != 2.0 || get(p, "complete") != false {
 		t.Errorf("protein %v", p)
 	}
-	// A partial total would read as a missed target.
-	if get(data, "targets", "protein_g_delta") != nil || get(data, "targets", "protein_g_per_kg") != nil {
-		t.Errorf("targets %v", get(data, "targets"))
+	// Items without protein are mostly low-kcal ones: the partial total is a
+	// lower bound, not a missing value.
+	if tg := get(data, "targets"); get(tg, "protein_g_delta") != -70.0 || get(tg, "protein_g_per_kg") != 1.0 ||
+		get(tg, "protein_g_lower_bound") != true {
+		t.Errorf("targets %v", tg)
 	}
 	if get(data, "targets", "kcal_delta") != 0.0 || get(data, "energy_balance", "balance_kcal") != -600.0 {
 		t.Errorf("kcal side %v %v", get(data, "targets"), get(data, "energy_balance"))
@@ -247,7 +250,8 @@ func TestNutritionDayItemWithoutKcal(t *testing.T) {
 		get(eb, "total_calories_kcal") != 2600.0 {
 		t.Errorf("energy balance %v", eb)
 	}
-	if get(data, "targets", "kcal_delta") != nil || get(data, "targets", "protein_g_delta") != -60.0 {
+	if get(data, "targets", "kcal_delta") != nil || get(data, "targets", "protein_g_delta") != -60.0 ||
+		get(data, "targets", "protein_g_lower_bound") != false {
 		t.Errorf("targets %v", get(data, "targets"))
 	}
 	// The partial kcal still counts toward the logging check: 1200 of 2000.

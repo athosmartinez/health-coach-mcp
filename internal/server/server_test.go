@@ -304,7 +304,7 @@ func TestCoachToolsNeedAHealthSource(t *testing.T) {
 	deps := testDeps()
 	deps.Health = noHealth{}
 	cs := connect(t, newServer(t, deps))
-	if got := toolNames(t, cs); !slices.Equal(got, []string{"morning_briefing", "server_info", "workout_review"}) {
+	if got := toolNames(t, cs); !slices.Equal(got, []string{"morning_briefing", "nutrition_day", "server_info", "workout_review"}) {
 		t.Errorf("with a health source: %v", got)
 	}
 	// Without a store the workout review still works, with no target.
@@ -350,10 +350,11 @@ func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {
 	}
 	defer st.Close()
 	deps := testDeps()
-	deps.Store = st
+	deps.Store, deps.Health = st, noHealth{}
 	cs := connect(t, newServer(t, deps))
 
 	cases := []map[string]any{
+		{"name": "nutrition_day", "args": map[string]any{"date": "14/10/2026"}},                          // pattern
 		{"name": "targets_set", "args": map[string]any{"kcal": 2000}},                                    // missing required field
 		{"name": "note_add", "args": map[string]any{"kind": "rant", "text": "x"}},                        // enum
 		{"name": "targets_set", "args": map[string]any{"effective_from": "2026-02-30", "kcal": 1}},       // decode

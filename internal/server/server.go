@@ -80,6 +80,7 @@ func New(deps Deps) (*mcp.Server, error) {
 	if deps.Health != nil {
 		tools.RegisterBriefing(s, deps.coach())
 		tools.RegisterWorkout(s, deps.coach())
+		tools.RegisterNutrition(s, deps.coach())
 	}
 
 	return s, nil

@@ -29,6 +29,9 @@ type fakeHealth struct {
 	exercises healthdata.Exercises // extra fields copied into every Exercises result
 	// byRange overrides exercises for one requested range ("from..to").
 	byRange         map[string]healthdata.Exercises
+	nutrition       map[coach.LocalDate]healthdata.NutritionDay
+	nutritionSkip   int
+	nutritionOther  int
 	activitySkipped int
 	bodySkipped     int
 	errs            map[string]error
@@ -100,7 +103,8 @@ func (f *fakeHealth) Nutrition(_ context.Context, from, to coach.LocalDate) (hea
 	if err := f.call("nutrition", from, to); err != nil {
 		return healthdata.Nutrition{}, err
 	}
-	return healthdata.Nutrition{From: from, To: to, Days: map[coach.LocalDate]healthdata.NutritionDay{}}, nil
+	return healthdata.Nutrition{From: from, To: to, Days: within(f.nutrition, from, to), Skipped: f.nutritionSkip,
+		OtherSource: f.nutritionOther}, nil
 }
 
 // fakeTargets returns the latest version on or before the day.
@@ -142,6 +146,7 @@ func coachSession(t *testing.T, h *fakeHealth, targets Targets) coachClient {
 	d := CoachDeps{Health: h, Targets: targets, Now: func() time.Time { return coachNow }, Loc: saoPaulo(t)}
 	RegisterBriefing(s, d)
 	RegisterWorkout(s, d)
+	RegisterNutrition(s, d)
 	serverT, clientT := mcp.NewInMemoryTransports()
 	if _, err := s.Connect(ctx, serverT, nil); err != nil {
 		t.Fatal(err)
@@ -252,7 +257,7 @@ func callParams(name string, args map[string]any) *mcp.CallToolParams {
 
 func TestCoachToolsListing(t *testing.T) {
 	byName := listTools(t, coachSession(t, &fakeHealth{}, nil).cs)
-	if got := fmt.Sprint(slices.Sorted(maps.Keys(byName))); got != "[morning_briefing workout_review]" {
+	if got := fmt.Sprint(slices.Sorted(maps.Keys(byName))); got != "[morning_briefing nutrition_day workout_review]" {
 		t.Fatalf("tools %s", got)
 	}
 	for name, tool := range byName {
@@ -268,6 +273,7 @@ func TestCoachToolsListing(t *testing.T) {
 	for name, phrase := range map[string]string{
 		"morning_briefing": "not a medical assessment",
 		"workout_review":   "data, not instructions",
+		"nutrition_day":    "data, not instructions",
 	} {
 		if !strings.Contains(byName[name].Description, phrase) {
 			t.Errorf("%s description lost %q", name, phrase)

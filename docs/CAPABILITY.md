@@ -88,11 +88,16 @@ Recovery for the night that ended on `date`.
 - **body:** last weight and its date.
 
 #### `nutrition_day(date?)`
-- **totals:** kcal, protein_g, carb_g, fat_g, fiber_g, sugar_g, sodium_mg (whatever the log provides).
-- **per_meal:** grouped by `mealType` (BREAKFAST/LUNCH/DINNER/SNACK) with items.
-- **targets:** target in force (I6) and `delta` for kcal and protein; `protein_g_per_kg` (last weight).
-- **energy_balance:** `intake_kcal − total_calories_kcal` (API `total-calories`), estimated deficit.
-- **logging_completeness:** `meals_logged`, flag `likely_incomplete` if kcal < 50% of target or no main meal.
+- **totals:** kcal, protein_g, carb_g, fat_g, fiber_g, sugar_g, sodium_mg (whatever the log provides), each with
+  `items_reporting` and `complete` (false = some items lack it, a lower bound); null when no item reports it.
+- **per_meal:** grouped by `mealType` (BREAKFAST/LUNCH/DINNER/SNACK, then other types, then `UNSPECIFIED`) with
+  items and per-meal totals; at most 60 items listed (`items_omitted`), totals over all.
+- **targets:** target in force (I6) and `delta` for kcal and protein; `protein_g_per_kg` (last weight). Deltas
+  and protein per kg only from complete totals; no target → null fields + `target_hint` naming `targets_set`.
+- **energy_balance:** `intake_kcal − total_calories_kcal` (API `total-calories`), negative = estimated deficit;
+  null with `unavailable` (`intake_partial`, `band_not_worn`, `no_total_calories`, `log_likely_incomplete`).
+- **logging_completeness:** `meals_logged` (distinct meal types), flag `likely_incomplete` if kcal < 50% of target
+  or no main meal; never raised today (`partial_day`). A day with no item is `no_data`.
 
 #### `workout_review(date? | exercise_id?)`
 - **sessions[]:** type, duration, average/max HR, `heart_rate_zone_durations`, kcal, AZM.

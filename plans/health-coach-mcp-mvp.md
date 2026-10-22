@@ -379,6 +379,22 @@ protein → partial total; only snacks → `likely_incomplete`.
 **Exit criteria.** For a closed day, `totals.kcal` and `protein_g` within **±2%** of what the Google Health app shows.
 **Rollback.** Revert.
 
+**Notes (implementation).**
+- A day without food items is `no_data`, never a 0 kcal day: the balance would read as a large deficit. The hint
+  names the cause (unreadable records, food only from another platform, nothing logged).
+- Totals keep the healthdata rule: a total misses items when `complete` is false and is then a lower bound. Target
+  deltas, `protein_g_per_kg` and the energy balance read complete totals only; `partial_nutrient_totals` is raised for
+  kcal and protein only (fiber, sugar and sodium are often absent from items, and no target reads them).
+  `kcal_pct_of_target` uses the logged kcal even when partial, so a very low day stays visible.
+- `energy_balance` is null with `unavailable` = `intake_partial`, `band_not_worn` (or no activity row with no
+  unreadable records), `no_total_calories` or `log_likely_incomplete`, in that order. Today it is computed and the
+  envelope carries `partial_day`; `likely_incomplete` is never raised today ("partial day doesn't count as a failure").
+- `meals_logged` counts distinct meal types. `coverage.n_days` is 1: a single day, no baseline.
+- Food names are user-typed or from a food database: `notice` = `foodNotice`; at most 60 items per response
+  (`items_omitted`, `food_items_truncated`), in time order across the day.
+- Known gap (healthdata): an `energy` object without `kcal` reads as 0 kcal (proto3 drops a zero), so if the API
+  renamed that sub-field every item would read as 0 kcal instead of unknown. Watch for it in the Step 11 week.
+
 ---
 
 ## Step 9 — `weekly_report` + `metric_series`
@@ -444,3 +460,4 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   pragmas via DSN; objective exit criteria; Step 10 after 9.
 - 2026-10-19 — Step 7: `morning_briefing` returns the night's `start`/`end`, so `healthdata.Night` carries `Start`/`End`
   and the cache gains the `sleep_end_min_of_day` key (a cached night without it is a miss and is fetched again).
+- 2026-10-21 — Step 8: `healthdata.FoodItem` carries its `Source` label so `nutrition_day` lists the food log's source.

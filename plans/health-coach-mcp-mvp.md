@@ -432,7 +432,7 @@ SDK/`invalid_input` error; enum rejects `heart_rate_raw`.
 - Decisions: `store.NoteFilter.Until` (same related_date-else-creation-day rule as Since), capped at 20.
 - `metric_series`: protein keeps a partial total as a lower bound with `complete=false` (user choice); enum and
   required-field errors are SDK schema errors (server test), the 180-point and 366-day limits are `invalid_input`.
-- Deferred to a refactor PR after this step: the `Stages`/`HRVNight`/typed-series-key reshapes carried from PR #7.
+- Deferred to a refactor PR after this step: the `Stages`/`HRVNight`/typed-series-key reshapes carried from PR #7 (done 2026-10-23).
 
 ---
 
@@ -488,3 +488,6 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   (k = 1 standard error of the difference); weight slope needs 4 weigh-ins over 14 days; adherence counts
   left-out days by reason and kcal misses by direction (`metrics.Adherence.Below/Above`); `metric_series` food
   uses `checkFood` per day.
+- 2026-10-23 — Refactor after Step 9: `healthdata.Night` groups stage minutes in `Stages` (nil without final stages)
+  and HRV in `HRVNight{MedianMS, Coverage}`; series keys are typed per source (`RecoveryKey`, `ActivityKey`,
+  `BodyKey`) with unchanged text, so cached rows still hit. No tool output changes.

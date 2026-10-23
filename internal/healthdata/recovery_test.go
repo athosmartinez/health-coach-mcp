@@ -815,6 +815,41 @@ func TestWhatIsCached(t *testing.T) {
 	})
 }
 
+// The key text is also the cache row key: a changed or swapped text would
+// read existing rows as another metric.
+func TestKeyTextIsStable(t *testing.T) {
+	for got, want := range map[string]string{
+		string(KeyAsleep): "sleep_asleep_min", string(KeyAwake): "sleep_awake_min", string(KeyInBed): "sleep_in_bed_min",
+		string(KeyDeep): "sleep_deep_min", string(KeyLight): "sleep_light_min", string(KeyREM): "sleep_rem_min",
+		string(KeySleepStart): "sleep_start_min_of_day", string(KeySleepEnd): "sleep_end_min_of_day",
+		string(KeyHRV): "hrv_rmssd_ms", string(KeyRestingHR): "resting_hr_bpm",
+		string(KeySteps): "steps", string(KeyAZM): "azm_min", string(KeyTotalCalories): "total_calories_kcal",
+		string(KeyWeight): "weight_kg", string(KeyBodyFat): "body_fat_pct",
+	} {
+		if got != want {
+			t.Errorf("key %q, want %q", got, want)
+		}
+		if !slices.Contains(store.MetricKeys, want) {
+			t.Errorf("%q is not a store metric key", want)
+		}
+	}
+}
+
+func TestHRVWithheld(t *testing.T) {
+	for _, c := range []struct {
+		h    HRVNight
+		want bool
+	}{
+		{HRVNight{}, false},                                 // no samples
+		{HRVNight{Coverage: 0.3}, true},                     // too little coverage
+		{HRVNight{MedianMS: ptr(40.0), Coverage: 1}, false}, // a value
+	} {
+		if got := c.h.Withheld(); got != c.want {
+			t.Errorf("%+v: withheld %v, want %v", c.h, got, c.want)
+		}
+	}
+}
+
 func TestHRVCoverage(t *testing.T) {
 	d10 := day("2026-10-10")
 	for name, tc := range map[string]struct {

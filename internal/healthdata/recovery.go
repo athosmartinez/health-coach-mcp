@@ -115,7 +115,8 @@ type Night struct {
 }
 
 // Stages holds a night's final stage minutes. Deep, light and REM add up to
-// the time asleep, within minuteSlack.
+// the time asleep, within a couple of minutes per sleep record: each record
+// is checked when it is parsed, not by this type.
 type Stages struct {
 	DeepMin, LightMin, REMMin float64
 }
@@ -129,6 +130,9 @@ type HRVNight struct {
 	// syncing), not missing.
 	Coverage float64
 }
+
+// Withheld reports whether the night has samples but too few for a value.
+func (h HRVNight) Withheld() bool { return h.MedianMS == nil && h.Coverage > 0 }
 
 // RestingHR is one day's resting heart rate.
 type RestingHR struct {
@@ -190,7 +194,7 @@ func (r Recovery) series(key RecoveryKey, baseline bool) ([]metrics.Point, error
 			return nil
 		}
 	}
-	stage := func(f func(Stages) float64) func(coach.LocalDate) *float64 {
+	stageOf := func(f func(Stages) float64) func(coach.LocalDate) *float64 {
 		return night(func(n Night) *float64 {
 			if n.Stages == nil {
 				return nil
@@ -208,11 +212,11 @@ func (r Recovery) series(key RecoveryKey, baseline bool) ([]metrics.Point, error
 	case KeyInBed:
 		get = night(func(n Night) *float64 { return &n.InBedMin })
 	case KeyDeep:
-		get = stage(func(s Stages) float64 { return s.DeepMin })
+		get = stageOf(func(s Stages) float64 { return s.DeepMin })
 	case KeyLight:
-		get = stage(func(s Stages) float64 { return s.LightMin })
+		get = stageOf(func(s Stages) float64 { return s.LightMin })
 	case KeyREM:
-		get = stage(func(s Stages) float64 { return s.REMMin })
+		get = stageOf(func(s Stages) float64 { return s.REMMin })
 	case KeySleepStart:
 		get = night(func(n Night) *float64 { v := float64(n.StartMinOfDay); return &v })
 	case KeySleepEnd:
@@ -484,7 +488,7 @@ func (d *Data) fetchNights(ctx context.Context, a, b coach.LocalDate, f *fetch) 
 		// syncing. A night whose own samples were all left out (another
 		// platform, no value) is not "no HRV" but a format change: caching it
 		// would keep the gap after the parsing is fixed.
-		finalHRV := n.HRV.MedianMS != nil || (n.HRV.Coverage == 0 && foreignIn == 0)
+		finalHRV := !n.HRV.Withheld() && (n.HRV.MedianMS != nil || foreignIn == 0)
 		if day <= f.settled && !runTainted && !tainted[day] && settled && finalHRV && noValueIn == 0 {
 			d.putNight(ctx, day, n)
 		}

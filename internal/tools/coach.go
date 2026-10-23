@@ -129,7 +129,7 @@ func signalsOf(rec healthdata.Recovery, day coach.LocalDate, flags *flagSet) (ni
 		s.hrv = n.HRV.MedianMS
 		s.hrvDeltaPct, s.hrvZ = metrics.DeltaPct(s.hrv, hrvBase), metrics.ZScore(s.hrv, hrvBase)
 		flags.add(flagProvisionalSleep, n.Provisional)
-		flags.add(flagHRVLowCoverage, n.HRV.MedianMS == nil && n.HRV.Coverage > 0)
+		flags.add(flagHRVLowCoverage, n.HRV.Withheld())
 	}
 	if v, ok := rec.RestingHR[day]; ok {
 		s.rhr = &v.BPM

@@ -491,3 +491,7 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
 - 2026-10-23 — Refactor after Step 9: `healthdata.Night` groups stage minutes in `Stages` (nil without final stages)
   and HRV in `HRVNight{MedianMS, Coverage}`; series keys are typed per source (`RecoveryKey`, `ActivityKey`,
   `BodyKey`) with unchanged text, so cached rows still hit. No tool output changes.
+- 2026-10-25 — Step 10: package `internal/prompts`; the guardrails travel inline in each prompt as well as in
+  `coach://guardrails`; prompts are registered only with a store and a health source. Tone default: directive on
+  training and the user's own targets, advisory on anything medical (symptoms, labs, medications, supplements,
+  weight-loss pace, very low intake).

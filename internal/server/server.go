@@ -12,6 +12,7 @@ import (
 
 	"github.com/athosmartinez/health-coach-mcp/internal/config"
 	"github.com/athosmartinez/health-coach-mcp/internal/healthdata"
+	"github.com/athosmartinez/health-coach-mcp/internal/prompts"
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 	"github.com/athosmartinez/health-coach-mcp/internal/tools"
 	"github.com/athosmartinez/health-coach-mcp/internal/version"
@@ -83,6 +84,11 @@ func New(deps Deps) (*mcp.Server, error) {
 		tools.RegisterNutrition(s, deps.coach())
 		tools.RegisterWeekly(s, deps.coach())
 		tools.RegisterSeries(s, deps.coach())
+	}
+	prompts.RegisterGuardrails(s)
+	// The prompts call profile_get and the coach tools, so they need both.
+	if deps.Store != nil && deps.Health != nil {
+		prompts.Register(s)
 	}
 
 	return s, nil

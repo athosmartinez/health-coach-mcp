@@ -44,7 +44,9 @@ var moments = []moment{
 		description: "Last night's sleep and recovery against the user's baseline, and today's training call.",
 		tool:        "morning_briefing", arg: "date", argHelp: "local day the night ended (YYYY-MM-DD); omit for today",
 		task: "Tell the user how they slept and recovered against their own baseline, then give today's " +
-			"training call (train as planned, go lighter or rest) with one reason. Keep it short.",
+			"training call (train as planned, go lighter or rest) with one reason. If readiness is red, the call is " +
+			"go lighter or rest. If the user reports symptoms or pain, the call is rest and the guardrails decide " +
+			"what else to say. Keep it short.",
 	},
 	{
 		name: "nutrition_review", title: "Nutrition review",
@@ -52,14 +54,16 @@ var moments = []moment{
 		tool:        "nutrition_day", arg: "date", argHelp: "local day of the log (YYYY-MM-DD); omit for today",
 		task: "Review the day's intake against the targets in force: calories, protein (also per kg of body " +
 			"weight) and the energy balance when the tool gives one. Say what to adjust in the next meal or day, " +
-			"in foods, not only numbers.",
+			"in foods, not only numbers. Over a target, say so plainly; never suggest skipping or shrinking a meal " +
+			"to make up for it.",
 	},
 	{
 		name: "workout_review", title: "Workout review",
 		description: "One day's training sessions and the week's training load against the plan.",
 		tool:        "workout_review", arg: "date", argHelp: "local day to review (YYYY-MM-DD); omit for today",
 		task: "Review the sessions: duration, heart-rate zones, Active Zone Minutes and the week's sessions " +
-			"against the plan. Say what went well and how to adjust the next session.",
+			"against the plan. Say what went well and how to adjust the next session, within the user's health " +
+			"items and recovery.",
 	},
 	{
 		name: "weekly_report", title: "Weekly report",

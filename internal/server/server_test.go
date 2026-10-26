@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -383,6 +384,23 @@ func TestPromptsNeedAStoreAndAHealthSource(t *testing.T) {
 			t.Fatalf("%s: prompts %v %+v", name, err, list)
 		}
 		tools := toolNames(t, cs)
+		props := inputProperties(t, cs)
+		dated := regexp.MustCompile(`Call (\w+) with \{"(\w+)": "2026-10-10"\}`)
+		for _, p := range list.Prompts {
+			// The prompt's day argument is an optional field of its tool's input.
+			arg := p.Arguments[0].Name
+			got, err := cs.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: p.Name, Arguments: map[string]string{arg: "2026-10-10"}})
+			if err != nil {
+				t.Fatalf("%s: %v", p.Name, err)
+			}
+			m := dated.FindStringSubmatch(got.Messages[0].Content.(*mcp.TextContent).Text)
+			if m == nil || m[2] != arg {
+				t.Fatalf("%s: dated call %q, want the %s argument", p.Name, m, arg)
+			}
+			if in, ok := props[m[1]]; !ok || !in.has(arg) || slices.Contains(in.Required, arg) {
+				t.Errorf("%s: %s is not an optional field of %s's input %+v", p.Name, arg, m[1], in)
+			}
+		}
 		for _, p := range list.Prompts {
 			got, err := cs.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: p.Name})
 			if err != nil {
@@ -397,6 +415,32 @@ func TestPromptsNeedAStoreAndAHealthSource(t *testing.T) {
 			}
 		}
 	}
+}
+
+type inputSchema struct {
+	Properties map[string]json.RawMessage `json:"properties"`
+	Required   []string                   `json:"required"`
+}
+
+func (s inputSchema) has(field string) bool { _, ok := s.Properties[field]; return ok }
+
+// inputProperties returns each listed tool's input schema.
+func inputProperties(t *testing.T, cs *mcp.ClientSession) map[string]inputSchema {
+	t.Helper()
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]inputSchema{}
+	for _, tool := range res.Tools {
+		b, _ := json.Marshal(tool.InputSchema)
+		var in inputSchema
+		if err := json.Unmarshal(b, &in); err != nil {
+			t.Fatalf("%s: %v", tool.Name, err)
+		}
+		out[tool.Name] = in
+	}
+	return out
 }
 
 func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {

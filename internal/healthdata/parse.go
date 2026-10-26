@@ -108,7 +108,7 @@ type stage struct {
 type session struct {
 	start, end           time.Time
 	asleep, awake, inBed float64
-	deep, light, rem     *float64 // nil without final stages
+	stages               *Stages // nil without final stages
 	nap                  bool
 	// settled: processed, with final stages or a classic record. A night that
 	// is not settled may still change and is never cached.
@@ -160,9 +160,9 @@ func parseSleep(raw json.RawMessage) (s session, err error) {
 			if err != nil {
 				return s, err
 			}
-			s.deep, s.light, s.rem = &st[0], &st[1], &st[2]
+			s.stages = &st
 		}
-		s.settled = sl.Metadata.Processed && s.deep != nil
+		s.settled = sl.Metadata.Processed && s.stages != nil
 	case "CLASSIC":
 		s.settled = sl.Metadata.Processed
 	default:
@@ -173,12 +173,12 @@ func parseSleep(raw json.RawMessage) (s session, err error) {
 
 var errStageMinutes = errors.New("sleep record with implausible stage minutes")
 
-// stageMinutes returns deep, light and REM minutes. Every type must be known
+// stageMinutes returns the deep, light and REM minutes. Every type must be known
 // and appear once, and the three must add up to the time asleep (Fitbit's
 // asleep minutes are their sum): a renamed or split stage would otherwise read
 // as zero minutes and be cached as final.
-func stageMinutes(list []stage, asleep, inBed float64) ([3]float64, error) {
-	var out [3]float64
+func stageMinutes(list []stage, asleep, inBed float64) (Stages, error) {
+	var out Stages
 	if len(list) == 0 {
 		return out, errors.New("staged sleep record without stages")
 	}
@@ -191,17 +191,17 @@ func stageMinutes(list []stage, asleep, inBed float64) ([3]float64, error) {
 		seen[st.Type] = true
 		switch st.Type {
 		case "DEEP":
-			out[0] = m
+			out.DeepMin = m
 		case "LIGHT":
-			out[1] = m
+			out.LightMin = m
 		case "REM":
-			out[2] = m
+			out.REMMin = m
 		case "AWAKE":
 		default:
 			return out, errors.New("sleep record with an unknown stage")
 		}
 	}
-	if math.Abs(out[0]+out[1]+out[2]-asleep) > minuteSlack {
+	if math.Abs(out.DeepMin+out.LightMin+out.REMMin-asleep) > minuteSlack {
 		return out, errStageMinutes
 	}
 	return out, nil

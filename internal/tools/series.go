@@ -215,7 +215,7 @@ func (s series) daily(ctx context.Context, metric string, from, to coach.LocalDa
 			}
 		}
 		flags.add(flagUnreadableRecords, rec.Skipped > 0)
-		key := map[string]string{"resting_hr": healthdata.KeyRestingHR, "hrv": healthdata.KeyHRV,
+		key := map[string]healthdata.RecoveryKey{"resting_hr": healthdata.KeyRestingHR, "hrv": healthdata.KeyHRV,
 			"sleep_asleep_min": healthdata.KeyAsleep}[metric]
 		pts, err := rec.BaselineSeries(key)
 		return plain(pts), err
@@ -227,7 +227,7 @@ func (s series) daily(ctx context.Context, metric string, from, to coach.LocalDa
 		today := s.today()
 		flags.add(metrics.FlagPartialDay, to >= today)
 		flags.add(flagUnreadableRecords, act.Skipped > 0)
-		key := map[string]string{"steps": healthdata.KeySteps, "azm": healthdata.KeyAZM,
+		key := map[string]healthdata.ActivityKey{"steps": healthdata.KeySteps, "azm": healthdata.KeyAZM,
 			"total_calories": healthdata.KeyTotalCalories}[metric]
 		pts, err := act.BaselineSeries(key)
 		if err != nil {

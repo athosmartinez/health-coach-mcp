@@ -97,13 +97,13 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 - `internal/healthdata/` — Google Health records → daily values through the `daily_metrics` cache. `Source.Recovery(ctx,
   from, to)` returns `Nights` (main sleep ending on each local day: Fitbit only, naps dropped, sleep fetched ±1 day and
   assigned with `coach.SleepDay`; overlapping copies keep the longer, records ≤ 3 h apart are joined as one split night,
-  the group with most time in bed wins; stage values only from `STAGES` records with `stagesStatus` `SUCCEEDED` (each
+  the group with most time in bed wins; `Stages` (deep/light/REM minutes, nil without final stages) only from `STAGES` records with `stagesStatus` `SUCCEEDED` (each
   type known and once, deep+light+REM = asleep ± 2 min), a `STAGES` night without them or an unprocessed record is
-  `Provisional`, a processed `CLASSIC` night has nil stages and is not; median rMSSD of the
-  samples inside the night, nil below 12 samples or under 50% of its 5-min slots (25% per half), with `HRVCoverage`) and
+  `Provisional`, a processed `CLASSIC` night has nil stages and is not; `HRV` is an `HRVNight`: `MedianMS`, the median rMSSD of the
+  samples inside the night, nil below 12 samples or under 50% of its 5-min slots (25% per half), and `Coverage`) and
   `RestingHR` (`{BPM, Method}`; `WITH_SLEEP` wins a duplicate, then the lower), plus `Skipped` unreadable records,
   `Excluded` counts by reason and `Empty` types (records only from another platform or without a value). `Series(key)`
-  gives one `metrics.Point` per day; `BaselineSeries(key)` drops provisional nights and non-`WITH_SLEEP` resting HR.
+  (keys are typed per source: `RecoveryKey`, `ActivityKey`, `BodyKey`; their text is the cache row key) gives one `metrics.Point` per day; `BaselineSeries(key)` drops provisional nights and non-`WITH_SLEEP` resting HR.
   `Excluded` counts only days fetched live in the call. `Start`/`End` bound the night in local time to the minute
   (a split night: first part's start, last part's end); a cached night rebuilds them from `KeySleepStart`/`KeySleepEnd`
   (both wrap at midnight: circular metrics only) and is a miss without the end row.

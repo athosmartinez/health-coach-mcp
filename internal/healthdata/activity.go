@@ -14,16 +14,23 @@ import (
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
 
-// Daily activity and body keys (CAPABILITY §5.3).
-const (
-	KeySteps         = "steps"
-	KeyAZM           = "azm_min"
-	KeyTotalCalories = "total_calories_kcal"
-	KeyWeight        = "weight_kg"
-	KeyBodyFat       = "body_fat_pct"
+// ActivityKey names an Activity series and BodyKey a Body series. As with
+// RecoveryKey, the value is also the cache row key and never changes.
+type (
+	ActivityKey string
+	BodyKey     string
 )
 
-var activityKeys = []string{KeySteps, KeyAZM, KeyTotalCalories}
+// Daily activity and body keys (CAPABILITY §5.3).
+const (
+	KeySteps         ActivityKey = "steps"
+	KeyAZM           ActivityKey = "azm_min"
+	KeyTotalCalories ActivityKey = "total_calories_kcal"
+	KeyWeight        BodyKey     = "weight_kg"
+	KeyBodyFat       BodyKey     = "body_fat_pct"
+)
+
+var activityKeys = []ActivityKey{KeySteps, KeyAZM, KeyTotalCalories}
 
 // rollupSource labels values taken from the API's daily rollup, which merges
 // the band's and the phone's records into one total per day (CAPABILITY I2).
@@ -52,12 +59,14 @@ type Activity struct {
 
 // Series returns one point per day for key (KeySteps, KeyAZM or
 // KeyTotalCalories), nil where the value is missing.
-func (a Activity) Series(key string) ([]metrics.Point, error) { return a.series(key, false) }
+func (a Activity) Series(key ActivityKey) ([]metrics.Point, error) { return a.series(key, false) }
 
 // BaselineSeries is Series without partial days.
-func (a Activity) BaselineSeries(key string) ([]metrics.Point, error) { return a.series(key, true) }
+func (a Activity) BaselineSeries(key ActivityKey) ([]metrics.Point, error) {
+	return a.series(key, true)
+}
 
-func (a Activity) series(key string, baseline bool) ([]metrics.Point, error) {
+func (a Activity) series(key ActivityKey, baseline bool) ([]metrics.Point, error) {
 	var get func(ActivityDay) *float64
 	switch key {
 	case KeySteps:
@@ -104,7 +113,7 @@ func (d *Data) Activity(ctx context.Context, from, to coach.LocalDate) (Activity
 		return Activity{}, err
 	}
 	a := Activity{From: from, To: to, Days: map[coach.LocalDate]ActivityDay{}}
-	cached, err := d.readCache(ctx, from, min(to, settled), activityKeys...)
+	cached, err := readCache(ctx, d, from, min(to, settled), activityKeys...)
 	if err != nil {
 		return Activity{}, err
 	}
@@ -207,9 +216,9 @@ func (d *Data) fetchActivity(ctx context.Context, a, b, today, settled coach.Loc
 		if day > settled || !cleanRun {
 			continue
 		}
-		for key, val := range map[string]*float64{KeySteps: v.Steps, KeyAZM: v.AZM, KeyTotalCalories: v.TotalKcal} {
+		for key, val := range map[ActivityKey]*float64{KeySteps: v.Steps, KeyAZM: v.AZM, KeyTotalCalories: v.TotalKcal} {
 			if val != nil {
-				d.put(ctx, store.Metric{Date: day, Key: key, Value: *val, Source: rollupSource})
+				d.put(ctx, store.Metric{Date: day, Key: string(key), Value: *val, Source: rollupSource})
 			}
 		}
 	}
@@ -346,7 +355,7 @@ type Body struct {
 }
 
 // Series returns one point per day for KeyWeight or KeyBodyFat.
-func (b Body) Series(key string) ([]metrics.Point, error) {
+func (b Body) Series(key BodyKey) ([]metrics.Point, error) {
 	var m map[coach.LocalDate]Reading
 	switch key {
 	case KeyWeight:
@@ -386,7 +395,7 @@ func (d *Data) Body(ctx context.Context, from, to coach.LocalDate) (Body, error)
 	}
 	b := Body{From: from, To: to, Weight: map[coach.LocalDate]Reading{}, BodyFat: map[coach.LocalDate]Reading{}}
 	for _, m := range []struct {
-		key   string
+		key   BodyKey
 		dt    googlehealth.DataType
 		out   map[coach.LocalDate]Reading
 		parse func(json.RawMessage) (time.Time, float64, dataSource, error)
@@ -394,7 +403,7 @@ func (d *Data) Body(ctx context.Context, from, to coach.LocalDate) (Body, error)
 		{KeyWeight, googlehealth.Weight, b.Weight, parseWeight},
 		{KeyBodyFat, googlehealth.BodyFat, b.BodyFat, parseBodyFat},
 	} {
-		cached, err := d.readCache(ctx, from, min(to, settled), m.key)
+		cached, err := readCache(ctx, d, from, min(to, settled), m.key)
 		if err != nil {
 			return Body{}, err
 		}
@@ -431,7 +440,7 @@ func (d *Data) Body(ctx context.Context, from, to coach.LocalDate) (Body, error)
 		// returned but not cached.
 		for day, r := range m.out {
 			if day <= settled && skipped == 0 {
-				d.put(ctx, store.Metric{Date: day, Key: m.key, Value: r.Value, Source: r.Source})
+				d.put(ctx, store.Metric{Date: day, Key: string(m.key), Value: r.Value, Source: r.Source})
 			}
 		}
 	}

@@ -88,7 +88,7 @@ func TestActivityDays(t *testing.T) {
 	if render(s) != "2026-10-14=8014 2026-10-15=8015 2026-10-16=8016 " || render(b) != "2026-10-14=8014 2026-10-15=8015 2026-10-16=nil " {
 		t.Errorf("series %s, baseline %s", render(s), render(b))
 	}
-	for _, k := range []string{KeyAZM, KeyTotalCalories} {
+	for _, k := range []ActivityKey{KeyAZM, KeyTotalCalories} {
 		if _, err := a.Series(k); err != nil {
 			t.Error(err)
 		}
@@ -154,7 +154,7 @@ func TestActivityCache(t *testing.T) {
 			t.Errorf("%s differs:\n%s\n%s", k, render(a), render(b))
 		}
 	}
-	ms, _ := st.MetricRange(ctx, KeySteps, day("2026-10-07"), day("2026-10-16"), metrics.AlgoVersion)
+	ms, _ := st.MetricRange(ctx, string(KeySteps), day("2026-10-07"), day("2026-10-16"), metrics.AlgoVersion)
 	if len(ms) != 7 || ms[0].Source != rollupSource || ms[0].Zone != sp.String() {
 		t.Errorf("cached %d rows: %+v", len(ms), ms)
 	}
@@ -182,7 +182,7 @@ func TestActivityBadRows(t *testing.T) {
 	}
 	// A run with dropped rows is returned but not cached.
 	for _, k := range activityKeys {
-		if ms, _ := st.MetricRange(ctx, k, day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
+		if ms, _ := st.MetricRange(ctx, string(k), day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
 			t.Errorf("cached %s %+v", k, ms)
 		}
 	}
@@ -272,11 +272,11 @@ func TestBody(t *testing.T) {
 		t.Error("unknown body series accepted")
 	}
 	// The dropped readings may have been a day's first: nothing is cached.
-	if ms, _ := st.MetricRange(ctx, KeyWeight, day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
+	if ms, _ := st.MetricRange(ctx, string(KeyWeight), day("2026-10-10"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 0 {
 		t.Errorf("cached %+v", ms)
 	}
 	// Body fat read cleanly: its settled day is cached.
-	if ms, _ := st.MetricRange(ctx, KeyBodyFat, day("2026-10-12"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 1 {
+	if ms, _ := st.MetricRange(ctx, string(KeyBodyFat), day("2026-10-12"), day("2026-10-12"), metrics.AlgoVersion); len(ms) != 1 {
 		t.Errorf("cached body fat %+v", ms)
 	}
 }
@@ -291,7 +291,7 @@ func TestBodyCachesOnlySettledDays(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 10-13 is D-3, the last settled day; 10-14 and today stay live.
-	ms, _ := st.MetricRange(ctx, KeyWeight, day("2026-10-13"), day("2026-10-16"), metrics.AlgoVersion)
+	ms, _ := st.MetricRange(ctx, string(KeyWeight), day("2026-10-13"), day("2026-10-16"), metrics.AlgoVersion)
 	if len(ms) != 1 || ms[0].Date != day("2026-10-13") {
 		t.Errorf("cached %+v", ms)
 	}
@@ -323,7 +323,7 @@ func TestDroppedAZMRowIsNotZero(t *testing.T) {
 	if v := a.Days[day("2026-10-10")]; v.AZM != nil || !v.Worn || a.Skipped != 1 {
 		t.Errorf("10-10 = %+v, skipped %d", v, a.Skipped)
 	}
-	if ms, _ := st.MetricRange(ctx, KeySteps, day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
+	if ms, _ := st.MetricRange(ctx, string(KeySteps), day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
 		t.Errorf("cached %+v", ms)
 	}
 }
@@ -394,9 +394,9 @@ func TestNotWornDay(t *testing.T) {
 func TestBodyFromTheCache(t *testing.T) {
 	api := &fakeAPI{}
 	d, st := newData(t, api)
-	for _, k := range []string{KeyWeight, KeyBodyFat} {
+	for _, k := range []BodyKey{KeyWeight, KeyBodyFat} {
 		for _, dd := range []string{"2026-10-09", "2026-10-10"} {
-			if err := st.PutMetric(ctx, store.Metric{Date: day(dd), Key: k, Value: 50, Source: "Synthetic Scale", Zone: sp.String(), AlgoVersion: metrics.AlgoVersion}); err != nil {
+			if err := st.PutMetric(ctx, store.Metric{Date: day(dd), Key: string(k), Value: 50, Source: "Synthetic Scale", Zone: sp.String(), AlgoVersion: metrics.AlgoVersion}); err != nil {
 				t.Fatal(err)
 			}
 		}

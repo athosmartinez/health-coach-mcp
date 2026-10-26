@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -341,6 +342,105 @@ func TestCoachToolsGetTheConfiguredZoneAndClock(t *testing.T) {
 	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "invalid_input") {
 		t.Errorf("briefing for the 17th: %v %+v", err, res)
 	}
+}
+
+// The guardrails are always served; the prompts only with every tool they name.
+func TestPromptsNeedAStoreAndAHealthSource(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for name, c := range map[string]struct {
+		store   bool
+		health  bool
+		prompts bool
+	}{
+		"nothing":        {},
+		"store only":     {store: true},
+		"health only":    {health: true},
+		"store + health": {store: true, health: true, prompts: true},
+	} {
+		deps := testDeps()
+		if c.store {
+			deps.Store = st
+		}
+		if c.health {
+			deps.Health = noHealth{}
+		}
+		cs := connect(t, newServer(t, deps))
+		res, err := cs.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "coach://guardrails"})
+		if err != nil || len(res.Contents) != 1 || !strings.Contains(res.Contents[0].Text, "Never diagnose") {
+			t.Errorf("%s: guardrails %v %+v", name, err, res)
+		}
+		if got := cs.InitializeResult().Capabilities.Prompts != nil; got != c.prompts {
+			t.Errorf("%s: prompts advertised %v, want %v", name, got, c.prompts)
+		}
+		if !c.prompts {
+			continue
+		}
+		list, err := cs.ListPrompts(context.Background(), nil)
+		if err != nil || len(list.Prompts) != 4 {
+			t.Fatalf("%s: prompts %v %+v", name, err, list)
+		}
+		tools := toolNames(t, cs)
+		props := inputProperties(t, cs)
+		dated := regexp.MustCompile(`Call (\w+) with \{"(\w+)": "2026-10-10"\}`)
+		for _, p := range list.Prompts {
+			// The prompt's day argument is an optional field of its tool's input.
+			arg := p.Arguments[0].Name
+			got, err := cs.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: p.Name, Arguments: map[string]string{arg: "2026-10-10"}})
+			if err != nil {
+				t.Fatalf("%s: %v", p.Name, err)
+			}
+			m := dated.FindStringSubmatch(got.Messages[0].Content.(*mcp.TextContent).Text)
+			if m == nil || m[2] != arg {
+				t.Fatalf("%s: dated call %q, want the %s argument", p.Name, m, arg)
+			}
+			if in, ok := props[m[1]]; !ok || !in.has(arg) || slices.Contains(in.Required, arg) {
+				t.Errorf("%s: %s is not an optional field of %s's input %+v", p.Name, arg, m[1], in)
+			}
+		}
+		for _, p := range list.Prompts {
+			got, err := cs.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: p.Name})
+			if err != nil {
+				t.Fatalf("%s: %v", p.Name, err)
+			}
+			text := got.Messages[0].Content.(*mcp.TextContent).Text
+			// Every "Call <tool>" in a prompt names a registered tool.
+			for _, part := range strings.Split(text, "Call ")[1:] {
+				if tool, _, _ := strings.Cut(part, " "); !slices.Contains(tools, tool) {
+					t.Errorf("%s names %q, not a registered tool", p.Name, tool)
+				}
+			}
+		}
+	}
+}
+
+type inputSchema struct {
+	Properties map[string]json.RawMessage `json:"properties"`
+	Required   []string                   `json:"required"`
+}
+
+func (s inputSchema) has(field string) bool { _, ok := s.Properties[field]; return ok }
+
+// inputProperties returns each listed tool's input schema.
+func inputProperties(t *testing.T, cs *mcp.ClientSession) map[string]inputSchema {
+	t.Helper()
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]inputSchema{}
+	for _, tool := range res.Tools {
+		b, _ := json.Marshal(tool.InputSchema)
+		var in inputSchema
+		if err := json.Unmarshal(b, &in); err != nil {
+			t.Fatalf("%s: %v", tool.Name, err)
+		}
+		out[tool.Name] = in
+	}
+	return out
 }
 
 func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {

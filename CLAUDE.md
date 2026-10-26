@@ -139,6 +139,11 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   `DefaultThresholds()`, each baselined signal carries its own night count, reason codes are relative to the
   person's baseline) and quality flags (`ExerciseFlags`, `PartialDay`, `CheckLogging`). `AlgoVersion` keys the
   `daily_metrics` cache: bump it when a stored value's math changes.
+- `internal/prompts/` — MCP prompts `morning_briefing`, `nutrition_review` (runs `nutrition_day`), `workout_review`,
+  `weekly_report`: each tells the model to call `profile_get` and its tool, with the guardrails inline. The optional day
+  argument (`date`, or `week_end`) is parsed with `coach.ParseDate` before it reaches the text; `""` means omitted.
+  Resource `coach://guardrails` (embedded `guardrails.md`) is always served; the prompts only with a store and a
+  health source, since they name tools from both.
 - `internal/version/` — version injected via `-ldflags`.
 
 ## Rules

@@ -21,27 +21,32 @@ import (
 	"github.com/athosmartinez/health-coach-mcp/internal/store"
 )
 
+// RecoveryKey names a Recovery series. Its value is also the cache row key,
+// so a key's text never changes: a renamed key turns every cached day into a
+// miss.
+type RecoveryKey string
+
 // Daily value keys: the store's closed list (CAPABILITY §5.3).
 const (
-	KeyAsleep     = "sleep_asleep_min"
-	KeyAwake      = "sleep_awake_min"
-	KeyInBed      = "sleep_in_bed_min"
-	KeyDeep       = "sleep_deep_min"
-	KeyLight      = "sleep_light_min"
-	KeyREM        = "sleep_rem_min"
-	KeySleepStart = "sleep_start_min_of_day" // wraps at midnight: only for metrics.SleepOnsetConsistency, never a linear mean
-	KeySleepEnd   = "sleep_end_min_of_day"   // wraps at midnight too
-	KeyHRV        = "hrv_rmssd_ms"
-	KeyRestingHR  = "resting_hr_bpm"
+	KeyAsleep     RecoveryKey = "sleep_asleep_min"
+	KeyAwake      RecoveryKey = "sleep_awake_min"
+	KeyInBed      RecoveryKey = "sleep_in_bed_min"
+	KeyDeep       RecoveryKey = "sleep_deep_min"
+	KeyLight      RecoveryKey = "sleep_light_min"
+	KeyREM        RecoveryKey = "sleep_rem_min"
+	KeySleepStart RecoveryKey = "sleep_start_min_of_day" // wraps at midnight: only for metrics.SleepOnsetConsistency, never a linear mean
+	KeySleepEnd   RecoveryKey = "sleep_end_min_of_day"   // wraps at midnight too
+	KeyHRV        RecoveryKey = "hrv_rmssd_ms"
+	KeyRestingHR  RecoveryKey = "resting_hr_bpm"
 )
 
 // sleepKeys are the per-night rows. KeyAsleep is written last and removed
 // first, so a night is a cache hit only when its write completed.
-var sleepKeys = []string{KeyAsleep, KeyAwake, KeyInBed, KeyDeep, KeyLight, KeyREM, KeySleepStart, KeySleepEnd}
+var sleepKeys = []RecoveryKey{KeyAsleep, KeyAwake, KeyInBed, KeyDeep, KeyLight, KeyREM, KeySleepStart, KeySleepEnd}
 
 var (
-	coreKeys  = []string{KeyAwake, KeyInBed, KeySleepStart, KeySleepEnd} // with KeyAsleep, always present
-	stageKeys = []string{KeyDeep, KeyLight, KeyREM}                      // all or none
+	coreKeys  = []RecoveryKey{KeyAwake, KeyInBed, KeySleepStart, KeySleepEnd} // with KeyAsleep, always present
+	stageKeys = []RecoveryKey{KeyDeep, KeyLight, KeyREM}                      // all or none
 )
 
 const (
@@ -94,25 +99,40 @@ type Source interface {
 // inside it.
 type Night struct {
 	AsleepMin, AwakeMin, InBedMin float64
-	DeepMin, LightMin, REMMin     *float64 // nil without final stages
-	StartMinOfDay                 int      // local start time, minutes after midnight
+	Stages                        *Stages // nil without final stages
+	StartMinOfDay                 int     // local start time, minutes after midnight
 	// Start and End bound the night in local time, to the whole minute (the
 	// cache keeps minutes); for a split night, the first part's start and
 	// the last part's end.
 	Start, End time.Time
-	HRV        *float64 // median rMSSD (ms); nil when the samples cover too little of the night
-	// HRVCoverage is the share (0..1) of the night's 5-minute slots holding
-	// an HRV sample. With HRV nil and coverage above 0, the value was
-	// withheld for too little coverage (on a recent night, possibly samples
-	// still syncing), not missing.
-	HRVCoverage float64
-	Source      string
+	HRV        HRVNight
+	Source     string
 	// Provisional: Google has not finished processing the night (or sent it
 	// in a format the coach does not know), so its values may still change.
 	// Baselines leave it out. It says nothing about HRV still syncing: any
 	// night newer than the settled days may still change.
 	Provisional bool
 }
+
+// Stages holds a night's final stage minutes. Deep, light and REM add up to
+// the time asleep, within a couple of minutes per sleep record: each record
+// is checked when it is parsed, not by this type.
+type Stages struct {
+	DeepMin, LightMin, REMMin float64
+}
+
+// HRVNight is a night's heart rate variability.
+type HRVNight struct {
+	MedianMS *float64 // median rMSSD (ms); nil when the samples cover too little of the night
+	// Coverage is the share (0..1) of the night's 5-minute slots holding a
+	// sample. With MedianMS nil and coverage above 0, the value was withheld
+	// for too little coverage (on a recent night, possibly samples still
+	// syncing), not missing.
+	Coverage float64
+}
+
+// Withheld reports whether the night has samples but too few for a value.
+func (h HRVNight) Withheld() bool { return h.MedianMS == nil && h.Coverage > 0 }
 
 // RestingHR is one day's resting heart rate.
 type RestingHR struct {
@@ -156,14 +176,16 @@ type Recovery struct {
 
 // Series returns one point per day of [From, To] for key, nil where the value
 // is missing: every value, for reporting the days themselves.
-func (r Recovery) Series(key string) ([]metrics.Point, error) { return r.series(key, false) }
+func (r Recovery) Series(key RecoveryKey) ([]metrics.Point, error) { return r.series(key, false) }
 
 // BaselineSeries is Series without the values that must not shape a
 // baseline: provisional nights and resting heart rates from a non-standard
 // method.
-func (r Recovery) BaselineSeries(key string) ([]metrics.Point, error) { return r.series(key, true) }
+func (r Recovery) BaselineSeries(key RecoveryKey) ([]metrics.Point, error) {
+	return r.series(key, true)
+}
 
-func (r Recovery) series(key string, baseline bool) ([]metrics.Point, error) {
+func (r Recovery) series(key RecoveryKey, baseline bool) ([]metrics.Point, error) {
 	night := func(f func(Night) *float64) func(coach.LocalDate) *float64 {
 		return func(d coach.LocalDate) *float64 {
 			if n, ok := r.Nights[d]; ok && !(baseline && n.Provisional) {
@@ -171,6 +193,15 @@ func (r Recovery) series(key string, baseline bool) ([]metrics.Point, error) {
 			}
 			return nil
 		}
+	}
+	stageOf := func(f func(Stages) float64) func(coach.LocalDate) *float64 {
+		return night(func(n Night) *float64 {
+			if n.Stages == nil {
+				return nil
+			}
+			v := f(*n.Stages)
+			return &v
+		})
 	}
 	var get func(coach.LocalDate) *float64
 	switch key {
@@ -181,17 +212,17 @@ func (r Recovery) series(key string, baseline bool) ([]metrics.Point, error) {
 	case KeyInBed:
 		get = night(func(n Night) *float64 { return &n.InBedMin })
 	case KeyDeep:
-		get = night(func(n Night) *float64 { return n.DeepMin })
+		get = stageOf(func(s Stages) float64 { return s.DeepMin })
 	case KeyLight:
-		get = night(func(n Night) *float64 { return n.LightMin })
+		get = stageOf(func(s Stages) float64 { return s.LightMin })
 	case KeyREM:
-		get = night(func(n Night) *float64 { return n.REMMin })
+		get = stageOf(func(s Stages) float64 { return s.REMMin })
 	case KeySleepStart:
 		get = night(func(n Night) *float64 { v := float64(n.StartMinOfDay); return &v })
 	case KeySleepEnd:
 		get = night(func(n Night) *float64 { v := float64(minuteOfDay(n.End)); return &v })
 	case KeyHRV:
-		get = night(func(n Night) *float64 { return n.HRV })
+		get = night(func(n Night) *float64 { return n.HRV.MedianMS })
 	case KeyRestingHR:
 		get = func(d coach.LocalDate) *float64 {
 			if v, ok := r.RestingHR[d]; ok && !(baseline && !v.Standard()) {
@@ -258,13 +289,13 @@ func (d *Data) Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery
 	r := Recovery{From: from, To: to, Nights: map[coach.LocalDate]Night{}, RestingHR: map[coach.LocalDate]RestingHR{}}
 	f := &fetch{r: &r, settled: settled, sources: map[string]bool{}, empty: map[googlehealth.DataType]bool{}}
 
-	cached, err := d.readCache(ctx, from, min(to, settled), append(slices.Clone(sleepKeys), KeyHRV, KeyRestingHR)...)
+	cached, err := readCache(ctx, d, from, min(to, settled), append(slices.Clone(sleepKeys), KeyHRV, KeyRestingHR)...)
 	if err != nil {
 		return Recovery{}, err
 	}
 	var needSleep, needResting []coach.LocalDate
 	for _, day := range days {
-		if n, ok := cached.night(day, d.loc); ok {
+		if n, ok := cachedNight(cached, day, d.loc); ok {
 			r.Nights[day] = n
 			f.sources[n.Source] = true
 		} else {
@@ -294,14 +325,14 @@ func (d *Data) Recovery(ctx context.Context, from, to coach.LocalDate) (Recovery
 	return r, nil
 }
 
-type cacheRows map[string]map[coach.LocalDate]store.Metric
+type cacheRows[K ~string] map[K]map[coach.LocalDate]store.Metric
 
-func (c cacheRows) night(day coach.LocalDate, loc *time.Location) (Night, bool) {
+func cachedNight(c cacheRows[RecoveryKey], day coach.LocalDate, loc *time.Location) (Night, bool) {
 	asleep, ok := c[KeyAsleep][day]
 	if !ok {
 		return Night{}, false
 	}
-	vals := map[string]float64{}
+	vals := map[RecoveryKey]float64{}
 	for _, k := range coreKeys {
 		m, ok := c[k][day]
 		if !ok {
@@ -316,15 +347,14 @@ func (c cacheRows) night(day coach.LocalDate, loc *time.Location) (Night, bool) 
 	if n.Start, n.End, ok = window(day, n.StartMinOfDay, int(vals[KeySleepEnd]), loc); !ok {
 		return Night{}, false
 	}
-	var stages []*float64
+	var stages []float64
 	for _, k := range stageKeys {
 		if m, ok := c[k][day]; ok {
-			v := m.Value
-			stages = append(stages, &v)
+			stages = append(stages, m.Value)
 		}
 	}
 	if len(stages) == len(stageKeys) {
-		n.DeepMin, n.LightMin, n.REMMin = stages[0], stages[1], stages[2]
+		n.Stages = &Stages{DeepMin: stages[0], LightMin: stages[1], REMMin: stages[2]}
 	} else if len(stages) != 0 {
 		return Night{}, false // stage rows are all or none
 	}
@@ -333,7 +363,7 @@ func (c cacheRows) night(day coach.LocalDate, loc *time.Location) (Night, bool) 
 			return Night{}, false
 		}
 		v := m.Value
-		n.HRV, n.HRVCoverage = &v, coverage(*m.NSamples, n.InBedMin)
+		n.HRV = HRVNight{MedianMS: &v, Coverage: coverage(*m.NSamples, n.InBedMin)}
 	}
 	return n, true
 }
@@ -341,13 +371,13 @@ func (c cacheRows) night(day coach.LocalDate, loc *time.Location) (Night, bool) 
 // readCache loads keys for the settled days [from, to], keeping only rows
 // computed in the configured zone; an empty range (to before from: nothing
 // settled yet) reads nothing.
-func (d *Data) readCache(ctx context.Context, from, to coach.LocalDate, keys ...string) (cacheRows, error) {
-	rows := cacheRows{}
+func readCache[K ~string](ctx context.Context, d *Data, from, to coach.LocalDate, keys ...K) (cacheRows[K], error) {
+	rows := cacheRows[K]{}
 	if to < from {
 		return rows, nil
 	}
 	for _, k := range keys {
-		ms, err := d.cache.MetricRange(ctx, k, from, to, metrics.AlgoVersion)
+		ms, err := d.cache.MetricRange(ctx, string(k), from, to, metrics.AlgoVersion)
 		if err != nil {
 			return nil, fmt.Errorf("healthdata: read cache: %w", err)
 		}
@@ -458,7 +488,7 @@ func (d *Data) fetchNights(ctx context.Context, a, b coach.LocalDate, f *fetch) 
 		// syncing. A night whose own samples were all left out (another
 		// platform, no value) is not "no HRV" but a format change: caching it
 		// would keep the gap after the parsing is fixed.
-		finalHRV := n.HRV != nil || (n.HRVCoverage == 0 && foreignIn == 0)
+		finalHRV := !n.HRV.Withheld() && (n.HRV.MedianMS != nil || foreignIn == 0)
 		if day <= f.settled && !runTainted && !tainted[day] && settled && finalHRV && noValueIn == 0 {
 			d.putNight(ctx, day, n)
 		}
@@ -541,20 +571,22 @@ func (d *Data) night(parts []session, samples []hrvSample) (n Night, settled boo
 		Start: parts[0].start.In(d.loc).Truncate(time.Minute), End: parts[len(parts)-1].end.In(d.loc).Truncate(time.Minute),
 	}
 	settled, staged := true, true
-	var deep, light, rem float64
+	var st Stages
 	for _, p := range parts {
 		n.AsleepMin += p.asleep
 		n.AwakeMin += p.awake
 		n.InBedMin += p.inBed
 		settled = settled && p.settled
-		if p.deep == nil {
+		if p.stages == nil {
 			staged = false
 			continue
 		}
-		deep, light, rem = deep+*p.deep, light+*p.light, rem+*p.rem
+		st.DeepMin += p.stages.DeepMin
+		st.LightMin += p.stages.LightMin
+		st.REMMin += p.stages.REMMin
 	}
 	if staged {
-		n.DeepMin, n.LightMin, n.REMMin = &deep, &light, &rem
+		n.Stages = &st
 	}
 	n.Provisional = !settled
 
@@ -570,12 +602,12 @@ func (d *Data) night(parts []session, samples []hrvSample) (n Night, settled boo
 		}
 		slots = append(slots, ps...)
 	}
-	n.HRVCoverage = coverage(count(slots), n.InBedMin)
+	n.HRV.Coverage = coverage(count(slots), n.InBedMin)
 	half := len(slots) / 2
-	if len(vals) >= minHRVSamples && n.HRVCoverage >= minHRVCoverage &&
+	if len(vals) >= minHRVSamples && n.HRV.Coverage >= minHRVCoverage &&
 		share(slots[:half]) >= minHalfCoverage && share(slots[half:]) >= minHalfCoverage {
 		m := median(vals)
-		n.HRV = &m
+		n.HRV.MedianMS = &m
 	}
 	return n, settled
 }
@@ -592,7 +624,7 @@ func coverage(covered int, inBedMin float64) float64 {
 }
 
 func coveredSlots(n Night) int {
-	return int(math.Round(n.HRVCoverage * float64(slotCount(n.InBedMin))))
+	return int(math.Round(n.HRV.Coverage * float64(slotCount(n.InBedMin))))
 }
 
 func count(b []bool) (c int) {
@@ -615,43 +647,47 @@ func share(b []bool) float64 {
 // written last, so a write that fails halfway leaves a miss, never a night
 // mixing old and new rows. Stage and HRV rows are written or removed.
 func (d *Data) putNight(ctx context.Context, day coach.LocalDate, n Night) {
-	if !d.del(ctx, day, KeyAsleep) {
+	if !d.del(ctx, day, string(KeyAsleep)) {
 		return
 	}
 	var hrv *store.Metric
-	if n.HRV != nil {
+	if n.HRV.MedianMS != nil {
 		slots := coveredSlots(n)
-		hrv = &store.Metric{Date: day, Key: KeyHRV, Value: *n.HRV, NSamples: &slots, Source: n.Source}
+		hrv = &store.Metric{Date: day, Key: string(KeyHRV), Value: *n.HRV.MedianMS, NSamples: &slots, Source: n.Source}
+	}
+	var deep, light, rem *float64
+	if s := n.Stages; s != nil {
+		deep, light, rem = &s.DeepMin, &s.LightMin, &s.REMMin
 	}
 	optional := []struct {
-		key string
+		key RecoveryKey
 		m   *store.Metric
 	}{
-		{KeyDeep, d.row(day, KeyDeep, n.DeepMin, n.Source)},
-		{KeyLight, d.row(day, KeyLight, n.LightMin, n.Source)},
-		{KeyREM, d.row(day, KeyREM, n.REMMin, n.Source)},
+		{KeyDeep, d.row(day, KeyDeep, deep, n.Source)},
+		{KeyLight, d.row(day, KeyLight, light, n.Source)},
+		{KeyREM, d.row(day, KeyREM, rem, n.Source)},
 		{KeyHRV, hrv},
 	}
 	for _, o := range optional {
-		if !d.putOrDel(ctx, day, o.key, o.m) {
+		if !d.putOrDel(ctx, day, string(o.key), o.m) {
 			return
 		}
 	}
-	for k, v := range map[string]float64{
+	for k, v := range map[RecoveryKey]float64{
 		KeyAwake: n.AwakeMin, KeyInBed: n.InBedMin, KeySleepStart: float64(n.StartMinOfDay), KeySleepEnd: float64(minuteOfDay(n.End)),
 	} {
-		if !d.put(ctx, store.Metric{Date: day, Key: k, Value: v, Source: n.Source}) {
+		if !d.put(ctx, store.Metric{Date: day, Key: string(k), Value: v, Source: n.Source}) {
 			return
 		}
 	}
-	d.put(ctx, store.Metric{Date: day, Key: KeyAsleep, Value: n.AsleepMin, Source: n.Source})
+	d.put(ctx, store.Metric{Date: day, Key: string(KeyAsleep), Value: n.AsleepMin, Source: n.Source})
 }
 
-func (d *Data) row(day coach.LocalDate, key string, v *float64, source string) *store.Metric {
+func (d *Data) row(day coach.LocalDate, key RecoveryKey, v *float64, source string) *store.Metric {
 	if v == nil {
 		return nil
 	}
-	return &store.Metric{Date: day, Key: key, Value: *v, Source: source}
+	return &store.Metric{Date: day, Key: string(key), Value: *v, Source: source}
 }
 
 // putOrDel writes m when present, else removes the row.
@@ -737,7 +773,7 @@ func (d *Data) fetchResting(ctx context.Context, a, b coach.LocalDate, f *fetch)
 		r.RestingHR[day] = h
 		f.sources[v.source] = true
 		if day <= f.settled && !runTainted && !tainted[day] && len(vs) == 1 && h.Standard() {
-			d.put(ctx, store.Metric{Date: day, Key: KeyRestingHR, Value: v.bpm, Source: v.source})
+			d.put(ctx, store.Metric{Date: day, Key: string(KeyRestingHR), Value: v.bpm, Source: v.source})
 		}
 	}
 	return nil

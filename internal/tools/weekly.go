@@ -438,17 +438,16 @@ func bodyOf(body healthdata.Body, sp weekSpan, flags *flagSet, sources sourceSet
 func cardioOf(rec healthdata.Recovery, act healthdata.Activity, sp weekSpan) (WeeklyCardio, error) {
 	var c WeeklyCardio
 	for _, m := range []struct {
-		series func(string) ([]metrics.Point, error)
-		key    string
+		series func() ([]metrics.Point, error)
 		min    float64
 		dst    *WeekMetric
 	}{
-		{rec.BaselineSeries, healthdata.KeyRestingHR, trendRestingHRBPM, &c.RestingHRBPM},
-		{rec.BaselineSeries, healthdata.KeyHRV, trendHRVMS, &c.HRVMS},
-		{act.BaselineSeries, healthdata.KeySteps, trendSteps, &c.StepsPerDay},
-		{act.BaselineSeries, healthdata.KeyAZM, trendAZMMin, &c.AZMPerDay},
+		{bind(rec.BaselineSeries, healthdata.KeyRestingHR), trendRestingHRBPM, &c.RestingHRBPM},
+		{bind(rec.BaselineSeries, healthdata.KeyHRV), trendHRVMS, &c.HRVMS},
+		{bind(act.BaselineSeries, healthdata.KeySteps), trendSteps, &c.StepsPerDay},
+		{bind(act.BaselineSeries, healthdata.KeyAZM), trendAZMMin, &c.AZMPerDay},
 	} {
-		series, err := m.series(m.key)
+		series, err := m.series()
 		if err != nil {
 			return c, err
 		}
@@ -457,6 +456,12 @@ func cardioOf(rec healthdata.Recovery, act healthdata.Activity, sp weekSpan) (We
 		}
 	}
 	return c, nil
+}
+
+// bind fixes the key of a series method, so series of different sources fit
+// one table.
+func bind[K ~string](series func(K) ([]metrics.Point, error), key K) func() ([]metrics.Point, error) {
+	return func() ([]metrics.Point, error) { return series(key) }
 }
 
 func sleepWeekOf(rec healthdata.Recovery, sp weekSpan) (WeeklySleep, error) {

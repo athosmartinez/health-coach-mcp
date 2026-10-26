@@ -26,9 +26,9 @@ func night(t *testing.T, day coach.LocalDate, asleep, inBed float64, hrv *float6
 	light := asleep - deep - rem
 	return healthdata.Night{
 		AsleepMin: asleep, AwakeMin: inBed - asleep, InBedMin: inBed,
-		DeepMin: &deep, LightMin: &light, REMMin: &rem,
+		Stages:        &healthdata.Stages{DeepMin: deep, LightMin: light, REMMin: rem},
 		StartMinOfDay: start.Hour()*60 + start.Minute(), Start: start, End: wake,
-		HRV: hrv, HRVCoverage: 1, Source: "Synthetic Band",
+		HRV: healthdata.HRVNight{MedianMS: hrv, Coverage: 1}, Source: "Synthetic Band",
 	}
 }
 
@@ -126,7 +126,7 @@ func TestBriefingReturnsExactlyTheContractFields(t *testing.T) {
 
 func TestBriefingReadinessLevels(t *testing.T) {
 	setHRV := func(v float64) func(*fakeHealth) {
-		return func(h *fakeHealth) { n := h.nights[coachToday]; n.HRV = f64(v); h.nights[coachToday] = n }
+		return func(h *fakeHealth) { n := h.nights[coachToday]; n.HRV.MedianMS = f64(v); h.nights[coachToday] = n }
 	}
 	for _, tc := range []struct {
 		name    string
@@ -142,7 +142,7 @@ func TestBriefingReadinessLevels(t *testing.T) {
 		{"short sleep yellow", func(h *fakeHealth) { h.nights[coachToday] = night(t, coachToday, 400, 450, f64(50)) }, "yellow", "[sleep_short]"},
 		{"missing signals", func(h *fakeHealth) {
 			n := h.nights[coachToday]
-			n.HRV = nil
+			n.HRV.MedianMS = nil
 			h.nights[coachToday] = n
 			delete(h.resting, coachToday)
 		}, "green", "[missing:hrv missing:resting_hr]"},
@@ -183,7 +183,7 @@ func TestBriefingWithAShortHistory(t *testing.T) {
 func TestBriefingWithNothingBeforeTheNight(t *testing.T) {
 	h := history(t, 0)
 	n := h.nights[coachToday]
-	n.DeepMin, n.LightMin, n.REMMin, n.HRV, n.HRVCoverage = nil, nil, nil, nil, 0
+	n.Stages, n.HRV = nil, healthdata.HRVNight{}
 	h.nights[coachToday] = n
 	out := coachSession(t, h, nil).ok("morning_briefing", nil)
 	data := out["data"]
@@ -221,7 +221,7 @@ func TestBriefingBaselinesSkipProvisionalNights(t *testing.T) {
 func TestBriefingQualityFlags(t *testing.T) {
 	h := history(t, 28)
 	n := h.nights[coachToday]
-	n.Provisional, n.HRV, n.HRVCoverage = true, nil, 0.3
+	n.Provisional, n.HRV = true, healthdata.HRVNight{Coverage: 0.3}
 	h.nights[coachToday] = n
 	h.resting[coachToday] = healthdata.RestingHR{BPM: 61, Method: "OTHER"}
 	h.recovery.Skipped = 1
@@ -293,7 +293,7 @@ func TestBriefingComparesEachWindow(t *testing.T) {
 	// each field gives its own average.
 	for i := 1; i <= 28; i++ {
 		d := addDays(t, coachToday, -i)
-		hrv := h.nights[d].HRV
+		hrv := h.nights[d].HRV.MedianMS
 		if i <= 7 {
 			h.nights[d] = night(t, d, 420, 480, hrv)
 		} else {
@@ -329,14 +329,14 @@ func TestBriefingSignalsUseTheirOwnBaselines(t *testing.T) {
 	for i := 11; i <= 28; i++ {
 		d := addDays(t, coachToday, -i)
 		n := h.nights[d]
-		n.HRV, n.HRVCoverage = nil, 0
+		n.HRV = healthdata.HRVNight{}
 		h.nights[d] = n
 	}
 	for i := 6; i <= 28; i++ {
 		delete(h.resting, addDays(t, coachToday, -i))
 	}
 	n := h.nights[coachToday]
-	n.HRV = f64(47)
+	n.HRV.MedianMS = f64(47)
 	h.nights[coachToday] = n
 	out := coachSession(t, h, nil).ok("morning_briefing", nil)
 	data := out["data"]

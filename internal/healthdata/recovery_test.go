@@ -344,12 +344,12 @@ func TestNightBelongsToTheDayItEnds(t *testing.T) {
 	}
 	if n.InBedMin != 510 || n.AsleepMin != 470 || n.AwakeMin != 40 || n.StartMinOfDay != 23*60+10 ||
 		!n.Start.Equal(at("2026-10-09", 23, 10)) || !n.End.Equal(at("2026-10-10", 7, 40)) ||
-		*n.DeepMin != 70 || *n.REMMin != 94 || *n.LightMin != 306 || n.Source != "Synthetic Band" || n.Provisional {
+		n.Stages.DeepMin != 70 || n.Stages.REMMin != 94 || n.Stages.LightMin != 306 || n.Source != "Synthetic Band" || n.Provisional {
 		t.Errorf("night = %+v", n)
 	}
 	// 97 samples fill 97 of the night's 102 five-minute slots.
-	if n.HRV == nil || *n.HRV != 42 || n.HRVCoverage != 97.0/102 {
-		t.Errorf("HRV = %v, coverage %v", n.HRV, n.HRVCoverage)
+	if n.HRV.MedianMS == nil || *n.HRV.MedianMS != 42 || n.HRV.Coverage != 97.0/102 {
+		t.Errorf("HRV = %v, coverage %v", n.HRV.MedianMS, n.HRV.Coverage)
 	}
 	if fmt.Sprint(r.Sources) != "[Synthetic Band]" || r.Skipped != 0 || r.Empty != nil {
 		t.Errorf("sources %v, skipped %d, empty %v", r.Sources, r.Skipped, r.Empty)
@@ -389,7 +389,7 @@ func TestCachedNightKeepsItsWindow(t *testing.T) {
 		t.Errorf("cached start %v", n.Start)
 	}
 	// A night cached before the end row existed is a miss, not a night without an end.
-	if err := st.DeleteMetric(ctx, day("2026-10-11"), KeySleepEnd); err != nil {
+	if err := st.DeleteMetric(ctx, day("2026-10-11"), string(KeySleepEnd)); err != nil {
 		t.Fatal(err)
 	}
 	again, err := d.Recovery(ctx, day("2026-10-11"), day("2026-10-11"))
@@ -400,7 +400,7 @@ func TestCachedNightKeepsItsWindow(t *testing.T) {
 		t.Errorf("calls %v, night %+v", calls, again.Nights[day("2026-10-11")])
 	}
 	// A stored minute outside a day is a miss too.
-	if err := st.PutMetric(ctx, store.Metric{Date: day("2026-10-11"), Key: KeySleepEnd, Value: 24 * 60, Source: "Synthetic Band",
+	if err := st.PutMetric(ctx, store.Metric{Date: day("2026-10-11"), Key: string(KeySleepEnd), Value: 24 * 60, Source: "Synthetic Band",
 		AlgoVersion: metrics.AlgoVersion, Zone: sp.String()}); err != nil {
 		t.Fatal(err)
 	}
@@ -409,6 +409,18 @@ func TestCachedNightKeepsItsWindow(t *testing.T) {
 	}
 	if calls := api.takeCalls(); !slices.Contains(calls, "sleep 2026-10-10..2026-10-12") {
 		t.Errorf("a corrupt end minute was read as a night: %v", calls)
+	}
+	// Stage rows are all or none: a night missing one is a miss, not a night
+	// with partial stages.
+	if err := st.DeleteMetric(ctx, day("2026-10-10"), string(KeyREM)); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := api.takeCalls(); !slices.Contains(calls, "sleep 2026-10-09..2026-10-11") || partial.Nights[day("2026-10-10")].Stages == nil {
+		t.Errorf("calls %v, night %+v", calls, partial.Nights[day("2026-10-10")])
 	}
 }
 
@@ -421,7 +433,7 @@ func TestLongestSessionIsTheNight(t *testing.T) {
 	)
 	d, _ := newData(t, api)
 	r, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
-	if n := r.Nights[day("2026-10-10")]; err != nil || n.InBedMin != 390 || *n.DeepMin != 50 || r.Excluded.ExtraSessions != 1 {
+	if n := r.Nights[day("2026-10-10")]; err != nil || n.InBedMin != 390 || n.Stages.DeepMin != 50 || r.Excluded.ExtraSessions != 1 {
 		t.Errorf("night = %+v, excluded %+v, %v", n, r.Excluded, err)
 	}
 	// Equal sessions: the later one wins.
@@ -432,7 +444,7 @@ func TestLongestSessionIsTheNight(t *testing.T) {
 	)
 	d2, _ := newData(t, api2)
 	r2, _ := d2.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
-	if n := r2.Nights[day("2026-10-10")]; *n.DeepMin != 40 {
+	if n := r2.Nights[day("2026-10-10")]; n.Stages.DeepMin != 40 {
 		t.Errorf("tie kept %+v", n)
 	}
 }
@@ -453,14 +465,14 @@ func TestSplitNightIsJoined(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := r.Nights[day("2026-10-10")]
-	if n.InBedMin != 465 || n.AsleepMin != 415 || n.AwakeMin != 50 || *n.DeepMin != 70 || *n.REMMin != 32+51 ||
+	if n.InBedMin != 465 || n.AsleepMin != 415 || n.AwakeMin != 50 || n.Stages.DeepMin != 70 || n.Stages.REMMin != 32+51 ||
 		n.StartMinOfDay != 22*60+30 || r.Excluded.ExtraSessions != 0 ||
 		!n.Start.Equal(at("2026-10-09", 22, 30)) || !n.End.Equal(at("2026-10-10", 7, 0)) {
 		t.Errorf("night = %+v, excluded %+v", n, r.Excluded)
 	}
 	// The median runs over both parts (36 samples at 40, 57 at 60), not the gap.
-	if n.HRV == nil || *n.HRV != 60 || n.HRVCoverage != 1 {
-		t.Errorf("HRV = %v, coverage %v", n.HRV, n.HRVCoverage)
+	if n.HRV.MedianMS == nil || *n.HRV.MedianMS != 60 || n.HRV.Coverage != 1 {
+		t.Errorf("HRV = %v, coverage %v", n.HRV.MedianMS, n.HRV.Coverage)
 	}
 	// A cached split night reads back the same.
 	warm, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
@@ -476,10 +488,10 @@ func TestSplitNightWithAnUnstagedPart(t *testing.T) {
 	d, st := newData(t, api)
 	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
 	n := r.Nights[day("2026-10-10")]
-	if n.InBedMin != 420 || n.DeepMin != nil || n.LightMin != nil || !n.Provisional {
+	if n.InBedMin != 420 || n.Stages != nil || !n.Provisional {
 		t.Errorf("night = %+v", n)
 	}
-	if ms, _ := st.MetricRange(ctx, KeyAsleep, day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
+	if ms, _ := st.MetricRange(ctx, string(KeyAsleep), day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
 		t.Error("a night with a part still processing was cached")
 	}
 }
@@ -492,7 +504,7 @@ func TestOverlappingCopiesAreNotSummed(t *testing.T) {
 	)
 	d, _ := newData(t, api)
 	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
-	if n := r.Nights[day("2026-10-10")]; n.InBedMin != 480 || *n.DeepMin != 60 || r.Excluded.ExtraSessions != 1 {
+	if n := r.Nights[day("2026-10-10")]; n.InBedMin != 480 || n.Stages.DeepMin != 60 || r.Excluded.ExtraSessions != 1 {
 		t.Errorf("night = %+v, excluded %+v", n, r.Excluded)
 	}
 	// The longer copy wins even when it starts later.
@@ -503,7 +515,7 @@ func TestOverlappingCopiesAreNotSummed(t *testing.T) {
 	)
 	d2, _ := newData(t, api2)
 	r2, _ := d2.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
-	if n := r2.Nights[day("2026-10-10")]; n.InBedMin != 480 || *n.DeepMin != 60 {
+	if n := r2.Nights[day("2026-10-10")]; n.InBedMin != 480 || n.Stages.DeepMin != 60 {
 		t.Errorf("night = %+v", n)
 	}
 }
@@ -517,7 +529,7 @@ func TestOnlyANapIsNoNight(t *testing.T) {
 		t.Fatalf("nights = %+v, empty %v, excluded %+v, %v", r.Nights, r.Empty, r.Excluded, err)
 	}
 	// A missing value is never cached: the next call asks again.
-	if ms, _ := st.MetricRange(ctx, KeyAsleep, day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
+	if ms, _ := st.MetricRange(ctx, string(KeyAsleep), day("2026-10-10"), day("2026-10-10"), metrics.AlgoVersion); len(ms) != 0 {
 		t.Errorf("cached a missing night: %+v", ms)
 	}
 	api.takeCalls()
@@ -572,7 +584,7 @@ func TestSettledDaysComeFromTheCache(t *testing.T) {
 		t.Errorf("second call fetched %v\nwant %v", got, want)
 	}
 	assertSame(t, first, second)
-	if n := second.Nights[day("2026-10-10")]; n.HRVCoverage != 1 || *n.HRV != 50 || n.Source != "Synthetic Band" {
+	if n := second.Nights[day("2026-10-10")]; n.HRV.Coverage != 1 || *n.HRV.MedianMS != 50 || n.Source != "Synthetic Band" {
 		t.Errorf("cached night = %+v", n)
 	}
 	if h := second.RestingHR[day("2026-10-10")]; !h.Standard() || h.BPM != 60 {
@@ -582,7 +594,7 @@ func TestSettledDaysComeFromTheCache(t *testing.T) {
 
 func assertSame(t *testing.T, a, b Recovery) {
 	t.Helper()
-	for _, k := range append(append([]string{}, sleepKeys...), KeyHRV, KeyRestingHR) {
+	for _, k := range append(slices.Clone(sleepKeys), KeyHRV, KeyRestingHR) {
 		sa, _ := a.Series(k)
 		sb, _ := b.Series(k)
 		if render(sa) != render(sb) {
@@ -590,8 +602,8 @@ func assertSame(t *testing.T, a, b Recovery) {
 		}
 	}
 	for d, n := range a.Nights {
-		if m := b.Nights[d]; m.HRVCoverage != n.HRVCoverage || m.Provisional != n.Provisional {
-			t.Errorf("%s: coverage %v vs %v, provisional %v vs %v", d, n.HRVCoverage, m.HRVCoverage, n.Provisional, m.Provisional)
+		if m := b.Nights[d]; m.HRV.Coverage != n.HRV.Coverage || m.Provisional != n.Provisional {
+			t.Errorf("%s: coverage %v vs %v, provisional %v vs %v", d, n.HRV.Coverage, m.HRV.Coverage, n.Provisional, m.Provisional)
 		}
 		if m := b.Nights[d]; !m.Start.Equal(n.Start) || !m.End.Equal(n.End) {
 			t.Errorf("%s: window %v–%v vs %v–%v", d, n.Start, n.End, m.Start, m.End)
@@ -636,7 +648,7 @@ func TestAnotherAlgoVersionIsAMiss(t *testing.T) {
 	week(api)
 	d, st := newData(t, api)
 	// A row from another derivation of the same day.
-	if err := st.PutMetric(ctx, store.Metric{Date: day("2026-10-10"), Key: KeyRestingHR, Value: 99, Zone: sp.String(), AlgoVersion: metrics.AlgoVersion + 1}); err != nil {
+	if err := st.PutMetric(ctx, store.Metric{Date: day("2026-10-10"), Key: string(KeyRestingHR), Value: 99, Zone: sp.String(), AlgoVersion: metrics.AlgoVersion + 1}); err != nil {
 		t.Fatal(err)
 	}
 	r, err := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
@@ -667,7 +679,7 @@ func TestAnotherZoneIsAMiss(t *testing.T) {
 	// Rows without a zone (written before zones were stored) are a miss too.
 	st2 := openStore(t)
 	for _, k := range sleepKeys {
-		if err := st2.PutMetric(ctx, store.Metric{Date: day("2026-10-10"), Key: k, Value: 1, AlgoVersion: metrics.AlgoVersion}); err != nil {
+		if err := st2.PutMetric(ctx, store.Metric{Date: day("2026-10-10"), Key: string(k), Value: 1, AlgoVersion: metrics.AlgoVersion}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -703,9 +715,9 @@ func TestOnlyTheGapIsFetched(t *testing.T) {
 
 func cachedKeys(st *store.Store, dd string) []string {
 	var keys []string
-	for _, k := range append(append([]string{}, sleepKeys...), KeyHRV, KeyRestingHR) {
-		if ms, _ := st.MetricRange(ctx, k, day(dd), day(dd), metrics.AlgoVersion); len(ms) > 0 {
-			keys = append(keys, k)
+	for _, k := range append(slices.Clone(sleepKeys), KeyHRV, KeyRestingHR) {
+		if ms, _ := st.MetricRange(ctx, string(k), day(dd), day(dd), metrics.AlgoVersion); len(ms) > 0 {
+			keys = append(keys, string(k))
 		}
 	}
 	return keys
@@ -732,7 +744,7 @@ func TestWhatIsCached(t *testing.T) {
 		oneNight(api, sleepOpt{deep: 60, pending: true})
 		d, st := newData(t, api)
 		r, _ := d.Recovery(ctx, d10, d10)
-		if n := r.Nights[d10]; n.DeepMin != nil || n.LightMin != nil || n.REMMin != nil || !n.Provisional || n.AsleepMin != 440 {
+		if n := r.Nights[d10]; n.Stages != nil || !n.Provisional || n.AsleepMin != 440 {
 			t.Errorf("night %+v", n)
 		}
 		if got := cachedKeys(st, "2026-10-10"); len(got) != 0 {
@@ -744,7 +756,7 @@ func TestWhatIsCached(t *testing.T) {
 		oneNight(api, sleepOpt{classic: true})
 		d, st := newData(t, api)
 		r, _ := d.Recovery(ctx, d10, d10)
-		if n := r.Nights[d10]; n.DeepMin != nil || n.AsleepMin == 0 || n.Provisional {
+		if n := r.Nights[d10]; n.Stages != nil || n.AsleepMin == 0 || n.Provisional {
 			t.Errorf("night %+v", n)
 		}
 		if got := fmt.Sprint(cachedKeys(st, "2026-10-10")); got != "[sleep_asleep_min sleep_awake_min sleep_in_bed_min sleep_start_min_of_day sleep_end_min_of_day]" {
@@ -762,7 +774,7 @@ func TestWhatIsCached(t *testing.T) {
 		oneNight(api, sleepOpt{typ: "SEGMENTS", deep: 60})
 		d, st := newData(t, api)
 		r, _ := d.Recovery(ctx, d10, d10)
-		if n := r.Nights[d10]; n.DeepMin != nil || !n.Provisional || r.Excluded.UnknownSleepType != 1 {
+		if n := r.Nights[d10]; n.Stages != nil || !n.Provisional || r.Excluded.UnknownSleepType != 1 {
 			t.Errorf("night %+v, excluded %+v", n, r.Excluded)
 		}
 		if got := cachedKeys(st, "2026-10-10"); len(got) != 0 {
@@ -774,7 +786,7 @@ func TestWhatIsCached(t *testing.T) {
 		oneNight(api, sleepOpt{}) // no DEEP entry: the API omits zero
 		d, _ := newData(t, api)
 		r, _ := d.Recovery(ctx, d10, d10)
-		if n := r.Nights[d10]; n.DeepMin == nil || *n.DeepMin != 0 {
+		if n := r.Nights[d10]; n.Stages == nil || n.Stages.DeepMin != 0 {
 			t.Errorf("night %+v", n)
 		}
 	})
@@ -784,8 +796,8 @@ func TestWhatIsCached(t *testing.T) {
 		d, st := newData(t, api)
 		// Rows already in the cache for D-2 and D-1 are never read.
 		for _, dd := range []string{"2026-10-14", "2026-10-15"} {
-			for _, k := range append(append([]string{}, sleepKeys...), KeyRestingHR) {
-				if err := st.PutMetric(ctx, store.Metric{Date: day(dd), Key: k, Value: 1, Zone: sp.String(), AlgoVersion: metrics.AlgoVersion}); err != nil {
+			for _, k := range append(slices.Clone(sleepKeys), KeyRestingHR) {
+				if err := st.PutMetric(ctx, store.Metric{Date: day(dd), Key: string(k), Value: 1, Zone: sp.String(), AlgoVersion: metrics.AlgoVersion}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -801,6 +813,41 @@ func TestWhatIsCached(t *testing.T) {
 			t.Errorf("D-3 cached %v", cachedKeys(st, "2026-10-13"))
 		}
 	})
+}
+
+// The key text is also the cache row key: a changed or swapped text would
+// read existing rows as another metric.
+func TestKeyTextIsStable(t *testing.T) {
+	for got, want := range map[string]string{
+		string(KeyAsleep): "sleep_asleep_min", string(KeyAwake): "sleep_awake_min", string(KeyInBed): "sleep_in_bed_min",
+		string(KeyDeep): "sleep_deep_min", string(KeyLight): "sleep_light_min", string(KeyREM): "sleep_rem_min",
+		string(KeySleepStart): "sleep_start_min_of_day", string(KeySleepEnd): "sleep_end_min_of_day",
+		string(KeyHRV): "hrv_rmssd_ms", string(KeyRestingHR): "resting_hr_bpm",
+		string(KeySteps): "steps", string(KeyAZM): "azm_min", string(KeyTotalCalories): "total_calories_kcal",
+		string(KeyWeight): "weight_kg", string(KeyBodyFat): "body_fat_pct",
+	} {
+		if got != want {
+			t.Errorf("key %q, want %q", got, want)
+		}
+		if !slices.Contains(store.MetricKeys, want) {
+			t.Errorf("%q is not a store metric key", want)
+		}
+	}
+}
+
+func TestHRVWithheld(t *testing.T) {
+	for _, c := range []struct {
+		h    HRVNight
+		want bool
+	}{
+		{HRVNight{}, false},                                 // no samples
+		{HRVNight{Coverage: 0.3}, true},                     // too little coverage
+		{HRVNight{MedianMS: ptr(40.0), Coverage: 1}, false}, // a value
+	} {
+		if got := c.h.Withheld(); got != c.want {
+			t.Errorf("%+v: withheld %v, want %v", c.h, got, c.want)
+		}
+	}
 }
 
 func TestHRVCoverage(t *testing.T) {
@@ -839,8 +886,8 @@ func TestHRVCoverage(t *testing.T) {
 			d, st := newData(t, api)
 			r, _ := d.Recovery(ctx, d10, d10)
 			n := r.Nights[d10]
-			if (n.HRV != nil) != tc.wantHRV || n.HRVCoverage != tc.coverage {
-				t.Errorf("HRV %v, coverage %v; want HRV %v, coverage %v", n.HRV, n.HRVCoverage, tc.wantHRV, tc.coverage)
+			if (n.HRV.MedianMS != nil) != tc.wantHRV || n.HRV.Coverage != tc.coverage {
+				t.Errorf("HRV %v, coverage %v; want HRV %v, coverage %v", n.HRV.MedianMS, n.HRV.Coverage, tc.wantHRV, tc.coverage)
 			}
 			if got := len(cachedKeys(st, "2026-10-10")) > 0; got != tc.cached {
 				t.Errorf("cached %v, want %v", cachedKeys(st, "2026-10-10"), tc.cached)
@@ -856,7 +903,7 @@ func TestHRVCoverage(t *testing.T) {
 		api.add(googlehealth.HeartRateVariability, hrvNight(at("2026-10-10", 1, 0), at("2026-10-10", 1, 55), 50)...)
 		d, _ := newData(t, api)
 		r, _ := d.Recovery(ctx, d10, d10)
-		if n := r.Nights[d10]; n.HRV == nil || n.HRVCoverage != 1 {
+		if n := r.Nights[d10]; n.HRV.MedianMS == nil || n.HRV.Coverage != 1 {
 			t.Errorf("night %+v", n)
 		}
 	})
@@ -868,7 +915,7 @@ func TestHRVCoverage(t *testing.T) {
 		api.add(googlehealth.HeartRateVariability, hrvEvery(at("2026-10-10", 1, 1), at("2026-10-10", 2, 1), 10*time.Minute, 50, "FITBIT")...)
 		d, _ := newData(t, api)
 		live, _ := d.Recovery(ctx, d10, d10)
-		if n := live.Nights[d10]; n.HRV == nil || n.HRVCoverage != 7.0/13 {
+		if n := live.Nights[d10]; n.HRV.MedianMS == nil || n.HRV.Coverage != 7.0/13 {
 			t.Fatalf("night %+v", n)
 		}
 		cached, _ := d.Recovery(ctx, d10, d10)
@@ -880,7 +927,7 @@ func TestHRVCoverage(t *testing.T) {
 		api.add(googlehealth.HeartRateVariability, hrvNight(at("2026-10-10", 1, 0), at("2026-10-10", 1, 50), 50)...) // 11 samples, all slots
 		d, _ := newData(t, api)
 		r, _ := d.Recovery(ctx, d10, d10)
-		if n := r.Nights[d10]; n.HRV != nil || n.HRVCoverage != 1 {
+		if n := r.Nights[d10]; n.HRV.MedianMS != nil || n.HRV.Coverage != 1 {
 			t.Errorf("night %+v", n)
 		}
 	})
@@ -893,18 +940,18 @@ func TestStaleHRVRowIsRemoved(t *testing.T) {
 	d, st := newData(t, api)
 	// An HRV row from an earlier fetch, now gone from the API.
 	slots := 90
-	if err := st.PutMetric(ctx, store.Metric{Date: d10, Key: KeyHRV, Value: 77, NSamples: &slots, Zone: sp.String(), AlgoVersion: metrics.AlgoVersion}); err != nil {
+	if err := st.PutMetric(ctx, store.Metric{Date: d10, Key: string(KeyHRV), Value: 77, NSamples: &slots, Zone: sp.String(), AlgoVersion: metrics.AlgoVersion}); err != nil {
 		t.Fatal(err)
 	}
 	r, _ := d.Recovery(ctx, d10, d10)
-	if r.Nights[d10].HRV != nil {
+	if r.Nights[d10].HRV.MedianMS != nil {
 		t.Fatal("the live night took the stale HRV")
 	}
-	if ms, _ := st.MetricRange(ctx, KeyHRV, d10, d10, metrics.AlgoVersion); len(ms) != 0 {
+	if ms, _ := st.MetricRange(ctx, string(KeyHRV), d10, d10, metrics.AlgoVersion); len(ms) != 0 {
 		t.Errorf("stale HRV row kept: %+v", ms)
 	}
 	again, _ := d.Recovery(ctx, d10, d10)
-	if again.Nights[d10].HRV != nil {
+	if again.Nights[d10].HRV.MedianMS != nil {
 		t.Error("the cached night mixed in an old HRV value")
 	}
 }
@@ -995,7 +1042,7 @@ func TestRestingHeartRateSources(t *testing.T) {
 		t.Errorf("baseline series = %s", render(base))
 	}
 	// Only a day's single standard value is cached.
-	ms, _ := st.MetricRange(ctx, KeyRestingHR, day("2026-10-08"), day("2026-10-12"), metrics.AlgoVersion)
+	ms, _ := st.MetricRange(ctx, string(KeyRestingHR), day("2026-10-08"), day("2026-10-12"), metrics.AlgoVersion)
 	if len(ms) != 1 || ms[0].Date != day("2026-10-08") || ms[0].Zone != sp.String() {
 		t.Errorf("cached %+v", ms)
 	}
@@ -1009,7 +1056,7 @@ func TestSeries(t *testing.T) {
 		day("2026-10-02"): {AsleepMin: 400, StartMinOfDay: 1380},
 		day("2026-10-03"): {AsleepMin: 300, Provisional: true},
 	}}
-	for key, want := range map[string]string{
+	for key, want := range map[RecoveryKey]string{
 		KeyAsleep:     "2026-10-01=nil 2026-10-02=400 2026-10-03=300 ",
 		KeySleepStart: "2026-10-01=nil 2026-10-02=1380 2026-10-03=0 ",
 		KeyDeep:       "2026-10-01=nil 2026-10-02=nil 2026-10-03=nil ",
@@ -1085,14 +1132,14 @@ func TestCacheFailures(t *testing.T) {
 	for name, fc := range map[string]*failingCache{
 		"every write":          {put: true},
 		"every delete":         {del: true},
-		"the stage write":      {put: true, failKey: KeyREM},
-		"the commit row write": {put: true, failKey: KeyAsleep},
+		"the stage write":      {put: true, failKey: string(KeyREM)},
+		"the commit row write": {put: true, failKey: string(KeyAsleep)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, api := setup(t, fc)
 			r, err := d.Recovery(ctx, d10, d10)
 			// The live values are returned whatever the cache does.
-			if err != nil || r.Nights[d10].AsleepMin != 440 || r.Nights[d10].HRV == nil {
+			if err != nil || r.Nights[d10].AsleepMin != 440 || r.Nights[d10].HRV.MedianMS == nil {
 				t.Fatalf("recovery = %+v, %v", r, err)
 			}
 			// A failed night write leaves a miss, never a partial hit.
@@ -1213,7 +1260,7 @@ func TestParseSleepBounds(t *testing.T) {
 		if (err == nil) != tc.good {
 			t.Errorf("%s: err = %v", name, err)
 		}
-		if tc.good && (s.deep == nil || !s.settled) {
+		if tc.good && (s.stages == nil || !s.settled) {
 			t.Errorf("%s: session %+v", name, s)
 		}
 	}
@@ -1362,7 +1409,7 @@ func TestNightsInAZoneAheadOfUTC(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, ok := r.Nights[day("2026-10-10")]
-	if !ok || n.StartMinOfDay != 23*60 || n.HRV == nil {
+	if !ok || n.StartMinOfDay != 23*60 || n.HRV.MedianMS == nil {
 		t.Fatalf("nights = %+v", r.Nights)
 	}
 	api.takeCalls()
@@ -1404,7 +1451,7 @@ func TestTouchingSessionsAreJoined(t *testing.T) {
 	)
 	d, _ := newData(t, api)
 	r, _ := d.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
-	if n := r.Nights[day("2026-10-10")]; n.InBedMin != 480 || *n.DeepMin != 70 || r.Excluded.ExtraSessions != 0 {
+	if n := r.Nights[day("2026-10-10")]; n.InBedMin != 480 || n.Stages.DeepMin != 70 || r.Excluded.ExtraSessions != 0 {
 		t.Errorf("night %+v, excluded %+v", n, r.Excluded)
 	}
 }
@@ -1450,7 +1497,7 @@ func TestHRVWithoutValueIsNotCachedAsNone(t *testing.T) {
 	api2.add(googlehealth.HeartRateVariability, noValue(at("2026-10-10", 1, 1)))
 	d2, st2 := newData(t, api2)
 	r2, _ := d2.Recovery(ctx, day("2026-10-10"), day("2026-10-10"))
-	if r2.Nights[day("2026-10-10")].HRV == nil || r2.Excluded.NoHRVValue != 1 || r2.Empty != nil || len(cachedKeys(st2, "2026-10-10")) != 0 {
+	if r2.Nights[day("2026-10-10")].HRV.MedianMS == nil || r2.Excluded.NoHRVValue != 1 || r2.Empty != nil || len(cachedKeys(st2, "2026-10-10")) != 0 {
 		t.Errorf("night %+v, excluded %+v, empty %v, cached %v", r2.Nights[day("2026-10-10")], r2.Excluded, r2.Empty, cachedKeys(st2, "2026-10-10"))
 	}
 }
@@ -1494,7 +1541,7 @@ func TestCoveredSlotsRoundTrip(t *testing.T) {
 	for inBed := 1.0; inBed <= 1440; inBed++ {
 		total := slotCount(inBed)
 		for c := 0; c <= total; c++ {
-			n := Night{InBedMin: inBed, HRVCoverage: coverage(c, inBed)}
+			n := Night{InBedMin: inBed, HRV: HRVNight{Coverage: coverage(c, inBed)}}
 			if got := coveredSlots(n); got != c {
 				t.Fatalf("in bed %v, %d of %d slots: read back %d", inBed, c, total, got)
 			}

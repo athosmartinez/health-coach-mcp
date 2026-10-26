@@ -224,22 +224,26 @@ func noNight(rec healthdata.Recovery) coach.ToolError {
 }
 
 func sleepOf(rec healthdata.Recovery, n healthdata.Night, day coach.LocalDate) (BriefingSleep, error) {
+	var deep, light, rem *float64
+	if st := n.Stages; st != nil {
+		deep, light, rem = &st.DeepMin, &st.LightMin, &st.REMMin
+	}
 	s := BriefingSleep{
 		AsleepMin: round1(n.AsleepMin), AwakeMin: round1(n.AwakeMin),
 		EfficiencyPct: round(efficiency(n.AsleepMin, n.InBedMin)),
-		StagesMin:     StagesMin{Deep: round(n.DeepMin), Light: round(n.LightMin), REM: round(n.REMMin), Awake: round1(n.AwakeMin)},
+		StagesMin:     StagesMin{Deep: round(deep), Light: round(light), REM: round(rem), Awake: round1(n.AwakeMin)},
 		Start:         n.Start, End: n.End,
 	}
 	fields := []struct {
-		key   string
+		key   healthdata.RecoveryKey
 		value *float64
 		set   func(*SleepVs, *Versus)
 	}{
 		{healthdata.KeyAsleep, &n.AsleepMin, func(v *SleepVs, x *Versus) { v.AsleepMin = x }},
 		{healthdata.KeyAwake, &n.AwakeMin, func(v *SleepVs, x *Versus) { v.AwakeMin = x }},
-		{healthdata.KeyDeep, n.DeepMin, func(v *SleepVs, x *Versus) { v.DeepMin = x }},
-		{healthdata.KeyLight, n.LightMin, func(v *SleepVs, x *Versus) { v.LightMin = x }},
-		{healthdata.KeyREM, n.REMMin, func(v *SleepVs, x *Versus) { v.REMMin = x }},
+		{healthdata.KeyDeep, deep, func(v *SleepVs, x *Versus) { v.DeepMin = x }},
+		{healthdata.KeyLight, light, func(v *SleepVs, x *Versus) { v.LightMin = x }},
+		{healthdata.KeyREM, rem, func(v *SleepVs, x *Versus) { v.REMMin = x }},
 	}
 	for _, f := range fields {
 		series, err := rec.BaselineSeries(f.key)

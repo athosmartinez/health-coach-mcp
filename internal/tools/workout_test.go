@@ -292,7 +292,7 @@ func TestWorkoutReviewRecoveryQuality(t *testing.T) {
 	h := workoutWeek(t)
 	next := date("2026-10-15")
 	n := h.nights[next]
-	n.Provisional, n.HRV, n.HRVCoverage = true, nil, 0.3
+	n.Provisional, n.HRV = true, healthdata.HRVNight{Coverage: 0.3}
 	h.nights[next] = n
 	h.resting[next] = healthdata.RestingHR{BPM: 66, Method: "OTHER"}
 	h.recovery.Skipped = 1

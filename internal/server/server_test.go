@@ -343,6 +343,62 @@ func TestCoachToolsGetTheConfiguredZoneAndClock(t *testing.T) {
 	}
 }
 
+// The guardrails are always served; the prompts only with every tool they name.
+func TestPromptsNeedAStoreAndAHealthSource(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for name, c := range map[string]struct {
+		store   bool
+		health  bool
+		prompts bool
+	}{
+		"nothing":        {},
+		"store only":     {store: true},
+		"health only":    {health: true},
+		"store + health": {store: true, health: true, prompts: true},
+	} {
+		deps := testDeps()
+		if c.store {
+			deps.Store = st
+		}
+		if c.health {
+			deps.Health = noHealth{}
+		}
+		cs := connect(t, newServer(t, deps))
+		res, err := cs.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "coach://guardrails"})
+		if err != nil || len(res.Contents) != 1 || !strings.Contains(res.Contents[0].Text, "Never diagnose") {
+			t.Errorf("%s: guardrails %v %+v", name, err, res)
+		}
+		if got := cs.InitializeResult().Capabilities.Prompts != nil; got != c.prompts {
+			t.Errorf("%s: prompts advertised %v, want %v", name, got, c.prompts)
+		}
+		if !c.prompts {
+			continue
+		}
+		list, err := cs.ListPrompts(context.Background(), nil)
+		if err != nil || len(list.Prompts) != 4 {
+			t.Fatalf("%s: prompts %v %+v", name, err, list)
+		}
+		tools := toolNames(t, cs)
+		for _, p := range list.Prompts {
+			got, err := cs.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: p.Name})
+			if err != nil {
+				t.Fatalf("%s: %v", p.Name, err)
+			}
+			text := got.Messages[0].Content.(*mcp.TextContent).Text
+			// Every "Call <tool>" in a prompt names a registered tool.
+			for _, part := range strings.Split(text, "Call ")[1:] {
+				if tool, _, _ := strings.Cut(part, " "); !slices.Contains(tools, tool) {
+					t.Errorf("%s names %q, not a registered tool", p.Name, tool)
+				}
+			}
+		}
+	}
+}
+
 func TestSchemaErrorsFollowTheToolErrorContract(t *testing.T) {
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "coach.db"), nil)
 	if err != nil {

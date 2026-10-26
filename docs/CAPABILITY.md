@@ -181,7 +181,10 @@ Idempotency: `labs_record` upserts by (`collected_on`, `analyte`); `health_item_
 
 ### 4.3 MCP prompts and resources
 - **Prompts:** `morning_briefing`, `nutrition_review`, `workout_review`, `weekly_report` —
-  each instructs the model to call the matching tool + `profile_get` and follow the guardrail.
+  each instructs the model to call the matching tool + `profile_get` and follow the guardrail
+  (carried inline, since a client may not read the resource). `nutrition_review` runs `nutrition_day`.
+  One optional argument: the tool's day (`date`; `week_end` for `weekly_report`), a real calendar date,
+  or omitted (also `""`) for the tool's default. A bad date is rejected without echoing it.
 - **Resource** `coach://guardrails`: the coach's medical and tone rules (R3, hybrid tone
   from brief §5).
 

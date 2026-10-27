@@ -495,3 +495,7 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   `coach://guardrails`; prompts are registered only with a store and a health source. Tone default: directive on
   training and the user's own targets, advisory on anything medical (symptoms, labs, medications, supplements,
   weight-loss pace, very low intake).
+- 2026-10-26 — Step 11: `auth.Scopes` reduced from 9 to the 4 categories of the data types read
+  (activity_and_fitness, health_metrics_and_measurements, sleep, nutrition); a sign-in holding more still passes
+  `MissingScopes`. Q6: SpO2 still empty, dropped from the MVP. Food log: the energy object holds only `kcal` and
+  `userProvidedUnit` (no renamed field); the few 0-kcal items carry no carbohydrate or fat.

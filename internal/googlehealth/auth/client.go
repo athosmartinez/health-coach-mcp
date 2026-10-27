@@ -26,18 +26,16 @@ const LoginCommand = "health-coach-mcp auth login"
 
 const scopePrefix = "https://www.googleapis.com/auth/googlehealth."
 
-// Scopes are the read-only Google Health scopes the coach asks for. No write
-// scope is ever requested.
+// Scopes are the read-only Google Health scopes the coach asks for: the
+// categories of the data types it reads (steps, AZM, exercise, heart rate,
+// HRV and total calories are activity_and_fitness; resting HR, daily HRV,
+// weight and body fat are health_metrics_and_measurements). No write scope is
+// ever requested, and none for data the coach does not read.
 var Scopes = []string{
 	scopePrefix + "activity_and_fitness.readonly",
 	scopePrefix + "health_metrics_and_measurements.readonly",
 	scopePrefix + "sleep.readonly",
 	scopePrefix + "nutrition.readonly",
-	scopePrefix + "profile.readonly",
-	scopePrefix + "settings.readonly",
-	scopePrefix + "location.readonly",
-	scopePrefix + "ecg.readonly",
-	scopePrefix + "irn.readonly",
 }
 
 // Endpoint is Google's OAuth endpoint. Client credentials go in the request

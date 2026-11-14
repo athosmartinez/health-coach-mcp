@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -155,8 +156,19 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestScopesAreReadOnly(t *testing.T) {
-	if len(Scopes) != 9 {
-		t.Errorf("len(Scopes) = %d, want 9", len(Scopes))
+	// Only the categories of the data types the coach reads; a sign-in that
+	// also held other scopes (location, ECG, irregular rhythm) still passes.
+	want := []string{"activity_and_fitness", "health_metrics_and_measurements", "sleep", "nutrition"}
+	if len(Scopes) != len(want) {
+		t.Errorf("Scopes = %v, want the categories %v", Scopes, want)
+	}
+	for i, c := range want {
+		if i < len(Scopes) && Scopes[i] != scopePrefix+c+".readonly" {
+			t.Errorf("Scopes[%d] = %q, want %s", i, Scopes[i], c)
+		}
+	}
+	if got := MissingScopes(append(slices.Clone(Scopes), scopePrefix+"location.readonly")); got != nil {
+		t.Errorf("MissingScopes(with an extra scope) = %v", got)
 	}
 	for _, s := range Scopes {
 		if !strings.HasPrefix(s, scopePrefix) || !strings.HasSuffix(s, ".readonly") {

@@ -82,7 +82,7 @@ Parallel steps touch shared files: `go.mod`/`go.sum` and `CLAUDE.md` (2, 4a, 5),
 | 7 `morning_briefing` + `workout_review` | `feat/briefing-workout-tools` | 3, 6b | default | ☑ #9 |
 | 8 `nutrition_day` | `feat/nutrition-tool` | 3, 6b | default | ☑ #10 |
 | 9 `weekly_report` + `metric_series` | `feat/weekly-series-tools` | 7, 8 | default | ☑ #11 |
-| 10 MCP prompts + `coach://guardrails` | `feat/prompts-guardrails` | 9 | default | ☐ |
+| 10 MCP prompts + `coach://guardrails` | `feat/prompts-guardrails` | 9 | default | ☑ #13 |
 | 11 Verification + real use (1 week) | `chore/verification` | 10 | default | ☐ |
 
 ---
@@ -495,3 +495,7 @@ R3 (no diagnosis/prescription, refer to a doctor), hybrid tone (directive on tra
   `coach://guardrails`; prompts are registered only with a store and a health source. Tone default: directive on
   training and the user's own targets, advisory on anything medical (symptoms, labs, medications, supplements,
   weight-loss pace, very low intake).
+- 2026-10-26 — Step 11: `auth.Scopes` reduced from 9 to the 4 categories of the data types read
+  (activity_and_fitness, health_metrics_and_measurements, sleep, nutrition); a sign-in holding more still passes
+  `MissingScopes`. Q6: SpO2 still empty, dropped from the MVP. Food log: the energy object holds only `kcal` and
+  `userProvidedUnit` (no renamed field); the few 0-kcal items carry no carbohydrate or fat.

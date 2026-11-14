@@ -20,7 +20,7 @@ import {
 
 import { INTERNAL_ERROR, type WireError, errorTypes, toWire, wireText } from "../coach/errors";
 import { truncate } from "../coach/text";
-import { type JsonSchema, invalidDate } from "./schema";
+import { type JsonSchema, invalidDate, nonFiniteNumber } from "./schema";
 
 /**
  * What a tool body produces: its output, or the error the client reads. A
@@ -66,7 +66,8 @@ export function defineTool(definition: ToolDefinition): Tool {
   const matchesOutput = validator(definition.outputSchema);
   return {
     ...definition,
-    checkInput: (args) => matchesInput(args) ?? invalidDate(definition.inputSchema, args),
+    // After the schema: the names echoed below are then the schema's own.
+    checkInput: (args) => matchesInput(args) ?? nonFiniteNumber(args) ?? invalidDate(definition.inputSchema, args),
     checkOutput: matchesOutput,
   };
 }

@@ -128,6 +128,27 @@ export function relaxOptional(object: JsonSchema): void {
   }
 }
 
+function holdsNonFinite(value: unknown): boolean {
+  if (typeof value === "number") return !Number.isFinite(value);
+  if (typeof value !== "object" || value === null) return false;
+  return (Array.isArray(value) ? value : Object.values(value)).some(holdsNonFinite);
+}
+
+/**
+ * Finds an argument that holds, at any depth, a number JSON cannot carry: a
+ * literal such as 1e999 parses to Infinity, and JSON.stringify would then
+ * write null for it. Returns the name of the argument (free-form values can
+ * have keys the client chose, so the path inside is not echoed), or undefined
+ * when every number is finite. The Go server fails to decode such arguments.
+ */
+export function nonFiniteNumber(args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null) return undefined;
+  for (const [name, value] of Object.entries(args)) {
+    if (holdsNonFinite(value)) return `${name}: holds a number outside the range of a JSON number`;
+  }
+  return undefined;
+}
+
 const DATE_PATTERNS = new Set([DATE_PATTERN, `^(?:${DATE_PATTERN.slice(1, -1)})?$`]);
 
 /**

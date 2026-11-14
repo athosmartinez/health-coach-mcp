@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { forwardedRequest } from "../src/index";
 import { CoachStore, coachStore } from "../src/store";
 import { DATA_NOTICE, MEDICAL_HINT } from "../src/tools/memory";
-import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, MCP_HEADERS, MCP_URL, ORIGIN, parseRpc, rpc, signInAsOwner } from "./helpers";
+import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, type JsonRpc, MCP_HEADERS, MCP_URL, ORIGIN, parseRpc, rpc, signInAsOwner } from "./helpers";
 import { ALL_TOOL_NAMES, SCHEMA_HINT, freshStore, mcpRequest, objectRpc, objectTool } from "./memory-helpers";
 
 const MODERN_PROTOCOL = "2026-07-28";
@@ -25,6 +25,18 @@ async function callTool(name: string, args: Record<string, unknown> = {}): Promi
   const reply = await rpc(accessToken, { jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name, arguments: args } });
   expect(reply.error, JSON.stringify(reply.error)).toBeUndefined();
   return reply.result as ToolResult;
+}
+
+/** Posts a request body as text: JSON.stringify cannot write 1e999, and writes null for it. */
+async function rawRpc(body: string): Promise<JsonRpc> {
+  const response = await exports.default.fetch(MCP_URL, {
+    method: "POST",
+    headers: { ...MCP_HEADERS, authorization: `Bearer ${accessToken}` },
+    body,
+  });
+  const text = await response.text();
+  expect(response.status, text).toBeLessThan(500);
+  return parseRpc(response.headers.get("content-type"), text);
 }
 
 /** Calls a tool that must succeed and returns its structured content. */
@@ -255,6 +267,16 @@ describe("coach memory over /mcp", () => {
     // Nothing was stored by the rejected calls.
     expect((await ok("notes_search")).notes).toEqual([]);
     expect((await ok("profile_get")).targets_in_force).toBeUndefined();
+
+    // A number literal outside the float64 range parses to Infinity: rejected, not stored as null.
+    const overflow = await rawRpc(
+      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"preference_set","arguments":{"key":"inf","value":[1e999]}}}',
+    );
+    const refused = overflow.result as ToolResult;
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toBeUndefined();
+    expect(JSON.parse(refused.content?.[0]?.text ?? "")).toMatchObject({ code: "invalid_input", hint: SCHEMA_HINT });
+    expect((await ok("preferences_get")).preferences).toEqual({});
 
     // An unknown tool is a protocol error, as in the Go server.
     const unknown = await rpc(accessToken, { jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "no_such_tool", arguments: {} } });

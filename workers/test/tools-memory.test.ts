@@ -7,7 +7,7 @@ import { LAB_SOURCES } from "../src/store/labs";
 import { HEALTH_ITEM_FIELDS, HEALTH_ITEM_KINDS, HEALTH_ITEM_STATUSES, PROFILE_FIELDS, TARGET_FIELDS } from "../src/store/memory";
 import { NOTE_KINDS } from "../src/store/notes";
 import { CRITICAL_HINT, DATA_NOTICE, MEDICAL_HINT, MEMORY_TOOLS, NO_ADVICE, UNIT_HINT, age, runMemoryTool } from "../src/tools/memory";
-import { MEMORY_TOOL_NAMES, memorySession } from "./memory-helpers";
+import { MEMORY_TOOL_NAMES, SCHEMA_HINT, memorySession } from "./memory-helpers";
 
 const byName = new Map(MEMORY_TOOLS.map((tool) => [tool.name, tool]));
 const definition = (name: string) => {
@@ -440,6 +440,32 @@ describe("memory tools", () => {
     expect((await c.ok("profile_get")).preferences).toMatchObject({ foods_avoid: ["lactose", "pork"], vegan: false });
     // The size limit applies to the JSON text of the value.
     expect((await c.fails("preference_set", { key: "big", value: "a".repeat(3000) })).code).toBe("invalid_input");
+  });
+
+  it("rejects a number outside the range of a JSON number, at any depth", async () => {
+    const c = memorySession();
+    // 1e999 in the request text parses to Infinity; stored, it would become null.
+    const values: unknown[] = [[Number.POSITIVE_INFINITY], Number.NEGATIVE_INFINITY, { a: { b: [1, Number.NaN] } }, [[["x", { deep: Number.POSITIVE_INFINITY }]]]];
+    for (const value of values) {
+      const error = await c.fails("preference_set", { key: "inf", value });
+      expect(error).toMatchObject({
+        code: "invalid_input",
+        message: "the arguments do not match the tool's input schema: value: holds a number outside the range of a JSON number",
+        hint: SCHEMA_HINT,
+      });
+    }
+    expect((await c.ok("preferences_get")).preferences).toEqual({});
+    // The same rule for every tool: the Go server fails to decode these arguments.
+    for (const [tool, args] of [
+      ["profile_update", { height_cm: Number.POSITIVE_INFINITY }],
+      ["profile_update", { goal: { target_weight_kg: Number.NaN } }],
+      ["notes_search", { limit: Number.POSITIVE_INFINITY }],
+      ["labs_record", { collected_on: "2026-09-01", results: [{ analyte: "ldl", value: 1, unit: "mg/dL", ref_high: Number.POSITIVE_INFINITY }] }],
+    ] as const) {
+      expect(await c.fails(tool, args), tool).toMatchObject({ code: "invalid_input", hint: SCHEMA_HINT });
+    }
+    // Large finite numbers are still values.
+    expect((await c.ok("preference_set", { key: "big", value: [1e308, -1e308, 5e-324] })).value).toEqual([1e308, -1e308, 5e-324]);
   });
 
   it("measures the preference size limit on the text as Go's JSON encoder writes it", async () => {

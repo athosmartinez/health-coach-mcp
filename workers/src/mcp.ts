@@ -1,14 +1,46 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { env } from "cloudflare:workers";
-import { z } from "zod";
 
 import { coachStore } from "./store";
+import { registerMemory } from "./tools/memory";
+import { type ToolOutcome, defineTool, register } from "./tools/register";
+import { inputSchema, s } from "./tools/schema";
 import { SERVER_NAME, TRANSPORT, VERSION } from "./version";
 
-const serverInfoOutput = z.object({
-  name: z.string(),
-  version: z.string(),
-  transport: z.string(),
+// Tool definitions are built once per isolate: createServer runs on every request.
+
+const NO_ARGUMENTS = inputSchema(s.object({}));
+
+const SERVER_INFO = defineTool({
+  name: "server_info",
+  description: "Returns the server name, version, and transport. Use it to check that the coach MCP is reachable.",
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  inputSchema: NO_ARGUMENTS,
+  outputSchema: s.object({ name: s.string(), version: s.string(), transport: s.string() }),
+});
+
+const TOKEN_STATES = ["ok", "not_linked", "auth_expired", "upstream_unavailable", "internal_error"];
+
+const GOOGLE_ACCOUNT_STATUS = defineTool({
+  name: "google_account_status",
+  description:
+    "Shows which Google account is linked to the coach, the Google Health scopes it granted or is missing, " +
+    "and whether its access still works. It never returns a token.",
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  inputSchema: NO_ARGUMENTS,
+  outputSchema: s.object({
+    linked: s.boolean(),
+    email: s.nullable(s.string()),
+    linked_at: s.nullable(s.string("ISO 8601 UTC time of the last sign-in")),
+    scopes_granted: { type: "array", items: s.string() },
+    scopes_missing: {
+      type: "array",
+      items: s.string(),
+      description: "Google Health scopes the coach needs that were not granted",
+    },
+    token: { type: "string", enum: TOKEN_STATES, description: "Whether a Google access token can be obtained now" },
+    hint: s.nullable(s.string()),
+  }),
 });
 
 export function createServer(): McpServer {
@@ -17,49 +49,16 @@ export function createServer(): McpServer {
     version: VERSION,
   });
 
-  server.registerTool(
-    "server_info",
-    {
-      description:
-        "Returns the server name, version, and transport. Use it to check that the coach MCP is reachable.",
-      inputSchema: z.object({}),
-      outputSchema: serverInfoOutput,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        openWorldHint: false,
-      },
-    },
-    async () => {
-      const output = {
-        name: SERVER_NAME,
-        version: VERSION,
-        transport: TRANSPORT,
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(output) }],
-        structuredContent: output,
-      };
-    },
-  );
+  register(server, SERVER_INFO, () => ({
+    ok: true,
+    output: { name: SERVER_NAME, version: VERSION, transport: TRANSPORT },
+  }));
 
-  server.registerTool(
-    "google_account_status",
-    {
-      description:
-        "Shows which Google account is linked to the coach, the Google Health scopes it granted or is missing, " +
-        "and whether its access still works. It never returns a token.",
-      inputSchema: z.object({}),
-      outputSchema: googleAccountStatusOutput,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        openWorldHint: false,
-      },
-    },
-    async () => {
-      const status = await coachStore(env).googleAccountStatus();
-      const output: z.infer<typeof googleAccountStatusOutput> = {
+  register(server, GOOGLE_ACCOUNT_STATUS, async () => {
+    const status = await coachStore(env).googleAccountStatus();
+    return {
+      ok: true,
+      output: {
         linked: status.linked,
         email: status.email,
         linked_at: status.linkedAt,
@@ -67,28 +66,15 @@ export function createServer(): McpServer {
         scopes_missing: status.scopesMissing,
         token: status.token,
         hint: hintFor(status.token, status.scopesMissing.length > 0),
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(output) }],
-        structuredContent: output,
-      };
-    },
-  );
+      },
+    };
+  });
+
+  // The bodies run inside the CoachStore Durable Object, next to the data.
+  registerMemory(server, async (name, args) => (await coachStore(env).memoryTool(name, args)) as ToolOutcome);
 
   return server;
 }
-
-const googleAccountStatusOutput = z.object({
-  linked: z.boolean(),
-  email: z.string().nullable(),
-  linked_at: z.string().nullable().describe("ISO 8601 UTC time of the last sign-in"),
-  scopes_granted: z.array(z.string()),
-  scopes_missing: z.array(z.string()).describe("Google Health scopes the coach needs that were not granted"),
-  token: z
-    .enum(["ok", "not_linked", "auth_expired", "upstream_unavailable", "internal_error"])
-    .describe("Whether a Google access token can be obtained now"),
-  hint: z.string().nullable(),
-});
 
 const RECONNECT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
 

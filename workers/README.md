@@ -93,6 +93,12 @@ The tests run in workerd through `@cloudflare/vitest-plugin`. They mock every Go
 
 The script runs the Go binary with new, empty data and config folders. It never reads the real health database or the Google credentials.
 
+The parity test reads only the committed fixture, so it cannot see a tool definition that changed in Go. This check does: it lists the tools of the Go binary again, compares them with the fixture, writes nothing, and exits 1 with the names of the tools that differ.
+
+```bash
+(cd .. && make build) && npm run check:go-fixture
+```
+
 ## Differences from the Go server
 
 - **`preference_set` does not keep a value byte for byte.** The value arrives parsed, so it is stored as `JSON.stringify` writes it: `1.0` becomes `1`, insignificant white space and escapes go away, and integer-like object keys move first. The 2,048-byte limit is measured as in Go, on the text as Go's JSON encoder writes it: `<`, `>`, `&`, U+2028 and U+2029 count 6 bytes each, although they are stored unescaped. As in Go, an integer beyond 2^53 loses precision.

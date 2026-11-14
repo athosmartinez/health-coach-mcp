@@ -3,20 +3,26 @@
 // compared with (test/parity.test.ts).
 //
 // Usage, from workers/:
-//   (cd .. && make build) && node scripts/go-tools-list.mjs [path/to/health-coach-mcp]
+//   (cd .. && make build) && node scripts/go-tools-list.mjs [--check] [path/to/health-coach-mcp]
+//
+// With --check it writes nothing: it lists the tools again, compares them with
+// the committed fixture, and exits 1 with the names of the tools that differ
+// (`npm run check:go-fixture`).
 //
 // The Go server's default data and config folders hold the real health database
 // and Google credentials. This script never uses them: HCM_DATA_DIR and
 // HCM_CONFIG_DIR always point at new empty folders, removed at the end.
 
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const binary = resolve(process.argv[2] ?? join(here, "..", "..", "bin", "health-coach-mcp"));
+const options = process.argv.slice(2);
+const check = options.includes("--check");
+const binary = resolve(options.find((option) => !option.startsWith("--")) ?? join(here, "..", "..", "bin", "health-coach-mcp"));
 const fixture = join(here, "..", "test", "fixtures", "go-tools-list.json");
 
 const sandbox = await mkdtemp(join(tmpdir(), "hcm-tools-list-"));
@@ -25,10 +31,47 @@ const configDir = await mkdtemp(join(sandbox, "config-"));
 
 try {
   const tools = await listTools();
-  await writeFile(fixture, `${JSON.stringify({ tools }, null, 2)}\n`);
-  console.log(`wrote ${tools.length} tools to ${fixture}`);
+  if (check) {
+    await compareWithFixture(tools);
+  } else {
+    await writeFile(fixture, `${JSON.stringify({ tools }, null, 2)}\n`);
+    console.log(`wrote ${tools.length} tools to ${fixture}`);
+  }
 } finally {
   await rm(sandbox, { recursive: true, force: true });
+}
+
+/** JSON with the keys of every object sorted: two equal definitions give the same text. */
+function canonical(value) {
+  return JSON.stringify(value, (_key, node) =>
+    node !== null && typeof node === "object" && !Array.isArray(node)
+      ? Object.fromEntries(Object.entries(node).sort(([a], [b]) => (a < b ? -1 : 1)))
+      : node,
+  );
+}
+
+/**
+ * Check mode: fails when the committed fixture is not what the Go binary lists
+ * now, and names the tools that differ. It writes nothing.
+ */
+async function compareWithFixture(tools) {
+  const committed = new Map(JSON.parse(await readFile(fixture, "utf8")).tools.map((tool) => [tool.name, tool]));
+  const listed = new Map(tools.map((tool) => [tool.name, tool]));
+  const stale = [];
+  for (const [name, tool] of listed) {
+    if (!committed.has(name)) stale.push(`${name} (not in the fixture)`);
+    else if (canonical(committed.get(name)) !== canonical(tool)) stale.push(`${name} (changed)`);
+  }
+  for (const name of committed.keys()) if (!listed.has(name)) stale.push(`${name} (no longer listed by the Go server)`);
+
+  if (stale.length === 0) {
+    console.log(`the fixture matches the Go server: ${listed.size} tools`);
+    return;
+  }
+  console.error(`the fixture is stale for ${stale.length} tool(s):`);
+  for (const line of stale.sort()) console.error(`  ${line}`);
+  console.error("generate it again with: node scripts/go-tools-list.mjs");
+  process.exitCode = 1;
 }
 
 function listTools() {

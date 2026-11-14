@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
+import { RECONNECT_HINT } from "./google";
 import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
 import { type ToolOutcome, defineTool, register } from "./tools/register";
@@ -88,17 +89,15 @@ export function createServer(deps: ServerDeps): McpServer {
   return server;
 }
 
-const RECONNECT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
-
 function hintFor(token: string, scopesMissing: boolean): string | null {
   switch (token) {
     case "not_linked":
     case "auth_expired":
-      return RECONNECT;
+      return RECONNECT_HINT;
     case "upstream_unavailable":
       return "Google is unavailable right now. Try again in a few minutes.";
     case "internal_error":
       return "The Google token request failed. Check the server's Google OAuth client settings.";
   }
-  return scopesMissing ? `Some Google Health permissions were not granted. ${RECONNECT}` : null;
+  return scopesMissing ? `Some Google Health permissions were not granted. ${RECONNECT_HINT}` : null;
 }

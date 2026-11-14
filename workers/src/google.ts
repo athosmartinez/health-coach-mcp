@@ -30,6 +30,12 @@ export const GOOGLE_SIGN_IN_SCOPES = ["openid", "email", ...GOOGLE_HEALTH_SCOPES
 
 const ID_TOKEN_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.com"]);
 
+/**
+ * What the person does when the Google link is missing, expired or revoked.
+ * The Go server names its CLI login command here; a remote connector has none.
+ */
+export const RECONNECT_HINT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
+
 /** Same codes as the Go server's coach.ToolError for auth failures. */
 export type GoogleErrorCode = "auth_expired" | "upstream_unavailable" | "internal_error";
 

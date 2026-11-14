@@ -91,6 +91,18 @@ const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
     INSERT INTO notes_fts(notes_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO notes_fts(rowid, text) VALUES (new.id, new.text); END;`,
+  // 4: the cache of daily values computed from Google Health records, with the
+  // Go store's final columns in its order. The cache is disposable. `zone` is
+  // the IANA zone a value was computed in: sleep start minutes and the day a
+  // night belongs to depend on it, so a row from another zone is a miss.
+  `CREATE TABLE daily_metrics (
+    date TEXT NOT NULL, metric TEXT NOT NULL,   -- metric from the closed list in store/metrics.ts
+    value REAL NOT NULL, n_samples INTEGER, source TEXT,
+    algo_version INTEGER NOT NULL,              -- bump when the derivation changes
+    fetched_at TEXT NOT NULL,
+    zone TEXT,
+    PRIMARY KEY (date, metric)
+  )`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

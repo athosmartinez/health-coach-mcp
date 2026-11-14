@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { SERVER_NAME, TRANSPORT, VERSION } from "../src/version";
 
 const MCP_URL = "http://localhost/mcp";
+const MODERN_PROTOCOL = "2026-07-28";
 
 const headers = {
   accept: "application/json, text/event-stream",
@@ -82,5 +83,72 @@ describe("MCP /mcp", () => {
       version: VERSION,
       transport: TRANSPORT,
     });
+  });
+
+  // A 2026-07-28 request carries its protocol version and client in params._meta
+  // and skips initialize. The SDK serves it on a different path than the
+  // claim-less 2025 requests above.
+  it("serves server_info on the 2026-07-28 per-request protocol", async () => {
+    const response = await exports.default.fetch(MCP_URL, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "mcp-protocol-version": MODERN_PROTOCOL,
+        "mcp-method": "tools/call",
+        "mcp-name": "server_info",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "server_info",
+          arguments: {},
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL,
+            "io.modelcontextprotocol/clientInfo": { name: "health-coach-mcp-test", version: "0" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+    const text = await response.text();
+    expect(response.status, text).toBe(200);
+    const called = parseRpc(response.headers.get("content-type"), text);
+    expect(called.error).toBeUndefined();
+    expect((called.result as { structuredContent?: unknown }).structuredContent).toEqual({
+      name: SERVER_NAME,
+      version: VERSION,
+      transport: TRANSPORT,
+    });
+  });
+
+  // No auth in this phase: a valid call without credentials succeeds (tests
+  // above). The OAuth phase must change that on purpose, to 401.
+  it.each([
+    { name: "wrong path", url: "http://localhost/other", method: "POST", body: "{}", status: 404 },
+    { name: "GET", url: MCP_URL, method: "GET", status: 405, code: -32000 },
+    { name: "DELETE", url: MCP_URL, method: "DELETE", status: 405, code: -32000 },
+    { name: "invalid JSON", url: MCP_URL, method: "POST", body: "{nope", status: 400, code: -32700 },
+    {
+      name: "foreign Origin",
+      url: MCP_URL,
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      origin: "https://evil.example",
+      status: 403,
+      code: -32000,
+    },
+  ])("rejects $name with HTTP $status", async ({ url, method, body, origin, status, code }) => {
+    const response = await exports.default.fetch(url, {
+      method,
+      headers: origin ? { ...headers, origin } : headers,
+      body,
+    });
+    const text = await response.text();
+    expect(response.status, text).toBe(status);
+    if (code !== undefined) {
+      expect((JSON.parse(text) as JsonRpc).error?.code, text).toBe(code);
+    }
   });
 });

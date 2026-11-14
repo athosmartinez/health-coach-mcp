@@ -2,7 +2,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "health-coach-mcp",
   "main": "src/index.ts",
-  "compatibility_date": "2026-11-14",
+  // The newest date the pinned workerd (wrangler dev, tests) supports, so that
+  // tests and deploy run the same date. Move it together with wrangler.
+  "compatibility_date": "2026-11-13",
   // agents/mcp uses AsyncLocalStorage.
   "compatibility_flags": ["nodejs_compat"],
   // 8788 leaves the Go server's 127.0.0.1:8787 free.

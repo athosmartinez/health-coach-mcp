@@ -283,8 +283,11 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 
 ## 6. Security and Policy
 
-- **OAuth:** own client in project `health-coach-mcp-511601`, 9 read-only `googlehealth.*`
-  scopes. Token in `~/.config/health-coach-mcp/` (0600), own login (Q2).
+- **OAuth:** own client in project `health-coach-mcp-511601`, 4 read-only `googlehealth.*`
+  scopes: the categories of the data types the coach reads (`activity_and_fitness`,
+  `health_metrics_and_measurements`, `sleep`, `nutrition`). Profile, settings, location, ECG and
+  irregular-rhythm scopes are not requested (2026-10-26; they were in the first sign-in). Token in
+  `~/.config/health-coach-mcp/` (0600), own login (Q2).
 - **Refresh token in Testing mode expires in ~7 days** → detect `invalid_grant`, return
   `auth_expired` with instructions; evaluate publishing the app as "In production" unverified (Q5).
 - **HTTP (phase 2):** bearer token from an env var, TLS terminated in front, never public without auth (R6).
@@ -315,7 +318,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 | # | Question | Default | Affects |
 |---|---|---|---|
 | Q5 | Publish the OAuth app as "In production" unverified to avoid the 7-day expiry? | Yes, after the first week of use | Stable operation |
-| Q6 | Daily SpO2 came back empty | Recheck in 3–5 nights; if it stays empty, drop it from the MVP | none (optional) |
+| Q6 | Daily SpO2 came back empty | Recheck in 3–5 nights; if it stays empty, drop it from the MVP. **2026-10-26: still empty** (no daily point in 30 days, no sample in 7): dropped from the MVP | none (optional) |
 | Q7 | Primary source per metric when there's overlap (Fitbit Air vs Apple Health) | daily rollup (merged) for steps/AZM/calories; Fitbit Air for HR/HRV/sleep/exercise/nutrition; every platform for weight and body fat (a scale may sync through the phone) | aggregates |
 
 ## 9. Handoff

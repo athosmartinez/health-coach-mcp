@@ -126,7 +126,7 @@ func TestAuthLoginThenStatus(t *testing.T) {
 		t.Fatalf("status = %+v", r)
 	}
 	for _, want := range []string{
-		path, "Signed in:     2026-10-15 10:00 -03", "9 of 9 granted", "Refresh token: present",
+		path, "Signed in:     2026-10-15 10:00 -03", "4 of 4 granted", "Refresh token: present",
 		"around 2026-10-22 10:00 -03", auth.LoginCommand,
 	} {
 		if !strings.Contains(r.stdout, want) {
@@ -149,7 +149,7 @@ func TestAuthLoginReportsUngrantedScopes(t *testing.T) {
 		t.Fatalf("login = %+v", r)
 	}
 	r = runAuthTest(t, cfg, env, "status")
-	if !strings.Contains(r.stdout, "7 of 9 granted (missing: activity_and_fitness, health_metrics_and_measurements)") {
+	if !strings.Contains(r.stdout, "2 of 4 granted (missing: activity_and_fitness, health_metrics_and_measurements)") {
 		t.Errorf("status:\n%s", r.stdout)
 	}
 }
@@ -210,7 +210,7 @@ func TestAuthLoginWithoutAScopeList(t *testing.T) {
 	if r := runAuthTest(t, cfg, env, "login"); r.code != 0 || !strings.Contains(r.stdout, "did not say which scopes") {
 		t.Fatalf("login = %+v", r)
 	}
-	if r := runAuthTest(t, cfg, env, "status"); !strings.Contains(r.stdout, "Scopes:        unknown") || strings.Contains(r.stdout, "of 9 granted") {
+	if r := runAuthTest(t, cfg, env, "status"); !strings.Contains(r.stdout, "Scopes:        unknown") || strings.Contains(r.stdout, " granted") {
 		t.Errorf("status claims scopes it does not know:\n%s", r.stdout)
 	}
 }

@@ -135,9 +135,16 @@ async function tokenRequest(form: Record<string, string>, now: number): Promise<
     return { ok: false, code: "upstream_unavailable", message: "Google token endpoint unreachable" };
   }
 
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    // The connection dropped or timed out while the body was read.
+    return { ok: false, code: "upstream_unavailable", message: `Google token endpoint: body not received (HTTP ${response.status})` };
+  }
   let body: Record<string, unknown> = {};
   try {
-    const parsed: unknown = await response.json();
+    const parsed: unknown = JSON.parse(text);
     if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
   } catch {
     // A non-JSON body (an HTML error page) is classified by status alone.

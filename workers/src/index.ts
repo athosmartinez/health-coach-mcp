@@ -4,6 +4,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { AUTHORIZE_PATH, authHandler } from "./auth";
 import { isAllowedEmail } from "./google";
 import { createServer } from "./mcp";
+import { publicPage } from "./pages";
 import { CoachStore } from "./store";
 
 export { CoachStore };
@@ -42,7 +43,11 @@ export function providerOptions(origin: string): OAuthProviderOptions<Env> {
       // The library sets env.OAUTH_PROVIDER once per isolate, from the first
       // provider that runs, so a second origin would get the first origin's
       // resource. Hand the auth pages the helpers of their own origin instead.
-      fetch: (request, env) => authHandler.fetch(request, { ...env, OAUTH_PROVIDER: getOAuthApi(options, env) }),
+      fetch: (request, env) => {
+        const page = publicPage(request);
+        if (page) return page;
+        return authHandler.fetch(request, { ...env, OAUTH_PROVIDER: getOAuthApi(options, env) });
+      },
     },
     authorizeEndpoint: AUTHORIZE_PATH,
     tokenEndpoint: TOKEN_PATH,

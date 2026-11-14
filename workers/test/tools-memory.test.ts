@@ -549,6 +549,27 @@ describe("memory tools", () => {
     expect(repaired.profile).toEqual({ sex: "m", updated_at: "2026-10-14T01:30:00Z" });
   });
 
+  it.each(["2026-02-30T12:00:00.000000000Z", "2026-02-10T24:00:00.000000000Z"])(
+    "answers internal_error for the impossible stored timestamp %s",
+    async (stamp) => {
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      const c = memorySession();
+      await c.ok("profile_update", { sex: "f" });
+      await c.ok("note_add", { kind: "checkin", text: "ok" });
+      await c.sql((sql) => {
+        sql.exec("UPDATE profile SET updated_at = ?", stamp);
+        sql.exec("UPDATE notes SET created_at = ?", stamp);
+      });
+      for (const tool of ["profile_get", "notes_search"]) {
+        expect((await c.fails(tool)).text).toBe('{"code":"internal_error","message":"unexpected internal error"}');
+      }
+      expect(errorLog.mock.calls).toEqual([
+        ["tool_internal_error", { tool: "profile_get", error_types: "CorruptRowError" }],
+        ["tool_internal_error", { tool: "notes_search", error_types: "CorruptRowError" }],
+      ]);
+    },
+  );
+
   it("hides a stored value that breaks a read behind internal_error", async () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const c = memorySession();

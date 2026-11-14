@@ -58,7 +58,7 @@ export function formatStamp(t: Date): string {
   return t.toISOString().replace("Z", "000000Z");
 }
 
-const STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/;
+const STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{9}Z$/;
 
 const trimFraction = (stored: string) => stored.replace(/\.?0+Z$/, "Z");
 
@@ -72,13 +72,16 @@ export class CorruptRowError extends Error {
 
 /**
  * Reads a stored timestamp as RFC 3339. A corrupt value fails the whole read
- * instead of becoming an empty or zero time.
+ * instead of becoming an empty or zero time. The calendar date and the clock
+ * are checked here, field by field: Date.parse accepts 30 February (as
+ * 2 March) and hour 24.
  */
 export function readStamp(value: SqlStorageValue | undefined): string {
-  if (typeof value !== "string" || !STAMP.test(value) || Number.isNaN(Date.parse(`${value.slice(0, 23)}Z`))) {
+  const [, date = "", hour, minute, second] = (typeof value === "string" && STAMP.exec(value)) || [];
+  if (parseDate(date) === undefined || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59) {
     throw new CorruptRowError("timestamp");
   }
-  return trimFraction(value);
+  return trimFraction(value as string);
 }
 
 /** Text of a column; NULL reads as "". */

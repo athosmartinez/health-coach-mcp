@@ -3,7 +3,7 @@
 // Each test runs in its own Durable Object, with the clock fixed at 2026-10-14 12:00 UTC.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CorruptRowError, formatStamp, notFound } from "../src/store/db";
+import { CorruptRowError, formatStamp, notFound, readStamp } from "../src/store/db";
 import {
   HEALTH_ITEM_FIELDS,
   type HealthItem,
@@ -253,6 +253,25 @@ describe("profile", () => {
       sql.exec("UPDATE profile SET updated_at = 'yesterday'");
       expect(() => profile(db)).toThrow(CorruptRowError);
     }));
+
+  it("reads only timestamps that are real instants", () => {
+    expect(readStamp("2026-10-14T12:00:00.000000000Z")).toBe("2026-10-14T12:00:00Z");
+    expect(readStamp("2028-02-29T23:59:59.123456789Z")).toBe("2028-02-29T23:59:59.123456789Z");
+    expect(readStamp("2026-10-14T00:00:00.500000000Z")).toBe("2026-10-14T00:00:00.5Z");
+    const impossible = [
+      "2026-02-30T12:00:00.000000000Z", // Date.parse reads it as 2 March
+      "2026-02-10T24:00:00.000000000Z", // and accepts hour 24
+      "2026-13-01T12:00:00.000000000Z",
+      "2026-10-14T12:60:00.000000000Z",
+      "2026-10-14T12:00:60.000000000Z",
+      "2026-10-14T12:00:00.000Z", // not the stored width
+      "2026-10-14 12:00:00.000000000Z",
+      "yesterday",
+      "",
+    ];
+    for (const stored of impossible) expect(() => readStamp(stored), stored).toThrow(CorruptRowError);
+    for (const stored of [null, undefined, 1794657600000, new ArrayBuffer(8)]) expect(() => readStamp(stored)).toThrow(CorruptRowError);
+  });
 
   it("rejects a field that is both set and cleared", () =>
     withDb((db) => {

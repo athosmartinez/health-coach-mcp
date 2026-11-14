@@ -9,6 +9,7 @@ import type { CoachStore } from "../src/store";
 import { type Clock, Db } from "../src/store/db";
 import { MEMORY_TOOLS, runMemoryTool } from "../src/tools/memory";
 import { invoke } from "../src/tools/register";
+import { type JsonRpc, MCP_HEADERS, MCP_URL, parseRpc } from "./helpers";
 
 export const MEMORY_TOOL_NAMES = MEMORY_TOOLS.map((tool) => tool.name);
 
@@ -66,6 +67,37 @@ export function toolError(body: () => unknown): ToolError {
     throw error;
   }
   throw new Error("expected a ToolError, nothing was thrown");
+}
+
+/** A POST to /mcp as the Worker forwards it to the object: the MCP headers, no Authorization. */
+export function mcpRequest(body: unknown): Request {
+  return new Request(MCP_URL, { method: "POST", headers: MCP_HEADERS, body: JSON.stringify(body) });
+}
+
+/** The CoachStore object or its stub: both serve MCP on fetch. */
+export interface McpTarget {
+  fetch(request: Request): Promise<Response>;
+}
+
+/** One JSON-RPC call served by the object itself, without the Worker in front. */
+export async function objectRpc(target: McpTarget, body: unknown): Promise<JsonRpc> {
+  const response = await target.fetch(mcpRequest(body));
+  const text = await response.text();
+  expect(response.status, text).toBe(200);
+  return parseRpc(response.headers.get("content-type"), text);
+}
+
+/** One tool call served by the object itself: its output, or the {code,message,hint} it sent. */
+export async function objectTool(
+  target: McpTarget,
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<{ ok: true; output: Record<string, any> } | { ok: false; error: WireError }> {
+  const reply = await objectRpc(target, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+  expect(reply.error, JSON.stringify(reply.error)).toBeUndefined();
+  const result = reply.result as { isError?: boolean; content?: { text: string }[]; structuredContent?: Record<string, any> };
+  if (result.isError) return { ok: false, error: JSON.parse(result.content?.[0]?.text ?? "") as WireError };
+  return { ok: true, output: result.structuredContent ?? {} };
 }
 
 export const SCHEMA_HINT = "check the tool's input schema and retry";

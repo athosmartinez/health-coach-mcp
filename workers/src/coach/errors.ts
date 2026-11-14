@@ -14,8 +14,7 @@ export type Code = (typeof CODES)[number];
 
 /**
  * The error as the client reads it: the JSON text of a tool error result. A
- * plain object, so it can cross Durable Object RPC (a thrown error loses its
- * type and fields there).
+ * plain object, so a tool can return it in a result instead of throwing.
  */
 export interface WireError {
   code: Code;

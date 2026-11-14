@@ -1,7 +1,7 @@
 // Ports of internal/store/memory_test.go (profile, targets, health items,
 // preferences) and of the schema and error cases of internal/store/store_test.go.
 // Each test runs in its own Durable Object, with the clock fixed at 2026-10-14 12:00 UTC.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CorruptRowError, formatStamp, notFound } from "../src/store/db";
 import {
@@ -32,10 +32,13 @@ import {
   updateProfile,
   upsertHealthItem,
 } from "../src/store/memory";
-import type { ToolOutcome } from "../src/tools/register";
-import { FIXED_NOW, codeOf, freshStore, toolError, withDb } from "./memory-helpers";
+import { FIXED_NOW, codeOf, freshStore, objectTool, toolError, withDb } from "./memory-helpers";
 
 const NOW = "2026-10-14T12:00:00Z";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("schema", () => {
   it("has the coach memory tables, the FTS index and its triggers", () =>
@@ -505,11 +508,11 @@ describe("writes", () => {
 
   // The Go test runs these from 48 goroutines to prove its transactions wait
   // for the write lock. A Durable Object runs one call at a time, so here the
-  // calls arrive together through RPC and must leave the same single rows.
+  // calls arrive together at the object and must leave the same single rows.
   it("arriving together leave one row per key", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
     const stub = freshStore();
-    // The RPC stub's type drops the `unknown` values of an outcome.
-    const run = async (name: string, args: Record<string, unknown>) => (await stub.memoryTool(name, args)) as ToolOutcome;
+    const run = (name: string, args: Record<string, unknown>) => objectTool(stub, name, args);
     const calls = Array.from({ length: 16 }, (_unused, i) => [
       run("profile_update", { height_cm: 170 + i }),
       run("targets_set", { effective_from: "2026-10-01", kcal: 2000 + i }),

@@ -10,7 +10,7 @@ import { confidence, newEnvelope } from "../src/coach/envelope";
 import { INTERNAL_ERROR, ToolError, errorTypes, toWire, wireText } from "../src/coach/errors";
 import { byteLength, compareText, fields, trimSpace, truncate } from "../src/coach/text";
 import { ConfigError, DEFAULT_TIME_ZONE, loadZone, timeZone } from "../src/config";
-import { freshStore } from "./memory-helpers";
+import { freshStore, objectTool } from "./memory-helpers";
 
 const BRT = new Zone("America/Sao_Paulo");
 const NEW_YORK = new Zone("America/New_York");
@@ -235,16 +235,24 @@ describe("HCM_TZ", () => {
 
   it("fails every memory tool, and names the variable in the log, with a zone it cannot use", async () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-    await runInDurableObject(freshStore(), (instance) => {
-      expect(instance.memoryTool("preferences_get", {})).toMatchObject({ ok: true });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await runInDurableObject(freshStore(), async (instance) => {
+      expect(await objectTool(instance, "preferences_get")).toMatchObject({ ok: true });
       expect(logged).not.toHaveBeenCalled();
 
       // The Go server refuses to start in this case.
       Object.assign(instance, { env: { ...env, HCM_TZ: "Local" } });
-      for (const tool of ["preferences_get", "profile_get", "note_add"]) {
-        expect(instance.memoryTool(tool, {})).toEqual({ ok: false, error: { code: "internal_error", message: "unexpected internal error" } });
+      const calls: [string, Record<string, unknown>][] = [
+        ["preferences_get", {}],
+        ["profile_get", {}],
+        ["note_add", { kind: "checkin", text: "x" }],
+      ];
+      for (const [tool, args] of calls) {
+        expect(await objectTool(instance, tool, args)).toEqual({ ok: false, error: { code: "internal_error", message: "unexpected internal error" } });
       }
       expect(logged.mock.calls).toEqual(Array.from({ length: 3 }, () => ["config_error", { variable: "HCM_TZ" }]));
+      // A tool that does not use the memory still answers.
+      expect(await objectTool(instance, "server_info")).toMatchObject({ ok: true });
     });
   });
 });

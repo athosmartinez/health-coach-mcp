@@ -13,10 +13,11 @@ The coach-moment tools (`morning_briefing`, `nutrition_day`, `workout_review`, `
 
 ### How a tool call runs
 
-1. The Worker isolate does OAuth, the MCP protocol and the input-schema check. It has 10 ms of CPU per request on the Free plan.
-2. The tool body runs inside the `CoachStore` Durable Object, next to its SQLite data (`CoachStore.memoryTool`). The object returns a result, `{ ok, output }` or `{ ok, error }`, and never throws: an error that crosses Durable Object RPC loses its type and fields.
-3. Every tool goes through `register` (`src/tools/register.ts`). A tool error reaches the client as JSON `{code,message,hint}` in the text content, with `isError` and no `structuredContent`. Arguments that fail the input schema are `invalid_input`. An unexpected error is `internal_error`: its text is never sent or logged.
-4. One log line per call: `tool_call` with the tool name, `duration_ms`, `is_error` and `code`. Never arguments, results, error messages or stored values. An internal error also logs `tool_internal_error` with the tool name and the error's type names.
+1. The Worker isolate does only OAuth and the allowlist check (`src/index.ts`). It has 10 ms of CPU per request on the Free plan. An unauthenticated request gets `401` and a grant of an account that is no longer allowed gets `403`; neither reaches the object.
+2. The Worker forwards the request to the `CoachStore` Durable Object (`stub.fetch`) without the `Authorization` header, and returns the object's response without reading its body.
+3. The object serves the whole MCP request (`CoachStore.fetch`): JSON-RPC parsing, the Host and Origin checks, the input-schema check, the tool body next to its SQLite data, the log line and the serialization of the result. A tool calls the store directly: there is no Durable Object RPC call per tool. The object's `fetch` answers only `/mcp`, and only the Worker's stub can call it.
+4. Every tool goes through `register` (`src/tools/register.ts`). A tool error reaches the client as JSON `{code,message,hint}` in the text content, with `isError` and no `structuredContent`. Arguments that fail the input schema are `invalid_input`. An unexpected error is `internal_error`: its text is never sent or logged.
+5. One log line per call: `tool_call` with the tool name, `duration_ms`, `is_error` and `code`. Never arguments, results, error messages or stored values. An internal error also logs `tool_internal_error` with the tool name and the error's type names.
 
 The source layout mirrors the Go packages: `src/coach/` (local dates, tool errors, the envelope), `src/store/` (profile, targets, health items, preferences, labs, notes), `src/tools/` (`register`, the schema builders, the memory tools). The schema migrations and the Durable Object class are in `src/store.ts`.
 
@@ -97,7 +98,7 @@ The script runs the Go binary with new, empty data and config folders. It never 
 - **`preference_set` does not keep a value byte for byte.** The value arrives parsed, so it is stored as `JSON.stringify` writes it: `1.0` becomes `1`, insignificant white space and escapes go away, and integer-like object keys move first. The 2 KB limit applies to the stored text. As in Go, an integer beyond 2^53 loses precision.
 - **Timestamps have millisecond precision.** They are stored with the Go store's fixed-width format (9 fractional digits) and returned as RFC 3339 with the trailing zeros trimmed, as Go writes a time.
 - **The text of a schema error differs.** Both servers answer `invalid_input` with the hint `check the tool's input schema and retry`, and both cap the message at 500 bytes. The message text comes from each SDK's validator. A date that matches the pattern but is not a real day (`2026-02-30`) is reported by its path, without the value.
-- **Tool results are checked against the output schema inside the Durable Object**, not by the MCP SDK in the Worker. A result that does not match is `internal_error`.
+- **Tool results are checked against the output schema by `register`**, not by the MCP SDK. A result that does not match is `internal_error`.
 - **A bad `HCM_TZ` does not stop the server.** The Go server refuses to start. A Worker has no start: every memory tool answers `internal_error` and the log has `config_error` with the variable name. Zone names are checked by the runtime's `Intl`, which ignores case.
 - **A call to an unknown tool is a protocol error and writes no `tool_call` line.** The Go server logs it as `protocol_error`.
 - **A schema newer than the code is not refused.** The Go store refuses a database migrated by a newer binary; the migration runner here applies only what is missing.
@@ -105,9 +106,19 @@ The script runs the Go binary with new, empty data and config folders. It never 
 - **`server_info` also returns `transport`** and has annotations; it existed before the memory tools.
 - Lowercasing (`toLowerCase`) and quoting of names in error messages (`JSON.stringify`) follow JavaScript, which differs from Go only for a few non-ASCII characters and control characters.
 
+## Workers Free plan
+
+- **Worker CPU: 10 ms per request.** The Worker isolate does OAuth and the allowlist check, then forwards the request. Its work does not grow with the size of the arguments or of the result.
+- **Object CPU: not verified in the docs.** The Durable Objects limits table says 30 seconds of CPU per request. The same page says that objects have the Workers per-invocation CPU limits. No deploy has measured it yet.
+- **How to measure after a deploy.** Fill the store to its caps with synthetic rows, then read the CPU time of the Durable Object invocation in the Workers observability logs for these four calls:
+  - `health_items_list {}` with 500 items of 4 KiB details (about 2.1 MB of result text);
+  - `notes_search {"limit": 200}` with 8 KiB notes (about 1.7 MB);
+  - `labs_query {}` with 2,000 rows (about 0.34 MB);
+  - `labs_record` with 200 results (the largest input to check).
+- **Rows written: 100,000 per day** for SQLite in Durable Objects. A note also writes rows to its full-text index. A single user stays far below it.
+- **A statement binds at most 100 parameters and is at most 100 KB long** (SQLite in Durable Objects). The store binds at most 13 parameters, and writes a lab batch one row per statement.
+
 ## Known limits
 
 - The OAuth resource is `<request origin>/mcp`. A second hostname (`workers.dev` and a custom domain) is a separate resource with its own grants.
 - `/register` and the consent page are open to anyone, as MCP clients need them. Each attempt writes to KV, so heavy abuse could use up the Free plan's daily KV writes.
-- The Free plan allows 100,000 SQLite rows written per day for Durable Objects, and a note also writes rows to its full-text index. A single user stays far below it.
-- A statement binds at most 100 parameters and is at most 100 KB long (SQLite in Durable Objects). The store binds at most 13 parameters, and writes a lab batch one row per statement.

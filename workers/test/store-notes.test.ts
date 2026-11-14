@@ -1,6 +1,6 @@
 // Ports of the note cases of internal/store/memory_test.go and store_test.go.
 import { runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ToolError } from "../src/coach/errors";
 import { CorruptRowError, Db, formatStamp } from "../src/store/db";
@@ -21,10 +21,13 @@ import {
   ftsSyntaxError,
   searchNotes,
 } from "../src/store/notes";
-import type { ToolOutcome } from "../src/tools/register";
-import { FIXED_NOW, SAO_PAULO, codeOf, freshStore, withDb } from "./memory-helpers";
+import { FIXED_NOW, SAO_PAULO, codeOf, freshStore, objectTool, withDb } from "./memory-helpers";
 
 const SLOW = 60_000;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("notes", () => {
   it("searches by words, kind and date", () =>
@@ -277,11 +280,12 @@ describe("notes", () => {
     }));
 
   // The Go test writes from 20 goroutines to prove busy_timeout works. Here the
-  // calls arrive together through RPC and every one must be stored.
+  // calls arrive together at the object and every one must be stored.
   it("stores every note of calls that arrive together", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
     const stub = freshStore();
     const outcomes = await Promise.all(
-      Array.from({ length: 20 }, async () => (await stub.memoryTool("note_add", { kind: "checkin", text: "concurrent note" })) as ToolOutcome),
+      Array.from({ length: 20 }, () => objectTool(stub, "note_add", { kind: "checkin", text: "concurrent note" })),
     );
     for (const outcome of outcomes) expect(outcome.ok).toBe(true);
     await runInDurableObject(stub, (_instance, state) => {

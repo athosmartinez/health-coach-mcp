@@ -1,9 +1,11 @@
+import { type StatelessMcpHandler, createMcpHandler } from "agents/mcp/server";
 import { DurableObject } from "cloudflare:workers";
 
 import type { Zone } from "./coach/date";
 import { INTERNAL_ERROR } from "./coach/errors";
 import { timeZone } from "./config";
 import { type GoogleErrorCode, missingHealthScopes, refreshAccessToken, splitScopes } from "./google";
+import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
 import { runMemoryTool } from "./tools/memory";
 import type { ToolOutcome } from "./tools/register";
@@ -173,34 +175,45 @@ interface AccountRow {
 export class CoachStore extends DurableObject<Env> {
   /** One renewal at a time: concurrent callers share it. */
   private refreshing: Promise<AccessTokenResult> | null = null;
-  private readonly db: Db;
+  /** Serves MCP inside this object. An instance property, so it is not an RPC method. */
+  private readonly mcp: StatelessMcpHandler;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.db = new Db(ctx.storage);
+    const db = new Db(ctx.storage);
+    const memory = (name: string, args: Record<string, unknown>): ToolOutcome => {
+      let zone: Zone;
+      try {
+        zone = timeZone(this.env);
+      } catch {
+        // The Go server refuses to start with a bad HCM_TZ. A Worker has no
+        // start, so every memory tool fails instead of using a zone nobody chose.
+        console.error("config_error", { variable: "HCM_TZ" });
+        return { ok: false, error: INTERNAL_ERROR };
+      }
+      return runMemoryTool({ db, zone }, name, args);
+    };
+    this.mcp = createMcpHandler(
+      () => createServer({ memory, googleAccountStatus: () => this.googleAccountStatus() }),
+      { route: MCP_PATH },
+    );
     ctx.blockConcurrencyWhile(async () => {
       migrate(this.ctx.storage);
     });
   }
 
   /**
-   * Runs the body of a coach memory tool next to its data: the Worker isolate
-   * has 10 ms of CPU per request on the Free plan, this object has far more.
-   * A result rather than a throw, for the same reason as AccessTokenResult.
+   * Serves one MCP request, whole: parsing, the argument check, the tool body,
+   * the log line and the result serialization all run here, next to the data.
+   * The Worker isolate has 10 ms of CPU per request on the Free plan, and that
+   * work grows with the size of the arguments and of the result.
+   *
+   * Only the Worker calls this, through its stub, after OAuth and the
+   * allowlist check; the request it forwards carries no access token. Any
+   * other path is 404.
    */
-  memoryTool(name: string, args: Record<string, unknown>): ToolOutcome {
-    let zone: Zone;
-    try {
-      zone = timeZone(this.env);
-    } catch {
-      // The Go server refuses to start with a bad HCM_TZ. A Worker has no
-      // start, so every memory tool fails instead of using a zone nobody chose.
-      // The zone is checked here and not in the Worker isolate: building it
-      // takes CPU that the Worker's 10 ms budget should not pay.
-      console.error("config_error", { variable: "HCM_TZ" });
-      return { ok: false, error: INTERNAL_ERROR };
-    }
-    return runMemoryTool({ db: this.db, zone }, name, args);
+  async fetch(request: Request): Promise<Response> {
+    return this.mcp.fetch(request);
   }
 
   schemaVersion(): number {

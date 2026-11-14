@@ -1,8 +1,8 @@
 // The coach memory tools (Go: internal/tools/memory.go, CAPABILITY §4.2).
 //
-// The definitions (schemas, descriptions, annotations) are used by the Worker
-// to list the tools and check arguments. The bodies run inside the CoachStore
-// Durable Object, next to the data: see runMemoryTool.
+// The whole MCP request is served inside the CoachStore Durable Object, so the
+// definitions (schemas, descriptions, annotations) and the bodies both run
+// there, next to the data: see runMemoryTool.
 
 import type { McpServer, ToolAnnotations } from "@modelcontextprotocol/server";
 
@@ -756,8 +756,8 @@ export const MEMORY_TOOLS: readonly Tool[] = [
 const byName = new Map(MEMORY_TOOLS.map((one) => [one.name, one]));
 
 /**
- * Runs the body of a memory tool. Call it inside the Durable Object that owns
- * the data. Errors come back in the outcome and are never thrown.
+ * Runs the body of a memory tool on the store. Errors come back in the
+ * outcome and are never thrown.
  */
 export function runMemoryTool(deps: MemoryDeps, name: string, args: Args): ToolOutcome {
   const definition = byName.get(name);
@@ -767,9 +767,9 @@ export function runMemoryTool(deps: MemoryDeps, name: string, args: Args): ToolO
 }
 
 /**
- * Adds the coach memory tools. `run` executes a tool body where the store
- * lives (the CoachStore Durable Object) and returns its outcome.
+ * Adds the coach memory tools. `run` executes a tool body on the store and
+ * returns its outcome.
  */
-export function registerMemory(server: McpServer, run: (name: string, args: Args) => ToolOutcome | Promise<ToolOutcome>): void {
+export function registerMemory(server: McpServer, run: (name: string, args: Args) => ToolOutcome): void {
   for (const one of MEMORY_TOOLS) register(server, one, (args) => run(one.name, args));
 }

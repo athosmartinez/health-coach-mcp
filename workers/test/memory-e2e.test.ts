@@ -4,10 +4,11 @@ import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { coachStore } from "../src/store";
+import { forwardedRequest } from "../src/index";
+import { CoachStore, coachStore } from "../src/store";
 import { DATA_NOTICE, MEDICAL_HINT } from "../src/tools/memory";
-import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, MCP_HEADERS, MCP_URL, parseRpc, rpc, signInAsOwner } from "./helpers";
-import { ALL_TOOL_NAMES, SCHEMA_HINT } from "./memory-helpers";
+import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, MCP_HEADERS, MCP_URL, ORIGIN, parseRpc, rpc, signInAsOwner } from "./helpers";
+import { ALL_TOOL_NAMES, SCHEMA_HINT, freshStore, mcpRequest, objectRpc, objectTool } from "./memory-helpers";
 
 const MODERN_PROTOCOL = "2026-07-28";
 
@@ -56,6 +57,96 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+// The Worker does OAuth and the allowlist check; the CoachStore object serves
+// the whole MCP request.
+describe("the MCP request inside the object", () => {
+  const listTools = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+  it("answers tools/list and a tool call for a request without an Authorization header", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const stub = freshStore();
+    expect(mcpRequest(listTools).headers.has("authorization")).toBe(false);
+
+    const listed = await objectRpc(stub, listTools);
+    expect(listed.error).toBeUndefined();
+    expect((listed.result as { tools: { name: string }[] }).tools.map((tool) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
+
+    expect(await objectTool(stub, "preference_set", { key: "tone", value: "direct" })).toEqual({
+      ok: true,
+      output: { key: "tone", value: "direct", notice: DATA_NOTICE },
+    });
+    expect(await objectTool(stub, "preferences_get")).toMatchObject({ ok: true, output: { preferences: { tone: "direct" } } });
+    // google_account_status runs in the object too, with no call to its own stub.
+    expect(await objectTool(stub, "google_account_status")).toMatchObject({ ok: true, output: { linked: false, token: "not_linked" } });
+    expect(await objectTool(stub, "note_add", { kind: "rant", text: "x" })).toMatchObject({ ok: false, error: { code: "invalid_input", hint: SCHEMA_HINT } });
+  });
+
+  it("serves only the MCP route, and keeps the handler's Origin check", async () => {
+    const stub = freshStore();
+    const other = await stub.fetch(new Request(`${ORIGIN}/other`, { method: "POST", headers: MCP_HEADERS, body: JSON.stringify(listTools) }));
+    expect(other.status).toBe(404);
+    const foreign = await stub.fetch(
+      new Request(MCP_URL, { method: "POST", headers: { ...MCP_HEADERS, origin: "https://evil.example" }, body: JSON.stringify(listTools) }),
+    );
+    expect(foreign.status).toBe(403);
+  });
+
+  it("gets the request from the Worker without the MCP access token", async () => {
+    const served = vi.spyOn(CoachStore.prototype, "fetch");
+    const listed = await rpc(accessToken, listTools);
+    expect((listed.result as { tools: unknown[] }).tools).toHaveLength(13);
+
+    expect(served).toHaveBeenCalledTimes(1);
+    const forwarded = served.mock.calls[0]?.[0] as Request;
+    expect(forwarded.headers.has("authorization")).toBe(false);
+    expect(JSON.stringify([...forwarded.headers])).not.toContain(accessToken);
+    // The URL, Host and the MCP headers are kept: the handler checks Host and Origin.
+    expect(forwarded.url).toBe(MCP_URL);
+    expect(forwarded.method).toBe("POST");
+    expect(forwarded.headers.get("host")).toBe("localhost");
+    expect(forwarded.headers.get("mcp-protocol-version")).toBe(MCP_HEADERS["mcp-protocol-version"]);
+    expect(forwarded.headers.get("content-type")).toBe("application/json");
+  });
+
+  it("builds the forwarded request with the same URL, method, headers and body", async () => {
+    const original = new Request(MCP_URL, {
+      method: "POST",
+      headers: { ...MCP_HEADERS, authorization: "Bearer zz-mcp-token", origin: ORIGIN },
+      body: JSON.stringify(listTools),
+    });
+    const forwarded = forwardedRequest(original);
+    expect([...forwarded.headers].sort()).toEqual([...new Headers({ ...MCP_HEADERS, origin: ORIGIN })].sort());
+    expect(forwarded.url).toBe(MCP_URL);
+    expect(forwarded.method).toBe("POST");
+    expect(await forwarded.json()).toEqual(listTools);
+  });
+
+  it("is not reached without a token, or with the grant of an account that is no longer allowed", async () => {
+    const served = vi.spyOn(CoachStore.prototype, "fetch");
+    const post = (headers: Record<string, string>) =>
+      exports.default.fetch(MCP_URL, { method: "POST", headers: { ...MCP_HEADERS, ...headers }, body: JSON.stringify(listTools) });
+
+    const anonymous = await post({});
+    expect(anonymous.status).toBe(401);
+    const wrongToken = await post({ authorization: "Bearer not-a-token" });
+    expect(wrongToken.status).toBe(401);
+
+    const allowed = env.ALLOWED_GOOGLE_EMAIL;
+    try {
+      env.ALLOWED_GOOGLE_EMAIL = "someone-else@example.com";
+      const denied = await post({ authorization: `Bearer ${accessToken}` });
+      expect(denied.status).toBe(403);
+    } finally {
+      env.ALLOWED_GOOGLE_EMAIL = allowed;
+    }
+    expect(served).not.toHaveBeenCalled();
+
+    // The same grant is served again once the account is allowed.
+    expect((await post({ authorization: `Bearer ${accessToken}` })).status).toBe(200);
+    expect(served).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("coach memory over /mcp", () => {

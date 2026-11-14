@@ -1,11 +1,24 @@
 import { McpServer } from "@modelcontextprotocol/server";
-import { env } from "cloudflare:workers";
 
-import { coachStore } from "./store";
+import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
 import { type ToolOutcome, defineTool, register } from "./tools/register";
 import { inputSchema, s } from "./tools/schema";
 import { SERVER_NAME, TRANSPORT, VERSION } from "./version";
+
+/** The one route that serves MCP. */
+export const MCP_PATH = "/mcp";
+
+/**
+ * What the tools need from the object that serves them. The server is built
+ * inside the CoachStore Durable Object, so every call here is a direct call:
+ * no RPC hop, and no call from the object to its own stub.
+ */
+export interface ServerDeps {
+  /** Runs the body of a coach memory tool on the store. */
+  memory(name: string, args: Record<string, unknown>): ToolOutcome;
+  googleAccountStatus(): Promise<GoogleAccountStatus>;
+}
 
 // Tool definitions are built once per isolate: createServer runs on every request.
 
@@ -43,7 +56,7 @@ const GOOGLE_ACCOUNT_STATUS = defineTool({
   }),
 });
 
-export function createServer(): McpServer {
+export function createServer(deps: ServerDeps): McpServer {
   const server = new McpServer({
     name: SERVER_NAME,
     version: VERSION,
@@ -55,7 +68,7 @@ export function createServer(): McpServer {
   }));
 
   register(server, GOOGLE_ACCOUNT_STATUS, async () => {
-    const status = await coachStore(env).googleAccountStatus();
+    const status = await deps.googleAccountStatus();
     return {
       ok: true,
       output: {
@@ -70,8 +83,7 @@ export function createServer(): McpServer {
     };
   });
 
-  // The bodies run inside the CoachStore Durable Object, next to the data.
-  registerMemory(server, async (name, args) => (await coachStore(env).memoryTool(name, args)) as ToolOutcome);
+  registerMemory(server, deps.memory);
 
   return server;
 }

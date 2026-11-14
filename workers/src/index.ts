@@ -1,19 +1,15 @@
 import { getOAuthApi, OAuthError, OAuthProvider, type OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
-import { createMcpHandler } from "agents/mcp/server";
 
 import { AUTHORIZE_PATH, authHandler } from "./auth";
 import { isAllowedEmail } from "./google";
-import { createServer } from "./mcp";
+import { MCP_PATH } from "./mcp";
 import { publicPage } from "./pages";
-import { CoachStore } from "./store";
+import { CoachStore, coachStore } from "./store";
 
-export { CoachStore };
+export { CoachStore, MCP_PATH };
 
-export const MCP_PATH = "/mcp";
 export const TOKEN_PATH = "/token";
 export const REGISTER_PATH = "/register";
-
-const mcpHandler = createMcpHandler(createServer, { route: MCP_PATH });
 
 /**
  * Called by the provider only with a valid access token for this resource.
@@ -29,10 +25,24 @@ const mcpApiHandler = {
         { status: 403 },
       );
     }
-    // ctx carries the verified token; getMcpAuthContext() reads it from there.
-    return mcpHandler(request, env, ctx);
+    // The object serves the whole MCP request. This isolate has 10 ms of CPU
+    // per request on the Free plan, and parsing, validation and serialization
+    // grow with the arguments and the result. The response goes back as it
+    // comes: its body is never read here.
+    return coachStore(env).fetch(forwardedRequest(request));
   },
 } satisfies ExportedHandler<Env>;
+
+/**
+ * The request as the CoachStore object gets it: the same URL, method, body and
+ * headers (the MCP handler checks Host and Origin), without the MCP access
+ * token, which the object does not need.
+ */
+export function forwardedRequest(request: Request): Request {
+  const headers = new Headers(request.headers);
+  headers.delete("authorization");
+  return new Request(request, { headers });
+}
 
 /** The provider options for one origin. Exported so tests can reach the same helpers. */
 export function providerOptions(origin: string): OAuthProviderOptions<Env> {

@@ -23,8 +23,8 @@ import { truncate } from "../coach/text";
 import { type JsonSchema, invalidDate } from "./schema";
 
 /**
- * What a tool body produces. A result rather than a throw, so it can cross
- * Durable Object RPC: a thrown error loses its type and fields there.
+ * What a tool body produces: its output, or the error the client reads. A
+ * result rather than a throw, so nothing but a bug ever throws out of a body.
  */
 export type ToolOutcome = { ok: true; output: Record<string, unknown> } | { ok: false; error: WireError };
 
@@ -74,7 +74,7 @@ export function defineTool(definition: ToolDefinition): Tool {
 /**
  * The schema as the SDK lists it. Its validation passes everything: `register`
  * checks the arguments itself, so a rejection keeps the error contract, and
- * results are checked where the tool body runs.
+ * `capture` checks the results.
  */
 function listed(schema: JsonSchema): ObjectSchema {
   const json = schema as Record<string, unknown>;
@@ -161,8 +161,8 @@ export class OutputSchemaError extends Error {
 }
 
 /**
- * Runs a tool body where the data lives and turns whatever happens into a
- * ToolOutcome. The result is checked against the output schema.
+ * Runs a tool body and turns whatever happens into a ToolOutcome. The result
+ * is checked against the output schema.
  */
 export function capture(tool: Tool, body: () => Record<string, unknown>): ToolOutcome {
   try {

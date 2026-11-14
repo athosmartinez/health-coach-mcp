@@ -82,3 +82,5 @@ takes them into account. With a kcal target set, food series also load faster.
 make test   # go test -race ./...
 make lint   # gofmt + go vet
 ```
+
+The Cloudflare Workers port lives in `workers/`.

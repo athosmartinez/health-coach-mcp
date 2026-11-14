@@ -28,7 +28,8 @@
   // Create the namespace before the first deploy and add its "id".
   "kv_namespaces": [
     {
-      "binding": "OAUTH_KV"
+      "binding": "OAUTH_KV",
+      "id": "c9995c5be68a4b70b9a84def3458a3ab"
     }
   ],
   "migrations": [

@@ -283,6 +283,23 @@ describe("coach memory over /mcp", () => {
     expect(unknown.error?.code).toBe(-32602);
   });
 
+  // The MCP SDK rejects these before `register` runs. The Go server answers
+  // invalid_input for the same calls: a known difference (see the README).
+  it.each([
+    ["an array", []],
+    ["a string", "zz-args-text-3b1f"],
+    ["a number", 987123],
+    ["null", null],
+  ])("answers a protocol error when arguments is %s, without echoing it", async (_name, args) => {
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const reply = await rpc(accessToken, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "profile_get", arguments: args } });
+    expect(reply.result).toBeUndefined();
+    expect(reply.error?.code).toBe(-32602);
+    expect(JSON.stringify(reply.error)).not.toMatch(/zz-args-text-3b1f|987123/);
+    // No tool ran: there is no tool_call line.
+    expect(logs).not.toHaveBeenCalled();
+  });
+
   // A 2026-07-28 request carries its protocol version in params._meta and skips
   // initialize. The SDK serves it on a different path than the 2025 requests.
   it("serves a memory tool on the 2026-07-28 per-request protocol", async () => {

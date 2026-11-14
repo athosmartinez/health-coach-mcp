@@ -101,6 +101,7 @@ The script runs the Go binary with new, empty data and config folders. It never 
 - **Tool results are checked against the output schema by `register`**, not by the MCP SDK. A result that does not match is `internal_error`.
 - **A bad `HCM_TZ` does not stop the server.** The Go server refuses to start. A Worker has no start: every memory tool answers `internal_error` and the log has `config_error` with the variable name. Zone names are checked by the runtime's `Intl`, which ignores case.
 - **A call to an unknown tool is a protocol error and writes no `tool_call` line.** The Go server logs it as `protocol_error`.
+- **`arguments` that is not an object is a protocol error.** For `"arguments": []`, a string, a number or `null`, the MCP SDK answers JSON-RPC error `-32602` before `register` runs, with no `tool_call` line. The Go server answers `invalid_input` in a tool result. The error text does not repeat the value.
 - **A schema newer than the code is not refused.** The Go store refuses a database migrated by a newer binary; the migration runner here applies only what is missing.
 - **No `daily_metrics` table yet.** It comes with the code that fills the metrics cache.
 - **`server_info` also returns `transport`** and has annotations; it existed before the memory tools.

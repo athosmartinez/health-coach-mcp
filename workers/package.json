@@ -18,7 +18,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.8.2",
-    "@cloudflare/workers-types": "^5.20261113.1",
+    "@cloudflare/workers-types": "5.20261114.1",
     "@types/node": "^22.15.17",
     "typescript": "6.0.3",
     "vitest": "^4.1.0",

@@ -1,11 +1,14 @@
-import { env } from "cloudflare:workers";
+import { getOAuthApi } from "@cloudflare/workers-oauth-provider";
+import { env, exports } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GOOGLE_HEALTH_SCOPES } from "../src/google";
+import { providerOptions } from "../src/index";
 import { coachStore } from "../src/store";
 import {
   call,
+  cimdClient,
   CLIENT_REDIRECT,
   codeExchangeReply,
   dumpKv,
@@ -19,6 +22,7 @@ import {
   mockGoogle,
   ORIGIN,
   OWNER_EMAIL,
+  OWNER_SUB,
   registerClient,
   rpc,
   signInAsOwner,
@@ -130,6 +134,9 @@ describe("Google sign-in", () => {
       expect(text).not.toContain(GOOGLE_REFRESH_TOKEN);
       expect(text).not.toContain(GOOGLE_ACCESS_TOKEN);
     }
+    // Grant props are encrypted in KV, so a plain search cannot see them: decrypt them.
+    const summary = await getOAuthApi(providerOptions(ORIGIN), env).unwrapToken<Record<string, unknown>>(tokens.access_token);
+    expect(summary?.grant.props).toEqual({ sub: OWNER_SUB, email: OWNER_EMAIL });
 
     // The MCP access token opens /mcp.
     const listed = await rpc(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
@@ -261,5 +268,110 @@ describe("Google sign-in", () => {
       }).toString(),
     });
     expect(again.status).toBe(400);
+  });
+
+  it("signs in a Client ID Metadata Document client", async () => {
+    const clientId = "https://client.example/oauth/client-metadata.json";
+    const document = {
+      client_id: clientId,
+      client_name: "CIMD test client",
+      redirect_uris: [CLIENT_REDIRECT],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+    };
+    const serveDocument = (request: Request) =>
+      request.url === clientId
+        ? Response.json(document, { headers: { "cache-control": "no-store" } })
+        : undefined;
+    const tokens = await signInAsOwner({ client: await cimdClient(clientId), other: serveDocument });
+    expect(tokens.refresh_token).toBeTruthy();
+    const listed = await rpc(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(listed.error).toBeUndefined();
+  });
+
+  it("refuses a CIMD client's redirect URI that its document does not list", async () => {
+    const clientId = "https://client.example/oauth/other-metadata.json";
+    mockGoogle(
+      () => new Response(null, { status: 500 }),
+      (request) =>
+        request.url === clientId
+          ? Response.json({
+              client_id: clientId,
+              client_name: "CIMD test client",
+              redirect_uris: ["https://client.example/elsewhere"],
+              token_endpoint_auth_method: "none",
+            })
+          : undefined,
+    );
+    const client = await cimdClient(clientId);
+    const authorize = new URL("/authorize", ORIGIN);
+    authorize.search = new URLSearchParams({
+      response_type: "code",
+      client_id: client.clientId,
+      redirect_uri: CLIENT_REDIRECT,
+      code_challenge: client.challenge,
+      code_challenge_method: "S256",
+      state: "client-state",
+    }).toString();
+    const response = await call(authorize.toString());
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+  });
+});
+
+describe("allowlist changes", () => {
+  const original = env.ALLOWED_GOOGLE_EMAIL;
+
+  afterEach(() => {
+    env.ALLOWED_GOOGLE_EMAIL = original;
+  });
+
+  it("cuts off grants of the previous account at /mcp and at refresh", async () => {
+    const tokens = await signInAsOwner();
+    env.ALLOWED_GOOGLE_EMAIL = "someone-else@example.com";
+
+    const denied = await call("/mcp", {
+      method: "POST",
+      headers: { ...MCP_HEADERS, authorization: `Bearer ${tokens.access_token}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(denied.status).toBe(403);
+
+    const refreshed = await call("/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refresh_token ?? "",
+        client_id: tokens.clientId,
+      }).toString(),
+    });
+    expect(refreshed.status).toBe(400);
+    expect(((await refreshed.json()) as { error?: string }).error).toBe("invalid_grant");
+  });
+});
+
+describe("several hostnames", () => {
+  it("signs in on each origin with that origin's resource", async () => {
+    mockGoogle(() => new Response(null, { status: 500 }));
+    // Any request through the default handler on another host first.
+    expect((await exports.default.fetch("https://other.example/favicon.ico")).status).toBe(404);
+    const otherConsent = await exports.default.fetch(
+      `https://other.example/authorize?${new URLSearchParams({
+        response_type: "code",
+        client_id: (await registerClient()).clientId,
+        redirect_uri: CLIENT_REDIRECT,
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "S256",
+        resource: "https://other.example/mcp",
+      })}`,
+    );
+    expect(otherConsent.status, await otherConsent.text()).toBe(200);
+    vi.restoreAllMocks();
+
+    // Then the usual sign-in on localhost still works.
+    const tokens = await signInAsOwner();
+    expect(tokens.access_token).toBeTruthy();
   });
 });

@@ -36,7 +36,10 @@ export type TokenReply = (form: URLSearchParams) => Response | Promise<Response>
  * Durable Object share it). Only Google's token and revoke endpoints answer;
  * any other URL fails the test, so nothing reaches the network.
  */
-export function mockGoogle(tokenReply: TokenReply): GoogleCalls {
+export function mockGoogle(
+  tokenReply: TokenReply,
+  other?: (request: Request) => Response | undefined,
+): GoogleCalls {
   const calls: GoogleCalls = { token: [], revoke: [] };
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
@@ -49,6 +52,8 @@ export function mockGoogle(tokenReply: TokenReply): GoogleCalls {
       calls.revoke.push(form);
       return new Response(null, { status: 200 });
     }
+    const answer = other?.(request);
+    if (answer) return answer;
     throw new Error(`unexpected fetch in test: ${request.method} ${request.url}`);
   });
   return calls;
@@ -121,6 +126,17 @@ export interface McpClient {
   challenge: string;
 }
 
+async function pkcePair(): Promise<{ verifier: string; challenge: string }> {
+  const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return { verifier, challenge: base64Url(new Uint8Array(digest)) };
+}
+
+/** A Client ID Metadata Document client: its client_id is the document's URL. */
+export async function cimdClient(clientId: string): Promise<McpClient> {
+  return { clientId, ...(await pkcePair()) };
+}
+
 export async function registerClient(): Promise<McpClient> {
   const response = await call("/register", {
     method: "POST",
@@ -136,9 +152,7 @@ export async function registerClient(): Promise<McpClient> {
   const text = await response.text();
   expect(response.status, text).toBe(201);
   const { client_id: clientId } = JSON.parse(text) as { client_id: string };
-  const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-  return { clientId, verifier, challenge: base64Url(new Uint8Array(digest)) };
+  return { clientId, ...(await pkcePair()) };
 }
 
 export interface GoogleRedirect {
@@ -217,10 +231,12 @@ export async function exchangeMcpCode(client: McpClient, code: string): Promise<
 }
 
 /** The whole flow for the allowed account; returns the MCP tokens. */
-export async function signInAsOwner(): Promise<McpTokens & { calls: GoogleCalls; clientId: string }> {
+export async function signInAsOwner(
+  options: { client?: McpClient; other?: (request: Request) => Response | undefined } = {},
+): Promise<McpTokens & { calls: GoogleCalls; clientId: string }> {
   let nonce = "";
-  const calls = mockGoogle(codeExchangeReply({ email: OWNER_EMAIL }, () => nonce));
-  const client = await registerClient();
+  const calls = mockGoogle(codeExchangeReply({ email: OWNER_EMAIL }, () => nonce), options.other);
+  const client = options.client ?? (await registerClient());
   const redirect = googleRedirect(await startSignIn(client));
   nonce = redirect.url.searchParams.get("nonce") ?? "";
   const back = await googleCallback(redirect);
@@ -228,6 +244,10 @@ export async function signInAsOwner(): Promise<McpTokens & { calls: GoogleCalls;
   const location = new URL(back.headers.get("location") ?? "");
   expect(`${location.origin}${location.pathname}`).toBe(CLIENT_REDIRECT);
   expect(location.searchParams.get("state")).toBe("client-state");
+  // Google gets the verifier of the challenge it was sent.
+  const verifier = calls.token[0]?.get("code_verifier") ?? "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  expect(base64Url(new Uint8Array(digest))).toBe(redirect.url.searchParams.get("code_challenge"));
   const tokens = await exchangeMcpCode(client, location.searchParams.get("code") ?? "");
   return { ...tokens, calls, clientId: client.clientId };
 }

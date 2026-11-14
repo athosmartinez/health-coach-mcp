@@ -142,21 +142,44 @@ describe("CoachStore Google token", () => {
     expect(await row()).toBeUndefined();
   });
 
-  it("keeps the link when the renewal races a new sign-in", async () => {
+  it.each([
+    { name: "invalid_grant", reply: () => Response.json({ error: "invalid_grant" }, { status: 400 }) },
+    { name: "a new token", reply: () => Response.json({ access_token: "stale-link-token", expires_in: 3599 }) },
+  ])("answers for the new link when a renewal with $name races a sign-in", async ({ reply }) => {
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => (release = resolve));
     mockGoogle(async () => {
       await gate;
-      return Response.json({ error: "invalid_grant" }, { status: 400 });
+      return reply();
     });
     const stub = coachStore(env);
     await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
     const pending = stub.googleAccessToken();
+    const pendingStatus = stub.googleAccountStatus();
     await new Promise((resolve) => setTimeout(resolve, 10));
-    await stub.linkGoogleAccount(link({ refreshToken: "new-sign-in-refresh" }));
+    await stub.linkGoogleAccount(link({ refreshToken: "new-sign-in-refresh", accessToken: "new-sign-in-access" }));
     release();
-    expect(await pending).toMatchObject({ ok: false, code: "auth_expired" });
-    expect(await row()).toMatchObject({ refresh_token: "new-sign-in-refresh" });
+    expect(await pending).toMatchObject({ ok: true, accessToken: "new-sign-in-access" });
+    expect(await pendingStatus).toMatchObject({ linked: true, token: "ok" });
+    expect(await row()).toMatchObject({ refresh_token: "new-sign-in-refresh", access_token: "new-sign-in-access" });
+  });
+
+  it("maps a body cut off after HTTP 200 to upstream_unavailable", async () => {
+    mockGoogle(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("connection reset"));
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: false, code: "upstream_unavailable" });
+    expect(await row()).toMatchObject({ refresh_token: GOOGLE_REFRESH_TOKEN });
   });
 
   it.each([

@@ -123,6 +123,7 @@ The parity test reads only the committed fixture, so it cannot see a tool defini
   - `labs_query {}` with 2,000 rows (about 0.34 MB);
   - `labs_record` with 200 results (the largest input to check).
 - **Rows written: 100,000 per day** for SQLite in Durable Objects. A note also writes rows to its full-text index. A single user stays far below it.
+- **Rows read: 5 million per day** for SQLite in Durable Objects. Each write counts its table first (`SELECT COUNT(*)`), as the Go store does, to enforce the caps. A count scans the table: `note_add` can read up to 50,000 rows, `labs_record` up to 20,000, a new item in `health_item_upsert` up to 500 and a new key in `preference_set` up to 200. If a scanned row counts as a row read (the pricing page does not say how a count is billed), about 100 `note_add` calls in a day use the whole quota once the notes table is full. A new store is far from that.
 - **A statement binds at most 100 parameters and is at most 100 KB long** (SQLite in Durable Objects). The store binds at most 13 parameters, and writes a lab batch one row per statement.
 
 ## Known limits

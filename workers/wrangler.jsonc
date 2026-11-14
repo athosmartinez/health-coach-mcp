@@ -13,6 +13,11 @@
   "dev": {
     "port": 8788
   },
+  // The IANA zone that defines a "day" (today, a note's creation day). Same
+  // rule as the Go server's HCM_TZ: "Local" and unknown names are rejected.
+  "vars": {
+    "HCM_TZ": "America/Sao_Paulo"
+  },
   // Workers Free allows Durable Objects only with the SQLite backend
   // (new_sqlite_classes). No KV-backed classes, containers, or other paid features.
   "durable_objects": {

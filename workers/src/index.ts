@@ -1,4 +1,4 @@
-import { OAuthError, OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { getOAuthApi, OAuthError, OAuthProvider, type OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp/server";
 
 import { AUTHORIZE_PATH, authHandler } from "./auth";
@@ -33,11 +33,17 @@ const mcpApiHandler = {
   },
 } satisfies ExportedHandler<Env>;
 
-function buildProvider(origin: string): OAuthProvider<Env> {
-  return new OAuthProvider<Env>({
+/** The provider options for one origin. Exported so tests can reach the same helpers. */
+export function providerOptions(origin: string): OAuthProviderOptions<Env> {
+  const options: OAuthProviderOptions<Env> = {
     apiRoute: MCP_PATH,
     apiHandler: mcpApiHandler,
-    defaultHandler: authHandler,
+    defaultHandler: {
+      // The library sets env.OAUTH_PROVIDER once per isolate, from the first
+      // provider that runs, so a second origin would get the first origin's
+      // resource. Hand the auth pages the helpers of their own origin instead.
+      fetch: (request, env) => authHandler.fetch(request, { ...env, OAUTH_PROVIDER: getOAuthApi(options, env) }),
+    },
     authorizeEndpoint: AUTHORIZE_PATH,
     tokenEndpoint: TOKEN_PATH,
     // Claude registers itself with DCR; ChatGPT prefers a Client ID Metadata
@@ -63,7 +69,8 @@ function buildProvider(origin: string): OAuthProvider<Env> {
     onError: ({ status, internal }) => {
       console.warn("oauth error", { status, category: internal.category, reason: internal.reason });
     },
-  });
+  };
+  return options;
 }
 
 /** One provider per origin (workers.dev, a custom domain, localhost in dev). */
@@ -74,7 +81,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
   let provider = providers.get(origin);
   if (!provider) {
     if (providers.size >= MAX_PROVIDERS) providers.clear();
-    provider = buildProvider(origin);
+    provider = new OAuthProvider<Env>(providerOptions(origin));
     providers.set(origin, provider);
   }
   return provider;

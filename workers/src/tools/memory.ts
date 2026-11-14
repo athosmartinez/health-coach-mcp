@@ -467,7 +467,8 @@ function preferenceValues(db: Db): Record<string, unknown> {
 
 const preferenceSet: Body = ({ db }, args) => {
   // The value arrives parsed, so it is stored as JSON.stringify writes it, not
-  // byte for byte as the client sent it.
+  // byte for byte as the client sent it. The store measures the size limit as
+  // the Go server does.
   const stored = setPreference(db, str(args.key), JSON.stringify(args.value) ?? "");
   return {
     key: stored.key,

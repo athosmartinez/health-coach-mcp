@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UTC, Zone, addDays, bounds, dateOf, parseDate, sleepDay, today } from "../src/coach/date";
 import { confidence, newEnvelope } from "../src/coach/envelope";
 import { INTERNAL_ERROR, ToolError, errorTypes, toWire, wireText } from "../src/coach/errors";
-import { byteLength, compareText, fields, lower, trimSpace, truncate } from "../src/coach/text";
+import { byteLength, compareText, fields, goJsonLength, lower, trimSpace, truncate } from "../src/coach/text";
 import { ConfigError, DEFAULT_TIME_ZONE, loadZone, timeZone } from "../src/config";
 import { freshStore, objectTool } from "./memory-helpers";
 
@@ -193,6 +193,16 @@ describe("text helpers", () => {
     expect(trimSpace("﻿knee")).toBe("﻿knee");
     expect(fields("  Glucose \t Fasting\n")).toEqual(["Glucose", "Fasting"]);
     expect(fields("   ")).toEqual([]);
+  });
+
+  it("measures JSON text as Go's encoder writes it", () => {
+    expect(goJsonLength('"morning"')).toBe(9);
+    expect(goJsonLength('"ação"')).toBe(8);
+    // <, > and & are 6 bytes each there; U+2028 and U+2029 too.
+    expect(goJsonLength('"<>&"')).toBe(2 + 3 * 6);
+    expect(goJsonLength('"  "')).toBe(2 + 2 * 6);
+    // Text that is already escaped has nothing to add.
+    expect(goJsonLength('"\\u003c"')).toBe(8);
   });
 
   it("lowercases code point by code point, as Go's strings.ToLower", () => {

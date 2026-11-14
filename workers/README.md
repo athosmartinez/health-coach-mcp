@@ -95,7 +95,7 @@ The script runs the Go binary with new, empty data and config folders. It never 
 
 ## Differences from the Go server
 
-- **`preference_set` does not keep a value byte for byte.** The value arrives parsed, so it is stored as `JSON.stringify` writes it: `1.0` becomes `1`, insignificant white space and escapes go away, and integer-like object keys move first. The 2 KB limit applies to the stored text. As in Go, an integer beyond 2^53 loses precision.
+- **`preference_set` does not keep a value byte for byte.** The value arrives parsed, so it is stored as `JSON.stringify` writes it: `1.0` becomes `1`, insignificant white space and escapes go away, and integer-like object keys move first. The 2,048-byte limit is measured as in Go, on the text as Go's JSON encoder writes it: `<`, `>`, `&`, U+2028 and U+2029 count 6 bytes each, although they are stored unescaped. As in Go, an integer beyond 2^53 loses precision.
 - **Timestamps have millisecond precision.** They are stored with the Go store's fixed-width format (9 fractional digits) and returned as RFC 3339 with the trailing zeros trimmed, as Go writes a time.
 - **The text of a schema error differs.** Both servers answer `invalid_input` with the hint `check the tool's input schema and retry`, and both cap the message at 500 bytes. The message text comes from each SDK's validator. A date that matches the pattern but is not a real day (`2026-02-30`) is reported by its path, without the value.
 - **Tool results are checked against the output schema by `register`**, not by the MCP SDK. A result that does not match is `internal_error`.

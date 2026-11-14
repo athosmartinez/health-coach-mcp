@@ -10,6 +10,21 @@ export function byteLength(s: string): number {
   return encoder.encode(s).length;
 }
 
+/**
+ * UTF-8 length of JSON text as Go's encoding/json writes it. Go escapes "<",
+ * ">" and "&" (6 bytes instead of 1) and U+2028, U+2029 (6 bytes instead of
+ * 3); JSON.stringify writes all five as they are. The Go server measures its
+ * size limits on that text, so the same value must pass or fail on both.
+ */
+export function goJsonLength(json: string): number {
+  let extra = 0;
+  for (const char of json) {
+    if (char === "<" || char === ">" || char === "&") extra += 5;
+    else if (char === " " || char === " ") extra += 3;
+  }
+  return byteLength(json) + extra;
+}
+
 // Go's unicode.IsSpace. JavaScript's \s adds U+FEFF and leaves out U+0085.
 const SPACE = "\\t\\n\\v\\f\\r \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000";
 const EDGES = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "g");

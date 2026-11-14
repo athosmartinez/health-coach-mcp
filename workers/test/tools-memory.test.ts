@@ -442,6 +442,29 @@ describe("memory tools", () => {
     expect((await c.fails("preference_set", { key: "big", value: "a".repeat(3000) })).code).toBe("invalid_input");
   });
 
+  it("measures the preference size limit on the text as Go's JSON encoder writes it", async () => {
+    const c = memorySession();
+    // Go writes "<" as <: 400 of them are 2402 bytes there, 402 for JSON.stringify.
+    expect(await c.fails("preference_set", { key: "x", value: "<".repeat(400) })).toMatchObject({
+      code: "invalid_input",
+      message: 'preference "x" exceeds 2048 bytes',
+      hint: "fix the value named in the message and retry",
+    });
+    for (const [key, char] of [["gt", ">"], ["amp", "&"], ["ls", " "], ["ps", " "]] as const) {
+      // 341 escapes of 6 bytes and the two quotes are exactly 2048 bytes: stored.
+      const atLimit = char.repeat(341);
+      expect(await c.ok("preference_set", { key, value: atLimit })).toEqual({ key, value: atLimit, notice: DATA_NOTICE });
+      // One more passes the limit.
+      expect((await c.fails("preference_set", { key, value: char.repeat(342) })).message).toBe(`preference "${key}" exceeds 2048 bytes`);
+    }
+    // The characters also count inside nested values and object keys.
+    expect((await c.fails("preference_set", { key: "nested", value: { "<&>": ["<".repeat(340)] } })).code).toBe("invalid_input");
+    const stored = (await c.ok("preferences_get")).preferences;
+    expect(Object.keys(stored).sort()).toEqual(["amp", "gt", "ls", "ps"]);
+    expect(stored.gt).toBe(">".repeat(341));
+    expect(stored.ls).toBe(" ".repeat(341));
+  });
+
   it("adds notes and searches them", async () => {
     const c = memorySession();
     const note = await c.ok("note_add", { kind: "symptom", text: "dor no joelho depois do agachamento", tags: ["joelho", "treino"], related_date: "2026-10-12" });

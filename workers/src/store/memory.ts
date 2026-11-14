@@ -4,7 +4,7 @@
 
 import { type LocalDate, UTC, addDays, dateOf, parseDate } from "../coach/date";
 import { ToolError } from "../coach/errors";
-import { byteLength, quote, trimSpace, truncate } from "../coach/text";
+import { byteLength, goJsonLength, quote, trimSpace, truncate } from "../coach/text";
 import { type Db, type Row, invalid, nullable, numberOrUndefined, oneOf, readStamp, text, validDate } from "./db";
 
 // Size and count limits keep one bad tool call (or a loop) from bloating the
@@ -561,14 +561,16 @@ export function healthItems(db: Db, kind = "", status = ""): HealthItem[] {
 /**
  * Stores a free-form JSON value (as JSON text) under the trimmed key. It
  * returns the key as stored and the JSON text it replaced (absent when the key
- * is new).
+ * is new). The size limit counts the bytes of the text as Go's JSON encoder
+ * writes it (see goJsonLength); the text is stored as given.
  */
 export function setPreference(db: Db, rawKey: string, valueJson: string): { key: string; previous?: string } {
   const key = trimSpace(rawKey);
   if (key === "" || byteLength(key) > MAX_PREF_KEY_LEN) {
     throw invalid(`preference key is required (max ${MAX_PREF_KEY_LEN} characters)`);
   }
-  if (byteLength(valueJson) > MAX_PREF_VALUE) throw invalid(`preference ${quote(key)} exceeds ${MAX_PREF_VALUE} bytes`);
+  // The limit is on the text as the Go server would hold it, not on these bytes.
+  if (goJsonLength(valueJson) > MAX_PREF_VALUE) throw invalid(`preference ${quote(key)} exceeds ${MAX_PREF_VALUE} bytes`);
   try {
     JSON.parse(valueJson);
   } catch {

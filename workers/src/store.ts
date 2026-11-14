@@ -151,19 +151,30 @@ export class CoachStore extends DurableObject<Env> {
    * never put the token in tool output or logs.
    */
   async googleAccessToken(): Promise<AccessTokenResult> {
-    const row = this.account();
-    if (!row) return notLinked();
-    if (row.access_token && row.access_token_expires_at !== null) {
-      if (row.access_token_expires_at - ACCESS_TOKEN_MARGIN_MS > Date.now()) {
-        return { ok: true, accessToken: row.access_token, expiresAt: row.access_token_expires_at };
+    let result = notLinked();
+    // A second pass only when a sign-in replaced the link during the renewal.
+    for (let pass = 0; pass < 2; pass++) {
+      const row = this.account();
+      if (!row) return notLinked();
+      if (row.access_token && row.access_token_expires_at !== null) {
+        if (row.access_token_expires_at - ACCESS_TOKEN_MARGIN_MS > Date.now()) {
+          return { ok: true, accessToken: row.access_token, expiresAt: row.access_token_expires_at };
+        }
       }
+      if (!this.refreshing) {
+        this.refreshing = this.refresh(row.refresh_token).finally(() => {
+          this.refreshing = null;
+        });
+      }
+      result = await this.refreshing;
+      // Answer for the link stored now, not for one replaced while Google answered.
+      // A missing row means this renewal removed a revoked link: keep its error.
+      const current = this.account();
+      const sameLink = current?.refresh_token === row.refresh_token;
+      const ownRotation = result.ok && current?.access_token === result.accessToken;
+      if (!current || sameLink || ownRotation) return result;
     }
-    if (!this.refreshing) {
-      this.refreshing = this.refresh(row.refresh_token).finally(() => {
-        this.refreshing = null;
-      });
-    }
-    return this.refreshing;
+    return result;
   }
 
   /** The link without any token; checks (and if needed renews) the access token. */

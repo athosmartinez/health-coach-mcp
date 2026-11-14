@@ -1,6 +1,7 @@
 // Runtime settings from the Worker's variables (Go: internal/config).
 
 import { Zone } from "./coach/date";
+import { lower, trimSpace } from "./coach/text";
 
 export const DEFAULT_TIME_ZONE = "America/Sao_Paulo";
 
@@ -22,7 +23,7 @@ const IANA_NAME = /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
  */
 export function loadZone(name: string | undefined): Zone {
   if (name === undefined || name === "") name = DEFAULT_TIME_ZONE;
-  if (name.trim().toLowerCase() === "local") {
+  if (lower(trimSpace(name)) === "local") {
     throw new ConfigError(`HCM_TZ: use an IANA zone such as ${DEFAULT_TIME_ZONE}, not the host zone`);
   }
   if (!IANA_NAME.test(name)) throw new ConfigError("HCM_TZ: not an IANA time zone name");

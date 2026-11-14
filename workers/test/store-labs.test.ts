@@ -74,6 +74,30 @@ describe("lab statuses", () => {
     for (const flag of ["", "H", "L", "*", "A", "alto", "baixo", "hhh"]) expect(criticalFlag(flag), flag).toBe(false);
   });
 
+  it("lowercases flags, analytes and units as the Go server does", () => {
+    // U+0130: JavaScript's toLowerCase gives "cri" + a combining dot + "tical", which has no "crit".
+    expect(criticalFlag("CRİTICAL")).toBe(true);
+    expect(assess(value("potassium", 6.6, "mmol/L", { report_flag: "CRİTICAL" }))).toEqual({ status: LAB_FLAGGED, urgent: true });
+    // A final capital sigma: toLowerCase would end the word in U+03C2 and give a second key.
+    expect(normalizeAnalyte("ΟΣ")).toBe("οσ");
+    expect(normalizeAnalyte("ΟΣ")).toBe(normalizeAnalyte("οσ"));
+    expect(unitKey("ΟΣ")).toBe(unitKey("οσ"));
+  });
+
+  it("rejects both spellings of one analyte in a batch as a duplicate", () =>
+    withDb((db) => {
+      const error = toolError(() => recordLabs(db, "2026-09-01", "", "chat", [value("ΟΣ", 1, "u"), value("οσ", 2, "u")]));
+      expect(error.wire()).toMatchObject({
+        code: "invalid_input",
+        message: 'results 0 and 1 are both "οσ" on 2026-09-01; send one value per analyte',
+      });
+      // One spelling after the other is the same analyte, in the same unit.
+      recordLabs(db, "2026-09-01", "", "chat", [value("ΟΣ", 1, "ΟΣ")]);
+      const next = recordLabs(db, "2026-10-01", "", "chat", [value("οσ", 2, "οσ")]);
+      expect(next.unit_changes).toEqual([]);
+      expect(queryLabs(db, "ΟΣ").results.map((r) => r.analyte)).toEqual(["οσ", "οσ"]);
+    }));
+
   it("normalizes analyte names and compares units without case or spaces", () => {
     expect(normalizeAnalyte("  Glucose \t Fasting ")).toBe("glucose_fasting");
     expect(normalizeAnalyte("LDL")).toBe("ldl");

@@ -27,6 +27,19 @@ export function fields(s: string): string[] {
 }
 
 /**
+ * Go's strings.ToLower: each code point is mapped on its own. JavaScript's
+ * toLowerCase applies context rules to the whole string: it writes a final
+ * sigma (U+03C2) at the end of a word, and it turns U+0130 (İ) into "i" plus a
+ * combining dot, where Go writes a plain "i". Either would give the same lab
+ * flag or analyte another key than the Go server does.
+ */
+export function lower(s: string): string {
+  let out = "";
+  for (const char of s) out += char === "İ" ? "i" : char.toLowerCase();
+  return out;
+}
+
+/**
  * Shortens text echoed in an error message to `maxBytes` UTF-8 bytes, cut at a
  * character boundary so an accented character is never split.
  */

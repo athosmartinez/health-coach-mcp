@@ -1,7 +1,7 @@
 // Lab results (Go: internal/store/labs.go).
 
 import type { LocalDate } from "../coach/date";
-import { byteLength, compareText, fields, quote, trimSpace } from "../coach/text";
+import { byteLength, compareText, fields, lower, quote, trimSpace } from "../coach/text";
 import { type Db, type Row, invalid, nullable, numberOrUndefined, oneOf, readStamp, text, validDate } from "./db";
 import { MAX_NAME_LEN } from "./memory";
 
@@ -94,9 +94,7 @@ const ACCENTS: Record<string, string> = {
  * pânico/panic, alerta/alert and the HL7 codes HH, LL, AA.
  */
 export function criticalFlag(flag: string): boolean {
-  const f = trimSpace(flag)
-    .toLowerCase()
-    .replace(/[áàâãéêíóôõúç]/g, (letter) => ACCENTS[letter] ?? letter);
+  const f = lower(trimSpace(flag)).replace(/[áàâãéêíóôõúç]/g, (letter) => ACCENTS[letter] ?? letter);
   if (f === "hh" || f === "ll" || f === "aa") return true;
   return ["crit", "panic", "alert"].some((word) => f.includes(word));
 }
@@ -106,7 +104,7 @@ export function criticalFlag(flag: string): boolean {
  * so the same analyte from different reports lines up.
  */
 export function normalizeAnalyte(name: string): string {
-  return fields(name.toLowerCase()).join("_");
+  return fields(lower(name)).join("_");
 }
 
 /**
@@ -114,7 +112,7 @@ export function normalizeAnalyte(name: string): string {
  * convert: equivalent units with different names stay different.
  */
 export function unitKey(unit: string): string {
-  return fields(unit).join("").toLowerCase();
+  return lower(fields(unit).join(""));
 }
 
 function validateLabValue(v: LabValue, i: number): void {

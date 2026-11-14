@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UTC, Zone, addDays, bounds, dateOf, parseDate, sleepDay, today } from "../src/coach/date";
 import { confidence, newEnvelope } from "../src/coach/envelope";
 import { INTERNAL_ERROR, ToolError, errorTypes, toWire, wireText } from "../src/coach/errors";
-import { byteLength, compareText, fields, trimSpace, truncate } from "../src/coach/text";
+import { byteLength, compareText, fields, lower, trimSpace, truncate } from "../src/coach/text";
 import { ConfigError, DEFAULT_TIME_ZONE, loadZone, timeZone } from "../src/config";
 import { freshStore, objectTool } from "./memory-helpers";
 
@@ -193,6 +193,19 @@ describe("text helpers", () => {
     expect(trimSpace("﻿knee")).toBe("﻿knee");
     expect(fields("  Glucose \t Fasting\n")).toEqual(["Glucose", "Fasting"]);
     expect(fields("   ")).toEqual([]);
+  });
+
+  it("lowercases code point by code point, as Go's strings.ToLower", () => {
+    expect(lower("Glucose FASTING")).toBe("glucose fasting");
+    expect(lower("CRÍTICO")).toBe("crítico");
+    // U+0130 becomes a plain i; toLowerCase writes i plus a combining dot.
+    expect(lower("CRİTICAL")).toBe("critical");
+    expect("CRİTICAL".toLowerCase()).not.toBe("critical");
+    // No final sigma: toLowerCase ends the word in U+03C2.
+    expect(lower("ΟΣ")).toBe("οσ");
+    expect("ΟΣ".toLowerCase()).toBe("ος");
+    expect(lower("😀A")).toBe("😀a");
+    expect(lower("")).toBe("");
   });
 
   it("orders text by code point, as SQLite's BINARY collation", () => {

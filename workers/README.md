@@ -104,7 +104,7 @@ The script runs the Go binary with new, empty data and config folders. It never 
 - **A schema newer than the code is not refused.** The Go store refuses a database migrated by a newer binary; the migration runner here applies only what is missing.
 - **No `daily_metrics` table yet.** It comes with the code that fills the metrics cache.
 - **`server_info` also returns `transport`** and has annotations; it existed before the memory tools.
-- Lowercasing (`toLowerCase`) and quoting of names in error messages (`JSON.stringify`) follow JavaScript, which differs from Go only for a few non-ASCII characters and control characters.
+- The quoting of names in error messages (`JSON.stringify`) follows JavaScript, which differs from Go's `%q` only for control characters and a few non-ASCII characters. Lowercasing follows Go's `strings.ToLower` (code point by code point, `src/coach/text.ts`); the Unicode tables are the runtime's, not Go's.
 
 ## Workers Free plan
 

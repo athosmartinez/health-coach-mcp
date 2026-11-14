@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "health-coach-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-14",
+  // agents/mcp uses AsyncLocalStorage.
+  "compatibility_flags": ["nodejs_compat"],
+  // 8788 leaves the Go server's 127.0.0.1:8787 free.
+  "dev": {
+    "port": 8788
+  },
+  // Workers Free allows Durable Objects only with the SQLite backend
+  // (new_sqlite_classes). No KV-backed classes, containers, or other paid features.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COACH_STORE",
+        "class_name": "CoachStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CoachStore"]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  }
+}

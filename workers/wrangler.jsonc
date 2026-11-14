@@ -5,8 +5,10 @@
   // The newest date the pinned workerd (wrangler dev, tests) supports, so that
   // tests and deploy run the same date. Move it together with wrangler.
   "compatibility_date": "2026-11-13",
-  // agents/mcp uses AsyncLocalStorage.
-  "compatibility_flags": ["nodejs_compat"],
+  // agents/mcp uses AsyncLocalStorage. global_fetch_strictly_public keeps
+  // outbound fetches (Client ID Metadata Documents, Google) off same-zone
+  // routing; workers-oauth-provider advertises CIMD only with it.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   // 8788 leaves the Go server's 127.0.0.1:8787 free.
   "dev": {
     "port": 8788
@@ -21,6 +23,14 @@
       }
     ]
   },
+  // workers-oauth-provider keeps clients, grants and hashed MCP tokens here.
+  // The Google refresh token never goes to KV: it lives in CoachStore.
+  // Create the namespace before the first deploy and add its "id".
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",

@@ -1,10 +1,11 @@
 # Copy to .dev.vars for `wrangler dev`. .dev.vars is gitignored.
-# This phase reads none of these. They are the names the OAuth phase will use
-# (Google sign-in on the authorization server, plus the cookie key for
-# @cloudflare/workers-oauth-provider). Leave them unset until then.
-# Do not put real secrets in this file.
+# Names only: never put real values in this file. In production set each one
+# with `wrangler secret put <NAME>`.
 
-# GOOGLE_CLIENT_ID=
-# GOOGLE_CLIENT_SECRET=
-# COOKIE_ENCRYPTION_KEY=
-# HOSTED_DOMAIN=
+# Google OAuth client, type "Web application". Authorized redirect URIs:
+# http://localhost:8788/callback (dev) and https://<worker host>/callback.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# The only Google account allowed to sign in. Empty rejects everyone.
+ALLOWED_GOOGLE_EMAIL=

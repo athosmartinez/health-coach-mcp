@@ -290,6 +290,22 @@ export class CoachStore extends DurableObject<Env> {
     return result;
   }
 
+  /**
+   * Marks the access token that Google rejected as expired, so the next
+   * googleAccessToken() renews it even when its stored expiry is still ahead
+   * (revoked, or expired at Google a moment before it expires here). A
+   * rejection of a token that was already replaced is ignored: requests that
+   * saw the same 401 share one renewal. Returns whether the token was marked.
+   */
+  invalidateGoogleAccessToken(rejected: string): boolean {
+    if (rejected === "") return false;
+    const marked = this.ctx.storage.sql.exec(
+      "UPDATE google_account SET access_token_expires_at = 0 WHERE id = 1 AND access_token = ?",
+      rejected,
+    );
+    return marked.rowsWritten > 0;
+  }
+
   /** The link without any token; checks (and if needed renews) the access token. */
   async googleAccountStatus(): Promise<GoogleAccountStatus> {
     const token = await this.googleAccessToken();

@@ -265,6 +265,66 @@ describe("CoachStore Google token", () => {
     expect(await row()).toMatchObject({ refresh_token: GOOGLE_REFRESH_TOKEN });
   });
 
+  it("renews a token that Google rejected, although its stored expiry is ahead", async () => {
+    const calls = mockGoogle(() => Response.json({ access_token: "renewed-access-token", expires_in: 3599 }));
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link());
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: GOOGLE_ACCESS_TOKEN });
+    expect(calls.token).toHaveLength(0);
+
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(true);
+    // Only the expiry is marked: the link and its tokens stay as they are.
+    expect(await row()).toMatchObject({
+      access_token: GOOGLE_ACCESS_TOKEN,
+      access_token_expires_at: 0,
+      refresh_token: GOOGLE_REFRESH_TOKEN,
+    });
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+    expect(calls.token).toHaveLength(1);
+    expect(calls.token[0]?.get("refresh_token")).toBe(GOOGLE_REFRESH_TOKEN);
+  });
+
+  it("ignores the rejection of a token that was already replaced", async () => {
+    const calls = mockGoogle(() => Response.json({ access_token: "renewed-access-token", expires_in: 3599 }));
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link());
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(true);
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+
+    // A request that saw the same 401 a moment later reports the old token.
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(false);
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+    expect(calls.token).toHaveLength(1);
+  });
+
+  it("shares one renewal between requests that report the same rejected token", async () => {
+    const calls = mockGoogle(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return Response.json({ access_token: "renewed-access-token", expires_in: 3599 });
+    });
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link());
+    const renewed = async () => {
+      await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN);
+      return stub.googleAccessToken();
+    };
+    for (const result of await Promise.all([renewed(), renewed(), renewed()])) {
+      expect(result).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+    }
+    expect(calls.token).toHaveLength(1);
+  });
+
+  it("marks nothing for an empty token, another token or a missing link", async () => {
+    const calls = mockGoogle(() => new Response(null, { status: 500 }));
+    const stub = coachStore(env);
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(false);
+    await stub.linkGoogleAccount(link());
+    expect(await stub.invalidateGoogleAccessToken("")).toBe(false);
+    expect(await stub.invalidateGoogleAccessToken("another-token")).toBe(false);
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: GOOGLE_ACCESS_TOKEN });
+    expect(calls.token).toHaveLength(0);
+  });
+
   it("reports the account without any token", async () => {
     mockGoogle(() => new Response(null, { status: 500 }));
     const stub = coachStore(env);

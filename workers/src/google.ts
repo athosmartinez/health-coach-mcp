@@ -36,6 +36,12 @@ const ID_TOKEN_ISSUERS = new Set(["accounts.google.com", "https://accounts.googl
  */
 export const RECONNECT_HINT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
 
+/**
+ * What the person checks when Google refuses the server's own token request
+ * (a wrong client ID or secret). The Go server names its client_secret.json here.
+ */
+export const OAUTH_CLIENT_HINT = "Check the server's Google OAuth client settings.";
+
 /** Same codes as the Go server's coach.ToolError for auth failures. */
 export type GoogleErrorCode = "auth_expired" | "upstream_unavailable" | "internal_error";
 

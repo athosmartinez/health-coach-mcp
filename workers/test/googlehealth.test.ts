@@ -5,7 +5,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ToolError, toWire } from "../src/coach/errors";
-import { GOOGLE_HEALTH_SCOPES, RECONNECT_HINT } from "../src/google";
+import { GOOGLE_HEALTH_SCOPES, OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../src/google";
 import {
   FORCED_RENEWALS,
   HEALTH_REQUESTS,
@@ -27,7 +27,6 @@ import {
   type Reduce,
   ResponseTooLargeError,
   StatusError,
-  TokenRequestError,
   type TokenResult,
   type TokenSource,
   equalJitter,
@@ -40,6 +39,9 @@ import { GOOGLE_REFRESH_TOKEN, OWNER_EMAIL, OWNER_SUB, mockGoogle } from "./help
 import { SAO_PAULO, freshStore } from "./memory-helpers";
 
 const API = "https://health.googleapis.com";
+
+/** The hint of a token request that Google refuses. */
+const RENEWAL_HINT = `${OAUTH_CLIENT_HINT} ${RECONNECT_HINT}`;
 
 /** One request as the fake API received it. */
 interface Sent {
@@ -856,15 +858,19 @@ describe("token source errors", () => {
     expect(waits).toEqual([]);
   });
 
-  it("keeps a refused token request an internal error", async () => {
-    fakeApi(() => {
+  it("answers auth_expired for a token request that Google refuses", async () => {
+    const requests = fakeApi(() => {
       throw new Error("a request was sent");
     });
     const tokens = new FakeTokens();
     tokens.failure = { ok: false, code: "internal_error" };
     const error = await failure(listSteps(testClient({}, tokens).client));
-    expect(error).toBeInstanceOf(TokenRequestError);
-    expect(toWire(error).code).toBe("internal_error");
+    expect(toWire(error)).toEqual({ code: "auth_expired", message: "Google rejected the token renewal", hint: RENEWAL_HINT });
+    // The hint names both steps: the server's OAuth client, then the reconnect.
+    expect(RENEWAL_HINT).toBe(
+      "Check the server's Google OAuth client settings. Disconnect and reconnect this connector in the MCP client to sign in with Google again.",
+    );
+    expect(requests).toHaveLength(0);
   });
 
   it("asks a failing token source once per MCP request", async () => {
@@ -1258,7 +1264,7 @@ describe("with the CoachStore token source", () => {
       try {
         return { ok: true as const, records: await listSteps(clientOf(instance, budget)) };
       } catch (error) {
-        return { ok: false as const, wire: toWire(error), text: texts(error), internal: error instanceof TokenRequestError };
+        return { ok: false as const, wire: toWire(error), text: texts(error) };
       }
     });
   }
@@ -1398,12 +1404,29 @@ describe("with the CoachStore token source", () => {
     expect(api.auths).toHaveLength(0);
   });
 
-  it("keeps a token request that Google refuses an internal error", async () => {
+  it("answers auth_expired when Google refuses the token request", async () => {
     const api = health(() => json(200, {}));
-    mockGoogle(() => Response.json({ error: "invalid_client" }, { status: 401 }), api.other);
+    const secret = "client-secret-in-the-answer";
+    const calls = mockGoogle(
+      () => Response.json({ error: "invalid_client", error_description: `bad secret ${secret}` }, { status: 401 }),
+      api.other,
+    );
     const stub = freshStore();
     await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
-    expect(await listIn(stub)).toMatchObject({ ok: false, internal: true, wire: { code: "internal_error" } });
+    const budget = new RequestBudget();
+    const result = await listIn(stub, budget);
+    expect(result).toMatchObject({
+      ok: false,
+      wire: { code: "auth_expired", message: "Google rejected the token renewal", hint: RENEWAL_HINT },
+    });
+    // Neither the token nor Google's answer reaches the error or a log line.
+    for (const text of [secret, "invalid_client", GOOGLE_REFRESH_TOKEN, "at-old"]) {
+      expect(JSON.stringify(result)).not.toContain(text);
+      expect(logged()).not.toContain(text);
+    }
+    // The failure is remembered: another call of the same MCP request asks no more.
+    expect(await listIn(stub, budget)).toMatchObject({ ok: false, wire: { code: "auth_expired" } });
+    expect(calls.token).toHaveLength(1);
     expect(api.auths).toHaveLength(0);
   });
 });

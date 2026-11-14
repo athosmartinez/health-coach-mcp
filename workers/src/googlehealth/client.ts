@@ -27,7 +27,7 @@
 
 import type { LocalDate, Zone } from "../coach/date";
 import { ToolError, errorTypes } from "../coach/errors";
-import { RECONNECT_HINT } from "../google";
+import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../google";
 import type { RequestBudget } from "./budget";
 import { type DataType, type TypeInfo, filter, lookup, rollupChunks, windowFilter } from "./datatypes";
 import { PageSyntaxError, type PageScan, scanPage } from "./page";
@@ -157,14 +157,6 @@ export class ResponseTooLargeError extends Error {
   constructor(limit: number) {
     super(`response larger than ${limit} bytes`);
     this.name = "ResponseTooLargeError";
-  }
-}
-
-/** The token endpoint refused the server's own request (a wrong OAuth client, a malformed answer). */
-export class TokenRequestError extends Error {
-  constructor() {
-    super("the Google token request failed");
-    this.name = "TokenRequestError";
   }
 }
 
@@ -529,12 +521,15 @@ function unavailable(message: string, cause?: unknown): ToolError {
   return new ToolError("upstream_unavailable", message, RETRY_HINT, cause === undefined ? undefined : { cause });
 }
 
+const RENEWAL_HINT = `${OAUTH_CLIENT_HINT} ${RECONNECT_HINT}`;
+
 /**
  * The tool error of a token source that gave no token. A missing or revoked
- * link is auth_expired; a refused token request is the server's own fault and
- * stays an internal error.
+ * link is auth_expired, and so is a token request that Google refuses (a wrong
+ * OAuth client): the person can fix both, and no renewal works until then. The
+ * message carries no detail of Google's answer.
  */
-function tokenError(code: string): Error {
+function tokenError(code: string): ToolError {
   switch (code) {
     case "not_linked":
       return new ToolError("auth_expired", "not signed in to Google Health", RECONNECT_HINT);
@@ -543,7 +538,7 @@ function tokenError(code: string): Error {
     case "upstream_unavailable":
       return unavailable("Google's token service is unavailable");
     default:
-      return new TokenRequestError();
+      return new ToolError("auth_expired", "Google rejected the token renewal", RENEWAL_HINT);
   }
 }
 

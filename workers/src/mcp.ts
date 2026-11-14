@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
-import { RECONNECT_HINT } from "./google";
+import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "./google";
 import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
 import { type ToolOutcome, defineTool, register } from "./tools/register";
@@ -97,7 +97,7 @@ function hintFor(token: string, scopesMissing: boolean): string | null {
     case "upstream_unavailable":
       return "Google is unavailable right now. Try again in a few minutes.";
     case "internal_error":
-      return "The Google token request failed. Check the server's Google OAuth client settings.";
+      return `The Google token request failed. ${OAUTH_CLIENT_HINT}`;
   }
   return scopesMissing ? `Some Google Health permissions were not granted. ${RECONNECT_HINT}` : null;
 }

@@ -84,6 +84,12 @@ export class Nutrition {
    * a day's intake can be known to miss food.
    */
   otherSourceDays = new Map<LocalDate, number>();
+  /**
+   * Stored names of the entries this server created for the account that was
+   * linked when this read started, keyed by data point id. Taken before the
+   * list request. Empty when the source has no such table.
+   */
+  ownNames: ReadonlyMap<string, string> = new Map();
 
   constructor(
     readonly from: LocalDate,
@@ -238,9 +244,20 @@ export async function readNutrition(ctx: Context, from: LocalDate, to: LocalDate
   const { today } = ctx.clock();
   const out = new Nutrition(from, to);
   // The entries this server created, with the same day of margin as the list.
+  // Both the ids and the stored names are read here, before the list request:
+  // a relink while that request is in flight must not swap in the new
+  // account's name for a point id the two accounts share.
   let own: ReadonlySet<string> | undefined;
   try {
-    own = ctx.cache.createdFoodIds?.(shift(from, -1), shift(to, 1));
+    const start = shift(from, -1);
+    const end = shift(to, 1);
+    if (ctx.cache.createdFoodNames) {
+      const names = ctx.cache.createdFoodNames(start, end);
+      out.ownNames = names;
+      own = new Set(names.keys());
+    } else {
+      own = ctx.cache.createdFoodIds?.(start, end);
+    }
   } catch (cause) {
     throw new Error("healthdata: read created entries", { cause });
   }

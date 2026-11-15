@@ -264,6 +264,11 @@ export class CoachStore extends DurableObject<Env> {
           health: new HealthData(clientIn(zone), dbCache(db), zone, db.now),
           targets: (day) => targetInForce(db, day),
           notes: (filter) => searchNotes(db, filter),
+          // The same has() nutrition_log_delete uses. The name map is the food
+          // read's: one indexed read of the range plus the has check per listed item, no Google request.
+          entries: {
+            has: (name) => hasEntry(db, name),
+          },
           now: db.now,
           zone,
         };

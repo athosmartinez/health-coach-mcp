@@ -35,6 +35,20 @@ export type Targets = (day: LocalDate) => Target | undefined;
 /** The part of the store weekly_report reads. */
 export type Notes = (filter: NoteFilter) => NoteResults;
 
+/**
+ * The food entries this server created, so nutrition_day can name one.
+ * Absent: no entry was logged here, and every item has entry_id null.
+ */
+export interface FoodEntries {
+  /**
+   * Whether this server created an entry with exactly this name for the
+   * account that is linked now. The check nutrition_log_delete uses. It sees
+   * the account linked when it is called, which may no longer be the account
+   * the food read started with.
+   */
+  has(name: string): boolean;
+}
+
 /** What the coach-moment tools need. */
 export interface CoachDeps {
   /**
@@ -46,6 +60,11 @@ export interface CoachDeps {
   targets?: Targets;
   /** May be absent: weekly_report then lists no decisions. */
   notes?: Notes;
+  /**
+   * May be absent: nutrition_day then leaves entry_id null. `has` is a local
+   * lookup, not a Google Health request.
+   */
+  entries?: FoodEntries;
   now: () => Date;
   /** Defines the local day (I4). */
   zone: Zone;

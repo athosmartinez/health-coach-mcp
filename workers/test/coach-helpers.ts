@@ -105,6 +105,8 @@ export class FakeHealth implements Source {
   /** Overrides exercisesExtra for one requested range ("from..to"). */
   byRange = new Map<string, ExercisesExtra>();
   nutritionDays = new Map<LocalDate, NutritionDay>();
+  /** Copied onto the Nutrition result: stored names keyed by data point id. */
+  ownNames = new Map<string, string>();
   nutritionSkip = 0;
   nutritionOther = 0;
   /** Sets Nutrition.otherSourceDays. */
@@ -186,6 +188,7 @@ export class FakeHealth implements Source {
     this.call("nutrition", from, to);
     const n = new Nutrition(from, to);
     n.days = within(this.nutritionDays, from, to);
+    n.ownNames = this.ownNames;
     n.skipped = this.nutritionSkip;
     // As in healthdata, the range count includes the per-day ones.
     n.otherSourceDays = within(this.nutritionOtherDays, from, to);
@@ -397,6 +400,8 @@ export function fakeNotes(results: NoteResults = { notes: [], more: false }, fil
 export interface CoachSessionOptions {
   targets?: Targets;
   notes?: Notes;
+  /** The food entries this server created. Absent: every item has entry_id null. */
+  entries?: CoachDeps["entries"];
   now?: Date;
   zone?: Zone;
 }
@@ -420,6 +425,7 @@ export function coachSession(health: Source, options: CoachSessionOptions = {}):
     health,
     targets: options.targets,
     notes: options.notes,
+    entries: options.entries,
     now: () => options.now ?? COACH_NOW,
     zone: options.zone ?? SAO_PAULO,
   };

@@ -254,7 +254,60 @@ describe("the food entries this server created, when a Google account is linked"
 
     // The first account again: the entry counts again, and can be deleted.
     await stub.linkGoogleAccount(link());
-    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({ ok: true, output: { data: { items_logged: 1 } } });
+    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: entryId }] }] } } });
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toMatchObject({ ok: true });
+  });
+
+  it("leaves entry_id null when the account changes during the read and both accounts share the point id", async () => {
+    const stub = await linkedStore();
+    const entryId = await entryOfTheFirstAccount(stub);
+    const listed = "users/me/dataTypes/nutrition-log/dataPoints/syn-created-1";
+    expect(entryId).not.toBe(listed);
+    // The other account holds the same point id, under the name a list uses.
+    await stub.linkGoogleAccount(other());
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO nutrition_entries (sub, name, day, created_at) VALUES (?, ?, ?, ?)",
+        OTHER_SUB,
+        listed,
+        day(0),
+        "2026-10-16T13:00:00.000000000Z",
+      );
+    });
+    await stub.linkGoogleAccount(link());
+    const id = stub.id.toString();
+    // The relink runs inside the list request, after the name map was read.
+    g.healthReply = async () => {
+      const self = env.COACH_STORE.get(env.COACH_STORE.idFromString(id));
+      await self.linkGoogleAccount(other());
+      return undefined;
+    };
+    g.takeExternal();
+    const review = await objectTool(stub, "nutrition_day", { date: day(0) });
+    expect(review).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: null }] }] } } });
+    const calls = g.takeExternal();
+    expect(calls["delete nutrition-log"] ?? 0).toBe(0);
+    expect(calls["create nutrition-log"] ?? 0).toBe(0);
+    // The new account's own name is not offered, and a delete of the old name sends nothing.
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual(NO_ENTRY);
+    expect(g.takeExternal()).toEqual({ total: 0 });
+  });
+
+  it("lists the linked account's entry_id, and null once that account is no longer linked", async () => {
+    const stub = await linkedStore();
+    const entryId = await entryOfTheFirstAccount(stub);
+    const today = { date: day(0) };
+    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({
+      ok: true,
+      output: { data: { per_meal: [{ items: [{ entry_id: entryId }] }] } },
+    });
+
+    await stub.linkGoogleAccount(other());
+    // The same record, read as food the log keeps. It is still the previous account's entry.
+    const point = g.google.createdPoints()[0];
+    if (point?.dataSource) point.dataSource.platform = "FITBIT";
+    const next = await objectTool(stub, "nutrition_day", today);
+    expect(next).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: null }] }] } } });
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual(NO_ENTRY);
   });
 });

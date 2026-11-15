@@ -209,7 +209,8 @@ const NUTRITION_LOG_ADD = writeTool(
     description:
       "Logs one meal or food item in the user's Google Health food log, with the calories and macros that you " +
       "estimated, for example from a photo or a description. It writes one new entry to Google Health and returns " +
-      "its entry_id; keep the id, because nutrition_log_delete needs it. The values are your estimates, not " +
+      "its entry_id; keep the id, or read it later from nutrition_day, because nutrition_log_delete needs it. " +
+      "The values are your estimates, not " +
       "measurements: say so to the user, and log only after the user confirms the food and the values. Bounds: " +
       `name 1 to ${MAX_NAME_CHARS} visible characters (no control or format character, no line break), the name ` +
       `nutrition_day then shows unchanged; kcal 0 to ${MAX_KCAL}; protein_g, carbs_g ` +
@@ -298,16 +299,19 @@ const NUTRITION_LOG_DELETE = writeTool(
   {
     name: "nutrition_log_delete",
     description:
-      "Deletes one entry of the user's Google Health food log, by the entry_id that nutrition_log_add returned. It " +
-      "deletes only an entry that this server created: any other id answers no_data, and nothing is sent to Google " +
-      "Health for it. A delete cannot be undone, so confirm it with the user first. " +
+      "Deletes one entry of the user's Google Health food log, by the entry_id that nutrition_log_add returned or " +
+      "that nutrition_day lists on the item. It deletes only an entry that this server created: any other id " +
+      "answers no_data, and nothing is sent to Google Health for it. A delete cannot be undone, so confirm it " +
+      "with the user first. " +
       GUARDRAIL,
     annotations: DELETES,
     inputSchema: inputSchema(
       s.object({
         entry_id: {
           type: "string",
-          description: "The entry_id that nutrition_log_add returned (users/…/dataTypes/nutrition-log/dataPoints/…)",
+          description:
+            "The entry_id that nutrition_log_add returned, or that nutrition_day lists on the item " +
+            "(users/…/dataTypes/nutrition-log/dataPoints/…)",
           maxLength: MAX_NAME_LENGTH,
         },
       }),
@@ -318,7 +322,11 @@ const NUTRITION_LOG_DELETE = writeTool(
     const entryId = str(args.entry_id);
     const id = pointId(entryId);
     if (id === undefined) {
-      throw new ToolError("invalid_input", "entry_id is not the id of a food log entry", "use the entry_id that nutrition_log_add returned");
+      throw new ToolError(
+        "invalid_input",
+        "entry_id is not the id of a food log entry",
+        "use the entry_id that nutrition_log_add returned or that nutrition_day lists",
+      );
     }
     // Without a linked account the store matches no entry, also not one that
     // this server created: "no entry with that id" would be false for it, and

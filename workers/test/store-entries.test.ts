@@ -2,7 +2,7 @@
 // All values are synthetic.
 import { describe, expect, it } from "vitest";
 
-import { ENTRY_NAMES_BETWEEN, entryIdsBetween, forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
+import { ENTRY_NAMES_BETWEEN, entryIdsBetween, entryNamesBetween, forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
 import { fixedClock, withDb } from "./memory-helpers";
 import { linkAccount } from "./memory-helpers";
 import { linkedAccount } from "../src/store/entries";
@@ -112,6 +112,38 @@ describe("the entries this server created", () => {
       // The 300 rows of the other days are not read: the read does not walk every entry of the account.
       expect(read.rowsRead).toBeLessThanOrEqual(8);
       expect(entryIdsBetween(db, "2026-10-12", "2026-10-14").size).toBe(2);
+    }));
+
+  it("maps a data point id to the stored name, for either form of the user", () =>
+    withDb((db) => {
+      const underMe = "users/me/dataTypes/nutrition-log/dataPoints/syn-b";
+      recordEntry(db, NAME, "2026-10-13");
+      recordEntry(db, underMe, "2026-10-13");
+      expect(Object.fromEntries(entryNamesBetween(db, "2026-10-13", "2026-10-13"))).toEqual({
+        "syn-entry-1": NAME,
+        "syn-b": underMe,
+      });
+      // Two different point ids. hasEntry still wants each stored name, not another user path.
+      expect(hasEntry(db, "users/me/dataTypes/nutrition-log/dataPoints/syn-entry-1")).toBe(false);
+      expect(hasEntry(db, NAME)).toBe(true);
+      expect(entryNamesBetween(db, "2026-10-14", "2026-10-14").size).toBe(0);
+    }));
+
+  it("keeps the lesser name when two rows share a point id, and a delete of the users/me form leaves the other", () =>
+    withDb((db) => {
+      const id = "syn-shared";
+      const numeric = `users/1122334455/dataTypes/nutrition-log/dataPoints/${id}`;
+      const underMe = `users/me/dataTypes/nutrition-log/dataPoints/${id}`;
+      recordEntry(db, underMe, "2026-10-13");
+      recordEntry(db, numeric, "2026-10-13");
+      // '1' sorts before 'm', so the numeric name wins whichever row was written first.
+      expect(numeric < underMe).toBe(true);
+      expect(entryNamesBetween(db, "2026-10-13", "2026-10-13").get(id)).toBe(numeric);
+      expect(hasEntry(db, underMe)).toBe(true);
+      forgetEntry(db, underMe);
+      expect(hasEntry(db, underMe)).toBe(false);
+      expect(hasEntry(db, numeric)).toBe(true);
+      expect(entryNamesBetween(db, "2026-10-13", "2026-10-13").get(id)).toBe(numeric);
     }));
 
   it("lists only the ids of the account that is linked now", () =>

@@ -274,6 +274,8 @@ describe("the food entries this server created", () => {
       recordEntry(db, answered("syn-far"), "2026-10-12");
       const n = await newData(db).nutrition(D10, D10);
       expect(n.days.get(D10)?.items.map((item) => item.id)).toEqual([listed("syn-near")]);
+      expect(n.ownNames.get("syn-near")).toBe(answered("syn-near"));
+      expect(n.ownNames.has("syn-far")).toBe(false);
       expect(n.otherSource).toBe(1);
     }));
 
@@ -310,7 +312,7 @@ describe("the food entries this server created", () => {
       threeSources();
       const cache = {
         ...dbCache(db),
-        createdFoodIds: () => {
+        createdFoodNames: () => {
           throw new DiskError();
         },
       };

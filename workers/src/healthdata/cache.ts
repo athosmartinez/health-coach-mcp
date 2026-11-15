@@ -7,7 +7,7 @@ import type { Reduce } from "../googlehealth/client";
 import type { DataType } from "../googlehealth/datatypes";
 import { ALGO_VERSION } from "../metrics/stats";
 import type { Db } from "../store/db";
-import { entryIdsBetween } from "../store/entries";
+import { entryNamesBetween } from "../store/entries";
 import { type Metric, type StoredMetric, deleteMetric, metricRange, putMetric } from "../store/metrics";
 import { SETTLE_DAYS, shift } from "./plan";
 
@@ -30,10 +30,19 @@ export interface Cache {
   deleteMetric(day: LocalDate, key: string): void;
   /**
    * The data point IDs of the food entries this server created in Google
-   * Health on the local days [from, to]. Absent: the server created none, and
-   * the food log holds the band's own items only.
+   * Health on the local days [from, to]. Absent when `createdFoodNames` is
+   * set: the ids are that map's keys. Absent with no names either: the
+   * server created none, and the food log holds the band's own items only.
    */
   createdFoodIds?(from: LocalDate, to: LocalDate): ReadonlySet<string>;
+  /**
+   * The stored name of each food entry this server created on [from, to] for
+   * the account that is linked now, keyed by data point id. One indexed read.
+   * The food log takes it before any Google request, and uses its keys as the
+   * ids. Absent: `createdFoodIds` decides which items are kept, and no name
+   * is known.
+   */
+  createdFoodNames?(from: LocalDate, to: LocalDate): ReadonlyMap<string, string>;
 }
 
 /** The daily_metrics table of the coach store. */
@@ -42,7 +51,7 @@ export function dbCache(db: Db): Cache {
     metricRange: (key, from, to, algoVersion) => metricRange(db, key, from, to, algoVersion),
     putMetric: (metric) => putMetric(db, metric),
     deleteMetric: (day, key) => deleteMetric(db, day, key),
-    createdFoodIds: (from, to) => entryIdsBetween(db, from, to),
+    createdFoodNames: (from, to) => entryNamesBetween(db, from, to),
   };
 }
 

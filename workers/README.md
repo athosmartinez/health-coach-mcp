@@ -60,6 +60,8 @@ An isolate has 128 MB. The client never keeps the raw pages of a call (`src/goog
 
 - one response is at most **16 MiB**, and the responses of one call (all its pages and rollup chunks) at most **32 MiB** (the Go limits are 32 and 64 MiB); over a limit is the budget error above, not retried;
 - a page is read record by record, never as one parsed tree, and each record is reduced to the fields its caller needs before the next one is read;
+- a record longer than **1 MiB** (1,048,576 characters) is refused before it is parsed: the tool answers `upstream_unavailable`, `Google Health returned an unreadable <type> response`. A parsed record of 1 MiB holds at most about 350,000 values. The largest real records are a night with its stage list and a session: 1 MiB is four times a night of 8 hours with a sleep stage every 30 seconds (960 stages of about 250 characters);
+- a top-level field of a page other than the list and the page token is checked as JSON and never parsed: the client reads its name only. So a response that is small in bytes and holds millions of small values does not become millions of objects;
 - the estimated peak of a call is 64 MiB: what it kept (at most 32 MiB) plus one response in flight as bytes and as text.
 
 These numbers rest on an estimate of the record sizes. No production isolate has measured them.
@@ -275,6 +277,8 @@ Decoding of Google Health records:
 - **A whole number written as `440.0` or `4.4e2` is accepted** where Go refuses it.
 - **Time fractions finer than a millisecond are lost.**
 - **A record that is not JSON makes its whole page unreadable** (`upstream_unavailable`). It cannot reach a parser as one skipped record.
+- **A record longer than 1 MiB makes its whole page unreadable** (`upstream_unavailable`). The Go server has only its byte limits per response and per call.
+- **A page field that the client does not read may nest at most 512 levels.** It is checked as JSON without being parsed, and a deeper one makes the page unreadable. Go's decoder allows deeper nesting.
 
 Logs:
 
@@ -296,7 +300,7 @@ No deploy has run this code. These points come from the docs or from local tests
 
 - **Object CPU.** The Durable Objects limits table says 30 seconds of CPU per request. The same page says that objects have the Workers per-invocation CPU limits. If the object has only 10 ms, a cold call over a year cannot work: `metric_series hrv` over 366 days parses about 36,000 HRV samples.
 - **Whether an object invocation has its own subrequest budget.** The design assumes that it has not: 50 for the whole request.
-- **Memory.** The 16 MiB and 32 MiB limits rest on an estimate of 0.7 to 1.0 kB per heart-rate sample. The local workerd does not enforce 128 MB.
+- **Memory.** The 16 MiB and 32 MiB limits rest on an estimate of 0.7 to 1.0 kB per heart-rate sample, and the 1 MiB record limit on an estimate of about 250 characters per sleep stage. No real record was measured. The local workerd does not enforce 128 MB.
 - **Record volumes.** The table above uses synthetic volumes. A real 31-day list of the band's steps can have more than one page.
 - **The daily rollup page size.** The docs give a maximum page size of 90 (14 for total calories). The request keeps the Go shape and sends `pageSize: 10000`, which works for the Go server against the real API.
 - **The time form of real exercise records.** The fixtures write UTC instants.

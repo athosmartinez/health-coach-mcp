@@ -1,19 +1,29 @@
 // The record-by-record page reader. It must accept exactly the pages that
-// JSON.parse accepts as an object, and hand over the same records.
-import { describe, expect, it } from "vitest";
+// JSON.parse accepts as an object, and hand over the same records. It parses
+// one record at a time, and never a top-level field other than the list and
+// the page token: of those it gives the names.
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PageSyntaxError, scanPage } from "../src/googlehealth/page";
+import { MAX_DEPTH, MAX_RECORD_CHARS, PAGE_TOKEN_KEY, PageSyntaxError, scanPage } from "../src/googlehealth/page";
 
 const KEY = "dataPoints";
 
-function scan(text: string): { records: unknown[]; fields: Record<string, unknown>; hasList: boolean } {
+interface Read {
+  records: unknown[];
+  /** The names of the other top-level fields, sorted. */
+  fields: string[];
+  token: string | null;
+  hasList: boolean;
+}
+
+function scan(text: string): Read {
   const records: unknown[] = [];
   const page = scanPage(text, KEY, (record) => records.push(record));
-  return { records, fields: Object.fromEntries(page.fields), hasList: page.hasList };
+  return { records, fields: [...page.fields].sort(), token: page.nextPageToken, hasList: page.hasList };
 }
 
 /** What JSON.parse says the page holds, or undefined when the page reader must refuse it. */
-function reference(text: string): { records: unknown[]; fields: Record<string, unknown>; hasList: boolean } | undefined {
+function reference(text: string): Read | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -21,11 +31,30 @@ function reference(text: string): { records: unknown[]; fields: Record<string, u
     return undefined;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const { [KEY]: list, ...fields } = parsed as Record<string, unknown>;
+  const { [KEY]: list, [PAGE_TOKEN_KEY]: token = null, ...fields } = parsed as Record<string, unknown>;
   const hasList = Object.hasOwn(parsed, KEY);
   if (hasList && list !== null && !Array.isArray(list)) return undefined;
-  return { records: Array.isArray(list) ? list : [], fields, hasList };
+  if (token !== null && typeof token !== "string") return undefined;
+  return { records: Array.isArray(list) ? list : [], fields: Object.keys(fields).sort(), token, hasList };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+/** The length of the longest text that JSON.parse got while `body` ran. */
+function longestParsed(body: () => void): number {
+  const parse = vi.spyOn(JSON, "parse");
+  try {
+    body();
+    return Math.max(0, ...parse.mock.calls.map(([text]) => String(text).length));
+  } finally {
+    parse.mockRestore();
+  }
+}
+
+/** `count` empty lists in a list: three characters per value, the smallest value JSON has. */
+const manyValues = (count: number) => `[${"[],".repeat(count - 1)}[]]`;
 
 const VALID = [
   "{}",
@@ -145,15 +174,142 @@ describe("scanPage", () => {
       seen.push(record);
     });
     expect(seen).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
-    expect(result.hasList).toBe(true);
-    expect([...result.fields]).toEqual([["nextPageToken", "p2"]]);
+    expect(result).toEqual({ hasList: true, fields: [], nextPageToken: "p2" });
   });
 
   it("reads the list under the key it is asked for", () => {
     const records: unknown[] = [];
     const result = scanPage('{"dataPoints":[1],"rollupDataPoints":[2,3]}', "rollupDataPoints", (record) => records.push(record));
     expect(records).toEqual([2, 3]);
-    expect(result.fields.get("dataPoints")).toEqual([1]);
+    // The other list is a field like any other: its name, not its value.
+    expect(result).toEqual({ hasList: true, fields: ["dataPoints"], nextPageToken: null });
+  });
+
+  it("gives the name of each other field once, in the order of the page", () => {
+    const result = scanPage('{"b":1,"a":{"x":[1]},"dataPoints":[],"b":"again","c":null}', KEY, () => undefined);
+    expect(result).toEqual({ hasList: true, fields: ["b", "a", "c"], nextPageToken: null });
+  });
+
+  describe("the page token", () => {
+    it.each<[string, string | null]>([
+      ['{"nextPageToken":"p2"}', "p2"],
+      ['{"nextPageToken":""}', ""],
+      ['{"nextPageToken":"a\\u0062\\n"}', "ab\n"],
+      ['{"nextPageToken":null}', null],
+      ['{"dataPoints":[]}', null],
+      // A key listed twice keeps its last value, as JSON.parse does.
+      ['{"nextPageToken":7,"nextPageToken":"p2"}', "p2"],
+      ['{"nextPageToken":"p2","nextPageToken":null}', null],
+    ])("of %j is %j", (text, token) => {
+      expect(scan(text).token).toBe(token);
+      expect(reference(text)?.token).toBe(token);
+    });
+
+    it.each(['{"nextPageToken":7}', '{"nextPageToken":true}', '{"nextPageToken":{"a":"p2"}}', '{"nextPageToken":["p2"]}', '{"nextPageToken":"p2","nextPageToken":0}'])(
+      "must be a string or null: %j is refused",
+      (text) => {
+        expect(reference(text)).toBeUndefined();
+        expect(() => scan(text)).toThrow(PageSyntaxError);
+      },
+    );
+
+    it("is not parsed when it is not a string", () => {
+      const text = `{"dataPoints":[],"nextPageToken":${manyValues(400_000)}}`;
+      expect(longestParsed(() => expect(() => scan(text)).toThrow(PageSyntaxError))).toBeLessThan(20);
+    });
+  });
+
+  // A page under the byte limit can hold millions of small values. The reader
+  // never hands JSON.parse more than one record, and never a record over the cap.
+  describe("a page that is small in bytes and large in the count of values", () => {
+    /** 700,000 values in 2.1 million characters. */
+    const VALUES = 700_000;
+
+    it("does not parse a top-level field that is not the list", () => {
+      const text = `{"dataPoints":[{"n":1}],"extra":${manyValues(VALUES)},"nextPageToken":"p2"}`;
+      let read: Read | undefined;
+      const longest = longestParsed(() => {
+        read = scan(text);
+      });
+      expect(read).toEqual({ records: [{ n: 1 }], fields: ["extra"], token: "p2", hasList: true });
+      // The keys, the record and the page token: nothing of the field.
+      expect(longest).toBeLessThan(20);
+    });
+
+    it.each([
+      ["an object with many keys", `{${Array.from({ length: 100_000 }, (_unused, i) => `"k${i}":{}`).join(",")}}`],
+      ["a list of numbers, texts and literals", `[${"0,\"\",null,true,false,-1.5e-3,".repeat(100_000)}{"deep":[[[[{"x":[1]}]]]]}]`],
+    ])("checks %s without parsing it", (_name, value) => {
+      const text = `{"extra":${value},"dataPoints":[]}`;
+      expect(reference(text)).toEqual({ records: [], fields: ["extra"], token: null, hasList: true });
+      let read: Read | undefined;
+      const longest = longestParsed(() => {
+        read = scan(text);
+      });
+      expect(read).toEqual({ records: [], fields: ["extra"], token: null, hasList: true });
+      expect(longest).toBeLessThan(20);
+    });
+
+    it("does not parse a value of the list key that is not a list", () => {
+      const text = `{"dataPoints":{"a":${manyValues(VALUES)}}}`;
+      expect(longestParsed(() => expect(() => scan(text)).toThrow(PageSyntaxError))).toBeLessThan(20);
+    });
+
+    it("still refuses a field that is not JSON, wherever the fault is", () => {
+      const big = manyValues(VALUES);
+      for (const value of [`${big.slice(0, -1)},]`, `${big.slice(0, -1)}`, `${big}]`, `[${big} ${big}]`, `{"a":${big},"b"}`, `{"a":${big},"b":01}`, `["\\x",${big}]`]) {
+        const text = `{"dataPoints":[],"extra":${value}}`;
+        expect(reference(text), value.slice(-12)).toBeUndefined();
+        expect(() => scan(text), value.slice(-12)).toThrow(PageSyntaxError);
+      }
+    });
+
+    it("refuses a record longer than the cap before it is parsed", () => {
+      // 350,000 values in a little more than 1 MiB.
+      const record = `{"samples":${manyValues(350_000)}}`;
+      expect(record.length).toBeGreaterThan(MAX_RECORD_CHARS);
+      expect(record.length).toBeLessThan(MAX_RECORD_CHARS + 2000);
+      const text = `{"dataPoints":[{"n":1},${record},{"n":3}]}`;
+      // JSON.parse reads the page: only the cap refuses it.
+      expect(reference(text)?.records).toHaveLength(3);
+      const seen: unknown[] = [];
+      const longest = longestParsed(() => {
+        expect(() => scanPage(text, KEY, (item) => seen.push(item))).toThrow(new PageSyntaxError("a record is too long"));
+      });
+      expect(longest).toBeLessThan(20);
+      // The reader stops there. The client drops the records of a page that fails.
+      expect(seen).toEqual([{ n: 1 }]);
+    });
+
+    it("reads a record of exactly the cap", () => {
+      const record = (length: number) => `{"note":"${"a".repeat(length - '{"note":""}'.length)}"}`;
+      const atCap = record(MAX_RECORD_CHARS);
+      expect(atCap).toHaveLength(MAX_RECORD_CHARS);
+      expect(scan(`{"dataPoints":[${atCap}, {"n":2}]}`).records).toHaveLength(2);
+      expect(() => scan(`{"dataPoints":[${record(MAX_RECORD_CHARS + 1)}]}`)).toThrow(PageSyntaxError);
+      // 1 MiB: four times a night with a stage every 30 seconds.
+      expect(MAX_RECORD_CHARS).toBe(1_048_576);
+    });
+
+    it("bounds the nesting of a field it checks", () => {
+      const nested = (depth: number) => `${"[".repeat(depth)}${"]".repeat(depth)}`;
+      // The innermost list is empty: it opens no level of its own.
+      expect(scan(`{"extra":${nested(MAX_DEPTH + 1)}}`).fields).toEqual(["extra"]);
+      expect(() => scan(`{"extra":${nested(MAX_DEPTH + 2)}}`)).toThrow(new PageSyntaxError("a value is nested too deep"));
+      expect(() => scan(`{"extra":${"[".repeat(3_000_000)}}`)).toThrow(PageSyntaxError);
+      expect(MAX_DEPTH).toBe(512);
+    });
+
+    it("reads texts with millions of escapes: in a key, in a field and in the page token", () => {
+      const escapes = "\\n".repeat(4_000_000);
+      const text = `{"${escapes}":"${escapes}","nextPageToken":"${escapes}","dataPoints":[{"note":"${"\\n".repeat(400_000)}"}]}`;
+      const read = scan(text);
+      expect(read.fields).toEqual(["\n".repeat(4_000_000)]);
+      expect(read.token).toHaveLength(4_000_000);
+      expect(read.records).toEqual([{ note: "\n".repeat(400_000) }]);
+      // In a record over the cap too: the reader finds its end, then refuses it.
+      expect(() => scan(`{"dataPoints":[{"note":"${escapes}"}]}`)).toThrow(new PageSyntaxError("a record is too long"));
+    });
   });
 
   it("refuses a page that holds the list twice", () => {
@@ -212,13 +368,14 @@ describe("scanPage", () => {
     expect(refused).toBeGreaterThan(1000);
   });
 
-  it("reads a record with a very long text, escapes included", () => {
+  it("reads a very long text, escapes included: in a record up to the cap, and in a key and a field beyond it", () => {
     const long = `${"a".repeat(2_000_000)}"\\${"é]".repeat(1_000_000)}`;
-    const text = JSON.stringify({ dataPoints: [{ note: long }, { n: 2 }], [long]: 1 });
+    const note = `${"a".repeat(500_000)}"\\${"é]".repeat(250_000)}`;
+    const text = JSON.stringify({ dataPoints: [{ note }, { n: 2 }], [long]: long });
     const records: unknown[] = [];
     const result = scanPage(text, KEY, (record) => records.push(record));
-    expect(records).toEqual([{ note: long }, { n: 2 }]);
-    expect(result.fields.get(long)).toBe(1);
+    expect(records).toEqual([{ note }, { n: 2 }]);
+    expect(result.fields).toEqual([long]);
   });
 
   it("reads a large page", () => {
@@ -237,6 +394,6 @@ describe("scanPage", () => {
     });
     expect(count).toBe(10_000);
     expect(last).toEqual(record(9_999));
-    expect(result.fields.get("nextPageToken")).toBe("p2");
+    expect(result.nextPageToken).toBe("p2");
   });
 });

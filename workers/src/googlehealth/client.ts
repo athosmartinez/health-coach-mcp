@@ -63,9 +63,12 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 // takes one byte per character while the JSON holds only Latin-1 characters
 // and two when it holds any other, so a response of n bytes needs at most
 // n + 2n. The page is then read record by record (page.ts): it is never one
-// parsed object tree. What a call keeps from the pages already read is what
-// the caller's mapper returned. A mapper that keeps a whole record keeps about
-// the size of its text, so a call that read b bytes keeps at most about b.
+// parsed object tree. One record is parsed at a time, and only when its text
+// is at most 1 MiB (MAX_RECORD_CHARS); a top-level field other than the list
+// and the page token is never parsed. What a call keeps from the pages already
+// read is what the caller's mapper returned. A mapper that keeps a whole
+// record keeps about the size of its text, so a call that read b bytes keeps
+// at most about b.
 //
 // Peak of a call, at its last page of n bytes: (MAX_CALL_BYTES − n) kept +
 // 3n in flight ≤ MAX_CALL_BYTES + 2 × MAX_RESPONSE_BYTES = 32 + 32 = 64 MiB.
@@ -291,13 +294,10 @@ export class GoogleHealthClient {
       // present, a new field is logged and tolerated, unless it looks like
       // paging: a renamed page token read as "last page" would silently cut
       // the range short.
-      let next = "";
-      for (const [name, value] of scan.fields) {
-        if (name === "nextPageToken") {
-          if (typeof value === "string") next = value;
-          else if (value !== null) throw badResponse(dataType);
-          continue;
-        }
+      // The page reader hands over the names of those fields, never their
+      // values, and refuses a page token that is neither a string nor null.
+      const next = scan.nextPageToken ?? "";
+      for (const name of scan.fields) {
         if (!scan.hasList || pagingField(name)) {
           console.warn("google health response has an unexpected field", {
             data_type: dataType,

@@ -34,6 +34,7 @@ import {
   retryAfter,
 } from "../src/googlehealth/client";
 import type { DataType } from "../src/googlehealth/datatypes";
+import { MAX_RECORD_CHARS } from "../src/googlehealth/page";
 import type { CoachStore, GoogleLink } from "../src/store";
 import { GOOGLE_REFRESH_TOKEN, OWNER_EMAIL, OWNER_SUB, mockGoogle } from "./helpers";
 import { SAO_PAULO, freshStore } from "./memory-helpers";
@@ -904,7 +905,10 @@ describe("page checks", () => {
     [`{"data_points": [{"a": 1}]}`, true],
     [`{"dataPoints": {}}`, true],
     [`{"dataPoints": [], "nextPageToken": 7}`, true],
+    [`{"dataPoints": [], "nextPageToken": {"token": "p2"}}`, true],
     [`{"dataPoints": [], "newField": 1}`, false], // a field added by Google does not drop the data
+    [`{"dataPoints": [], "newField": {"a": [1, {"b": null}], "c": "d"}}`, false],
+    [`{"dataPoints": [], "newField": {"a": [1, {"b": nul}]}}`, true], // its value is checked as JSON, though never parsed
     [`{"dataPoints": [], "pageToken": "p2"}`, true], // a renamed continuation would end the range early
     [`{"dataPoints": [], "nextCursor": "p2"}`, true],
     [`{"dataPoints": [], "next_page": "p2"}`, true],
@@ -946,6 +950,55 @@ describe("page checks", () => {
       { data_type: "steps", field: "x".repeat(40), has_list: false },
     ]);
     expect(logged()).not.toMatch(/72|bpm/);
+  });
+
+  // A response under the byte limit can hold millions of small values, and a
+  // parsed tree of them takes many times the size of the text.
+  describe("a response that is small in bytes and large in the count of values", () => {
+    const point = (name: string) => `{"name":"users/me/dataTypes/steps/dataPoints/${name}"}`;
+    /** `count` empty lists in a list: three characters per value. */
+    const manyValues = (count: number) => `[${"[],".repeat(count - 1)}[]]`;
+    const longestParsed = (parse: MockInstance) => Math.max(0, ...parse.mock.calls.map(([text]) => String(text).length));
+
+    it("reads the list and does not parse the other field", async () => {
+      const body = `{"dataPoints":[${point("a")},${point("b")}],"extraValues":${manyValues(700_000)}}`;
+      expect(body.length).toBeGreaterThan(2_000_000);
+      const requests = fakeApi(() => new Response(body, { status: 200 }));
+      const parse = vi.spyOn(JSON, "parse");
+      expect(await listSteps(testClient().client)).toEqual(["a", "b"]);
+      // The keys and the two records: nothing of the field's value.
+      expect(longestParsed(parse)).toBeLessThan(100);
+      expect(requests).toHaveLength(1);
+      expect(warnings()).toEqual([["google health response has a new field", { data_type: "steps", field: "extraValues" }]]);
+    });
+
+    it("answers an unreadable response for such a field in a page without the list", async () => {
+      const requests = fakeApi(() => new Response(`{"extraValues":${manyValues(700_000)}}`, { status: 200 }));
+      const parse = vi.spyOn(JSON, "parse");
+      const error = await failure(listSteps(testClient().client));
+      expect(toWire(error)).toMatchObject({ code: "upstream_unavailable", message: "Google Health returned an unreadable steps response" });
+      expect(longestParsed(parse)).toBeLessThan(100);
+      expect(requests).toHaveLength(1);
+    });
+
+    it("answers an unreadable response for a record longer than the cap, without parsing it", async () => {
+      const record = `{"name":"users/me/dataTypes/steps/dataPoints/long","samples":${manyValues(350_000)}}`;
+      expect(record.length).toBeGreaterThan(MAX_RECORD_CHARS);
+      const requests = fakeApi(() => new Response(`{"dataPoints":[${point("a")},${record},${point("c")}]}`, { status: 200 }));
+      const parse = vi.spyOn(JSON, "parse");
+      const { client, waits } = testClient();
+      const error = await failure(listSteps(client));
+      expect(toWire(error)).toEqual({
+        code: "upstream_unavailable",
+        message: "Google Health returned an unreadable steps response",
+        hint: "try again in a few minutes",
+      });
+      expect(longestParsed(parse)).toBeLessThan(100);
+      // The same range gives the same record again: no retry.
+      expect(requests).toHaveLength(1);
+      expect(waits).toEqual([]);
+      expect(warnings()).toEqual([]);
+    });
   });
 
   it("refuses a page token that repeats", async () => {

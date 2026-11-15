@@ -30,6 +30,18 @@ export const GOOGLE_SIGN_IN_SCOPES = ["openid", "email", ...GOOGLE_HEALTH_SCOPES
 
 const ID_TOKEN_ISSUERS = new Set(["accounts.google.com", "https://accounts.google.com"]);
 
+/**
+ * What the person does when the Google link is missing, expired or revoked.
+ * The Go server names its CLI login command here; a remote connector has none.
+ */
+export const RECONNECT_HINT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
+
+/**
+ * What the person checks when Google refuses the server's own token request
+ * (a wrong client ID or secret). The Go server names its client_secret.json here.
+ */
+export const OAUTH_CLIENT_HINT = "Check the server's Google OAuth client settings.";
+
 /** Same codes as the Go server's coach.ToolError for auth failures. */
 export type GoogleErrorCode = "auth_expired" | "upstream_unavailable" | "internal_error";
 
@@ -102,9 +114,18 @@ export function exchangeCode(
       client_secret: client.clientSecret,
     },
     now,
+    // A sign-in that got no usable token cannot go on: a fault of this server's flow.
+    "internal_error",
   );
 }
 
+/**
+ * Renews the access token. HTTP 200 without a usable token is a fault of the
+ * token service, not of the link or the OAuth client: the same request can
+ * work later, so it is upstream_unavailable (the Go server: "could not be
+ * reached"). A redirect is the same: it is not followed. An answer that
+ * Google refuses stays internal_error.
+ */
 export function refreshAccessToken(
   client: GoogleClient,
   refreshToken: string,
@@ -118,16 +139,31 @@ export function refreshAccessToken(
       client_secret: client.clientSecret,
     },
     now,
+    "upstream_unavailable",
   );
 }
 
-async function tokenRequest(form: Record<string, string>, now: number): Promise<GoogleTokens | GoogleError> {
+/**
+ * `unusable` is the code for an answer that is neither a token nor a refusal
+ * of Google: HTTP 200 with a body that holds no usable token, or a redirect
+ * (which is not followed).
+ */
+async function tokenRequest(
+  form: Record<string, string>,
+  now: number,
+  unusable: GoogleErrorCode,
+): Promise<GoogleTokens | GoogleError> {
   let response: Response;
   try {
     response = await fetch(GOOGLE_TOKEN_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
       body: new URLSearchParams(form).toString(),
+      // The token endpoint never redirects. A 307 or 308 that is followed
+      // sends the form again, with the client secret and the refresh token,
+      // to the redirect target; and each hop is one more subrequest, which
+      // the budget of an MCP request does not count.
+      redirect: "manual",
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
     });
   } catch {
@@ -153,6 +189,9 @@ async function tokenRequest(form: Record<string, string>, now: number): Promise<
   if (!response.ok) {
     const error = typeof body.error === "string" ? safeCode(body.error) : "unknown";
     const message = `Google token endpoint: ${error} (HTTP ${response.status})`;
+    // A redirect is not an answer of the token service, whatever its body
+    // says: it is never a refusal of the grant.
+    if (response.status >= 300 && response.status < 400) return { ok: false, code: unusable, message };
     if (error === "invalid_grant") return { ok: false, code: "auth_expired", message };
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
       return { ok: false, code: "upstream_unavailable", message };
@@ -163,7 +202,7 @@ async function tokenRequest(form: Record<string, string>, now: number): Promise<
   const accessToken = body.access_token;
   const expiresIn = body.expires_in;
   if (typeof accessToken !== "string" || accessToken === "" || typeof expiresIn !== "number" || !(expiresIn > 0)) {
-    return { ok: false, code: "internal_error", message: "Google token endpoint: malformed response" };
+    return { ok: false, code: unusable, message: "Google token endpoint: malformed response" };
   }
   return {
     ok: true,
@@ -187,6 +226,8 @@ export async function revokeToken(token: string): Promise<void> {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ token }).toString(),
+      // As for the token request: a followed redirect would send the token on.
+      redirect: "manual",
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
     });
   } catch {

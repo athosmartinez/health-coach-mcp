@@ -5,9 +5,17 @@ import type { Zone } from "./coach/date";
 import { INTERNAL_ERROR } from "./coach/errors";
 import { timeZone } from "./config";
 import { type GoogleErrorCode, missingHealthScopes, refreshAccessToken, splitScopes } from "./google";
+import { RequestBudget } from "./googlehealth/budget";
+import { GoogleHealthClient } from "./googlehealth/client";
+import { RequestTokens } from "./googlehealth/tokens";
+import { HealthData, dbCache } from "./healthdata";
 import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
+import { targetInForce } from "./store/memory";
+import { searchNotes } from "./store/notes";
+import type { CoachDeps } from "./tools/coach";
 import { runMemoryTool } from "./tools/memory";
+import { runCoachTool } from "./tools/moments";
 import type { ToolOutcome } from "./tools/register";
 
 /**
@@ -91,6 +99,24 @@ const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
     INSERT INTO notes_fts(notes_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO notes_fts(rowid, text) VALUES (new.id, new.text); END;`,
+  // 4: the cache of daily values computed from Google Health records, with the
+  // Go store's final columns in its order. The cache is disposable. `zone` is
+  // the IANA zone a value was computed in: sleep start minutes and the day a
+  // night belongs to depend on it, so a row from another zone is a miss.
+  //
+  // The index is the Worker's own (the Go store has none). Every cache read
+  // is one metric over a range of days. The primary key starts with the date,
+  // so without the index such a read scans the rows of all the metrics of
+  // those days, and rows read are a daily quota of the plan.
+  `CREATE TABLE daily_metrics (
+    date TEXT NOT NULL, metric TEXT NOT NULL,   -- metric from the closed list in store/metrics.ts
+    value REAL NOT NULL, n_samples INTEGER, source TEXT,
+    algo_version INTEGER NOT NULL,              -- bump when the derivation changes
+    fetched_at TEXT NOT NULL,
+    zone TEXT,
+    PRIMARY KEY (date, metric)
+  );
+  CREATE INDEX daily_metrics_by_metric ON daily_metrics (metric, date)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -181,22 +207,72 @@ export class CoachStore extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const db = new Db(ctx.storage);
-    const memory = (name: string, args: Record<string, unknown>): ToolOutcome => {
-      let zone: Zone;
+    const zoneOrError = (): Zone | undefined => {
       try {
-        zone = timeZone(this.env);
+        return timeZone(this.env);
       } catch {
         // The Go server refuses to start with a bad HCM_TZ. A Worker has no
-        // start, so every memory tool fails instead of using a zone nobody chose.
+        // start, so every tool that needs the zone fails instead of using a
+        // zone nobody chose.
         console.error("config_error", { variable: "HCM_TZ" });
-        return { ok: false, error: INTERNAL_ERROR };
+        return undefined;
       }
-      return runMemoryTool({ db, zone }, name, args);
     };
-    this.mcp = createMcpHandler(
-      () => createServer({ memory, googleAccountStatus: () => this.googleAccountStatus() }),
-      { route: MCP_PATH },
-    );
+    const memory = (name: string, args: Record<string, unknown>): ToolOutcome => {
+      const zone = zoneOrError();
+      return zone ? runMemoryTool({ db, zone }, name, args) : { ok: false, error: INTERNAL_ERROR };
+    };
+    // createMcpHandler calls this factory once per MCP HTTP request, also for
+    // a JSON-RPC batch of several tool calls. So what it creates is what one
+    // request may spend on Google (Workers Free: 50 subrequests): one request
+    // budget for the Google Health API, and one access token answer.
+    const server = () => {
+      const tokens = new RequestTokens({
+        accessToken: () => this.googleAccessToken(),
+        invalidate: (rejected) => this.invalidateGoogleAccessToken(rejected),
+      });
+      const budget = new RequestBudget();
+      let deps: CoachDeps | undefined;
+      const coachDeps = (): CoachDeps | undefined => {
+        const zone = zoneOrError();
+        if (!zone) return undefined;
+        const client = new GoogleHealthClient({ tokens, zone, budget });
+        return {
+          health: new HealthData(client, dbCache(db), zone, db.now),
+          targets: (day) => targetInForce(db, day),
+          notes: (filter) => searchNotes(db, filter),
+          now: db.now,
+          zone,
+        };
+      };
+      // The tool calls of a batch start together. The coach tools take turns,
+      // so the Google requests of one MCP request run one after the other, and
+      // a later call finds in the cache what an earlier one fetched.
+      //
+      // The queue belongs to this MCP HTTP request. The object does not order
+      // two MCP HTTP requests: while one waits for Google, it serves the
+      // other, which has a budget and a token answer of its own. They can
+      // fetch the same window twice, and their memory adds up. One queue for
+      // the whole object would order them, but a request that stops while it
+      // holds the turn would then block every later request.
+      let turn: Promise<unknown> = Promise.resolve();
+      const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
+        const outcome = turn.then((): ToolOutcome | Promise<ToolOutcome> => {
+          // From here on, the units already taken are those of earlier calls.
+          budget.beginCall();
+          deps ??= coachDeps();
+          return deps ? runCoachTool(deps, name, args) : { ok: false, error: INTERNAL_ERROR };
+        });
+        turn = outcome.catch(() => undefined);
+        return outcome;
+      };
+      return createServer({
+        memory,
+        coach,
+        googleAccountStatus: async () => this.accountStatus(await tokens.accessToken()),
+      });
+    };
+    this.mcp = createMcpHandler(server, { route: MCP_PATH });
     ctx.blockConcurrencyWhile(async () => {
       migrate(this.ctx.storage);
     });
@@ -278,9 +354,29 @@ export class CoachStore extends DurableObject<Env> {
     return result;
   }
 
+  /**
+   * Marks the access token that Google rejected as expired, so the next
+   * googleAccessToken() renews it even when its stored expiry is still ahead
+   * (revoked, or expired at Google a moment before it expires here). A
+   * rejection of a token that was already replaced is ignored: requests that
+   * saw the same 401 share one renewal. Returns whether the token was marked.
+   */
+  invalidateGoogleAccessToken(rejected: string): boolean {
+    if (rejected === "") return false;
+    const marked = this.ctx.storage.sql.exec(
+      "UPDATE google_account SET access_token_expires_at = 0 WHERE id = 1 AND access_token = ?",
+      rejected,
+    );
+    return marked.rowsWritten > 0;
+  }
+
   /** The link without any token; checks (and if needed renews) the access token. */
   async googleAccountStatus(): Promise<GoogleAccountStatus> {
-    const token = await this.googleAccessToken();
+    return this.accountStatus(await this.googleAccessToken());
+  }
+
+  /** The link without any token, with the outcome of an access token check that was already made. */
+  private accountStatus(token: { ok: true } | { ok: false; code: AccessTokenErrorCode }): GoogleAccountStatus {
     // Read after the check: a revoked link is removed by it.
     const row = this.account();
     if (!row) {

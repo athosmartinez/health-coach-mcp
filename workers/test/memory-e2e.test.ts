@@ -108,7 +108,7 @@ describe("the MCP request inside the object", () => {
   it("gets the request from the Worker without the MCP access token", async () => {
     const served = vi.spyOn(CoachStore.prototype, "fetch");
     const listed = await rpc(accessToken, listTools);
-    expect((listed.result as { tools: unknown[] }).tools).toHaveLength(13);
+    expect((listed.result as { tools: unknown[] }).tools).toHaveLength(ALL_TOOL_NAMES.length);
 
     expect(served).toHaveBeenCalledTimes(1);
     const forwarded = served.mock.calls[0]?.[0] as Request;
@@ -162,12 +162,12 @@ describe("the MCP request inside the object", () => {
 });
 
 describe("coach memory over /mcp", () => {
-  it("lists the 13 tools, with no boolean schema in any property", async () => {
+  it("lists the 18 tools, with no boolean schema in any property", async () => {
     const listed = await rpc(accessToken, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(listed.error).toBeUndefined();
     const tools = (listed.result as { tools: { name: string; inputSchema: unknown; outputSchema: unknown }[] }).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
-    expect(tools).toHaveLength(13);
+    expect(tools).toHaveLength(18);
 
     // Client interop: zod-based clients reject `true` or `false` as a property schema.
     const booleans: string[] = [];

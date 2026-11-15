@@ -148,7 +148,8 @@ const HEALTH_ITEM = s.object({
   updated_at: s.string(),
 });
 
-const NOTE = s.object({
+/** A stored note as the tools return it; weekly_report lists the week's decisions in the same form. */
+export const NOTE = s.object({
   id: s.integer(),
   kind: s.string(),
   text: s.string(),

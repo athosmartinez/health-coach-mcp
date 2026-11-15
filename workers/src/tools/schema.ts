@@ -10,6 +10,7 @@ export interface JsonSchema {
   type?: string | string[];
   description?: string;
   pattern?: string;
+  maxLength?: number;
   enum?: (string | null)[];
   properties?: Record<string, JsonSchema>;
   required?: string[];

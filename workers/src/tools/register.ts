@@ -175,6 +175,19 @@ export function capture(tool: Tool, body: () => Record<string, unknown>): ToolOu
   }
 }
 
+/** {@link capture} for a body that waits on something: the tools that read Google Health. */
+export async function captureAsync(tool: Tool, body: () => Promise<Record<string, unknown>>): Promise<ToolOutcome> {
+  try {
+    const output = await body();
+    // JSON has no NaN or Infinity: written as null, one would read as "no
+    // value" where the schema allows null. The Go server fails to encode it.
+    if (tool.checkOutput(output) !== undefined || nonFiniteNumber(output) !== undefined) throw new OutputSchemaError();
+    return { ok: true, output };
+  } catch (error) {
+    return failure(tool, error);
+  }
+}
+
 function failure(tool: Tool, error: unknown): ToolOutcome {
   const wire = toWire(error);
   if (wire.code === INTERNAL_ERROR.code) {

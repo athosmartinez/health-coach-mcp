@@ -13,6 +13,7 @@ import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
 import { forgetEntry, hasEntry, recordEntry } from "./store/entries";
 import { targetInForce } from "./store/memory";
+import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
 import type { CoachDeps } from "./tools/coach";
 import { type WriteDeps, runWriteTool } from "./tools/foodlog";
@@ -343,9 +344,27 @@ export class CoachStore extends DurableObject<Env> {
     return row.version;
   }
 
-  /** Stores the account that just signed in, replacing any earlier link. */
+  /**
+   * Stores the account that just signed in, replacing any earlier link.
+   *
+   * The cache of daily values holds the days of one Google account, and its
+   * rows do not say whose they are. So it is emptied when the account that
+   * signs in is not the one stored: another `sub`, or no stored link at all
+   * (a revoked link is removed, and then nothing says whose days the cache
+   * holds). A new link of the same account keeps the cache. The cache is
+   * disposable: the next read fetches the days again. The coach memory
+   * (profile, targets, labs, notes) is not tied to the Google account and
+   * stays.
+   */
   linkGoogleAccount(link: GoogleLink): void {
     const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      if (this.account()?.sub !== link.sub) clearMetrics(new Db(this.ctx.storage));
+      this.storeLink(link, now);
+    });
+  }
+
+  private storeLink(link: GoogleLink, now: number): void {
     this.ctx.storage.sql.exec(
       `INSERT INTO google_account
          (id, sub, email, refresh_token, scopes, access_token, access_token_expires_at, linked_at, updated_at)

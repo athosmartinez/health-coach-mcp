@@ -295,6 +295,13 @@ Also not proven, because no real call was made: that Google accepts each field a
 
 `@cloudflare/workers-oauth-provider` keeps clients, grants and hashed MCP tokens in the `OAUTH_KV` namespace. The Google refresh token is never in KV, logs or tool output. `CoachStore.googleAccessToken()` returns a Google access token, renewed with the stored refresh token when it has less than a minute left. A Google `invalid_grant` removes the link (`auth_expired`); a timeout, 408, 429, 5xx, a redirect or a malformed answer is `upstream_unavailable`. A request to Google's token or revoke endpoint never follows a redirect: a followed 307 or 308 would send the client secret and the refresh token to the redirect target, and would add subrequests that the budget does not count. A coach tool without a linked account answers `auth_expired` with the hint to disconnect and reconnect the connector.
 
+### When another Google account is linked
+
+The object holds one link. A sign-in replaces it. When the operator changes `ALLOWED_GOOGLE_EMAIL` and another account signs in, the object must not serve the data of the account before it:
+
+- **The cache of daily values is emptied.** A row of `daily_metrics` does not say whose day it holds. So `linkGoogleAccount` empties the table, in the same transaction as the new link, when the `sub` of the account that signs in is not the stored one. It also empties it when no link is stored: a revoked link is removed, and then nothing says whose days the cache holds. A new sign-in of the same account keeps the cache. The cache is disposable: the next read fetches the days again.
+- **The coach memory stays.** The profile, targets, health items, labs, preferences and notes are the person's own and are not tied to the Google account.
+
 ## Setup
 
 The Google Health API scopes and `nutrition.writeonly` must be enabled on the Google Cloud project.

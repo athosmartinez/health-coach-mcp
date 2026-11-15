@@ -24,7 +24,7 @@ coverage and source, so any model gives consistent advice.
 | # | Rule |
 |---|---|
 | R1 | **Single-user.** One Google account, one store. No tenant/user_id in the schema. |
-| R2 | **Google Health writes are nutrition-log entries, and only from the Worker.** The Go server makes no write calls to the API; its writes go only to the local store. The Worker reads Google Health and writes only nutrition-log entries: `nutrition_log_add` creates one entry and returns `entry_id`, and `nutrition_log_delete` deletes only an entry this server created. `nutrition_day` exposes `entry_id` on an item this server logged for the linked account (the id `nutrition_log_delete` accepts), and null on any other item. |
+| R2 | **Google Health writes are nutrition-log entries and exercise sessions, and only from the Worker.** The Go server makes no write calls to the API; its writes go only to the local store. The Worker reads Google Health and writes only two data types. Nutrition-log entries: `nutrition_log_add` creates one entry and returns `entry_id`, and `nutrition_log_delete` deletes only an entry this server created. `nutrition_day` exposes `entry_id` on an item this server logged for the linked account (the id `nutrition_log_delete` accepts), and null on any other item. Exercise sessions: `exercise_log_add` creates one completed workout session and returns `entry_id`, and `exercise_log_delete` deletes only a session this server created. `workout_review` exposes `entry_id` on a session this server logged for the linked account (the id `exercise_log_delete` accepts), and null on any other session. A logged session and a session of the band stay two records (I2): a logged session that overlaps a session of the band carries the flag `overlaps_band_session`. |
 | R3 | **The MCP doesn't diagnose or prescribe medication.** Out-of-range values come back flagged with `refer_to_doctor: true`; tool descriptions state the limit. |
 | R4 | **No health data in logs, git or test fixtures.** Logs record only tool, duration and status. Fixtures are synthetic. |
 | R5 | **stdout is reserved for JSON-RPC** in stdio mode. |
@@ -53,7 +53,7 @@ coverage and source, so any model gives consistent advice.
 | The user via chat | MCP **prompts** | `/morning_briefing`, `/weekly_report` as ready-made shortcuts in any client |
 | Cron agent (phase 2) | Tools over HTTP | Proactive daily briefing and weekly report |
 | Chat bridge (phase 2) | Tools over HTTP | WhatsApp/Telegram |
-| Google Health API | Source | Read, plus nutrition-log create and delete from the Worker only (R2); OAuth 2.0 user |
+| Google Health API | Source | Read, plus the create and the delete of nutrition-log entries and of exercise sessions, from the Worker only (R2); OAuth 2.0 user |
 | Local SQLite | Store | Coach memory + cache |
 
 ## 4. Interface Contract — Tools
@@ -109,6 +109,9 @@ Recovery for the night that ended on `date`.
 - **week_context:** sessions this week vs `weekly_sessions_target`, minutes per type.
 - **recovery_context:** that night's HRV and resting HR (if available).
 - **quality_flags:** `low_hr_for_activity`, `manual_entry`, `no_hr_data`.
+- **Worker only (R2):** each session has `entry_id`, the id `exercise_log_delete` accepts for a session
+  this server logged, else null. A logged session has `manual_entry` and `no_hr_data`, and
+  `overlaps_band_session` when it covers time of a session of the band.
 
 #### `weekly_report(week_end?)`
 Week Mon–Sun (Q4, ISO), counted up to today (`through`; `partial_day` in the current week). For each metric:
@@ -287,8 +290,10 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
   scopes: the categories of the data types the coach reads (`activity_and_fitness`,
   `health_metrics_and_measurements`, `sleep`, `nutrition`). Profile, settings, location, ECG and
   irregular-rhythm scopes are not requested (2026-10-26; they were in the first sign-in). The Worker
-  requests those four read scopes plus `googlehealth.nutrition.writeonly`, and uses the write scope
-  only for `nutrition_log_add` and `nutrition_log_delete`. Token in
+  requests those four read scopes plus two write scopes, and uses each write scope only for its two
+  tools: `googlehealth.nutrition.writeonly` for `nutrition_log_add` and `nutrition_log_delete`, and
+  `googlehealth.activity_and_fitness.writeonly` for `exercise_log_add` and `exercise_log_delete`. An
+  account that signed in before a write scope was requested gets it at the next sign-in. Token in
   `~/.config/health-coach-mcp/` (0600), own login (Q2).
 - **Refresh token in Testing mode expires in ~7 days** → detect `invalid_grant`, return
   `auth_expired` with instructions; evaluate publishing the app as "In production" unverified (Q5).
@@ -299,7 +304,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 
 ## 7. Non-Goals
 
-- Writing to Google Health beyond nutrition-log entries. The Go server does not write to the API. The Worker writes only through `nutrition_log_add` and `nutrition_log_delete`, and a delete removes only an entry this server created. Logging weight, or any type other than a nutrition-log entry, stays outside this server.
+- Writing to Google Health beyond nutrition-log entries and exercise sessions. The Go server does not write to the API. The Worker writes only through `nutrition_log_add`, `nutrition_log_delete`, `exercise_log_add` and `exercise_log_delete`, and a delete removes only an entry this server created. Logging weight, or any type other than a nutrition-log entry or an exercise session, stays outside this server. So does changing a logged session (delete it and add it again), and logging heart rate, distance or pauses with a session.
 - Multiple users, signup, billing.
 - Own UI/dashboard; WhatsApp channel and cron (phase 2, they consume the same tools).
 - Raw sensor series (1s HR, PPG, accelerometer) — not exposed.

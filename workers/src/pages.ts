@@ -61,7 +61,7 @@ function privacyPage(): string {
 <h2>How to revoke access</h2>
 <p>You can revoke access at any time in your Google Account under Security &gt; Third-party access, or at <a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>.</p>
 <h2>Contact</h2>
-<p><a href="mailto:athosandrade04@gmail.com">athosandrade04@gmail.com</a></p>
+<p>To ask about this server, open an issue on this repository.</p>
 <p><a href="/">Home</a></p>
 </body></html>`;
 }

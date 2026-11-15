@@ -78,7 +78,7 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
   408/429/5xx/timeouts → `upstream_unavailable`). Token endpoint errors are redacted to code + HTTP status
   (`endpointError`): `oauth2.RetrieveError` text quotes the response body. `cmd/health-coach-mcp/auth.go`: the
   `auth login|status` subcommands, dispatched before the server flags.
-- `internal/googlehealth/` — read-only API v4 client (`New(TokenSource, Options)`; makes no request and reads no file):
+- `internal/googlehealth/` — API v4 client that only reads (`New(TokenSource, Options)`; makes no request and reads no file; nutrition-log writes are in the Worker, see Rules):
   `List`/`Reconcile`/`DailyRollup(ctx, DataType, from, to coach.LocalDate)` return raw points (`json.RawMessage`) for
   the inclusive local days; `ListBetween(ctx, DataType, start, end time.Time)` lists a physical-time type (heart rate)
   in an instant window of at most a day. A closed `DataType` table (`datatypes.go`) holds each type's filter field (civil start,
@@ -149,7 +149,7 @@ coach memory (profile, history, labs) to any MCP client. Product context: `docs/
 ## Rules
 - **The MCP computes, the LLM interprets.** Tools return aggregates (7d/28d averages, deltas,
   adherence) with `n_days`/coverage, not raw 1-second series. Raw data only on demand, paginated.
-- **Read-only on Google Health.** Writes go only to the local store.
+- **Google Health access.** The Go server reads Google Health and writes only to the local store. The Worker reads Google Health and writes only nutrition-log entries (`nutrition_log_add` and `nutrition_log_delete`; a delete removes only an entry this server created). `nutrition_day` exposes `entry_id` on an item this server logged for the linked account, and null on any other item.
 - **stdout is the JSON-RPC channel in stdio mode.** Log only via `slog` to stderr; never `fmt.Print`.
 - **No health data or secrets in git.** OAuth client JSON, tokens, `*.db` and exports stay out
   (see `.gitignore`). Tests use synthetic fixtures only.

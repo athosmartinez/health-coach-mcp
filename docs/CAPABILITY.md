@@ -6,11 +6,11 @@
 ## 1. Capability
 
 - **Name:** health-coach-mcp
-- **Primary actor:** Athos (single user), through any MCP client (Claude Code, Claude Desktop,
+- **Primary actor:** the user (single user), through any MCP client (Claude Code, Claude Desktop,
   claude.ai, other LLMs, cron agents, chat bridges).
 - **Outcome after ship:** any agent answers "how did I recover?", "did I hit my diet?",
-  "how was my workout?" and "how was my week?" using **computed, comparable metrics** from my
-  Google Health data plus my coach memory (profile, goals, history, lab tests, notes) —
+  "how was my workout?" and "how was my week?" using **computed, comparable metrics** from the user's
+  Google Health data plus the user's coach memory (profile, goals, history, lab tests, notes) —
   without each LLM having to reprocess raw series.
 - **Success signal (30 days):** coach used on ≥ 5 of 7 days; adherence and decisions logged in
   the memory; metrics on the right trend (brief §7).
@@ -24,7 +24,7 @@ coverage and source, so any model gives consistent advice.
 | # | Rule |
 |---|---|
 | R1 | **Single-user.** One Google account, one store. No tenant/user_id in the schema. |
-| R2 | **Read-only on Google Health.** No write calls to the API in the MVP. |
+| R2 | **Google Health writes are nutrition-log entries, and only from the Worker.** The Go server makes no write calls to the API; its writes go only to the local store. The Worker reads Google Health and writes only nutrition-log entries: `nutrition_log_add` creates one entry and returns `entry_id`, and `nutrition_log_delete` deletes only an entry this server created. `nutrition_day` exposes `entry_id` on an item this server logged for the linked account (the id `nutrition_log_delete` accepts), and null on any other item. |
 | R3 | **The MCP doesn't diagnose or prescribe medication.** Out-of-range values come back flagged with `refer_to_doctor: true`; tool descriptions state the limit. |
 | R4 | **No health data in logs, git or test fixtures.** Logs record only tool, duration and status. Fixtures are synthetic. |
 | R5 | **stdout is reserved for JSON-RPC** in stdio mode. |
@@ -49,11 +49,11 @@ coverage and source, so any model gives consistent advice.
 
 | Actor | Surface | Usage |
 |---|---|---|
-| Athos via chat | MCP **tools** | Questions on demand, profile/lab/note logging |
-| Athos via chat | MCP **prompts** | `/morning_briefing`, `/weekly_report` as ready-made shortcuts in any client |
+| The user via chat | MCP **tools** | Questions on demand, profile/lab/note logging |
+| The user via chat | MCP **prompts** | `/morning_briefing`, `/weekly_report` as ready-made shortcuts in any client |
 | Cron agent (phase 2) | Tools over HTTP | Proactive daily briefing and weekly report |
 | Chat bridge (phase 2) | Tools over HTTP | WhatsApp/Telegram |
-| Google Health API | Source | Read-only, OAuth 2.0 user |
+| Google Health API | Source | Read, plus nutrition-log create and delete from the Worker only (R2); OAuth 2.0 user |
 | Local SQLite | Store | Coach memory + cache |
 
 ## 4. Interface Contract — Tools
@@ -283,10 +283,12 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 
 ## 6. Security and Policy
 
-- **OAuth:** own client in project `health-coach-mcp-511601`, 4 read-only `googlehealth.*`
+- **OAuth:** own client in project `<your-gcp-project-id>`, 4 read-only `googlehealth.*`
   scopes: the categories of the data types the coach reads (`activity_and_fitness`,
   `health_metrics_and_measurements`, `sleep`, `nutrition`). Profile, settings, location, ECG and
-  irregular-rhythm scopes are not requested (2026-10-26; they were in the first sign-in). Token in
+  irregular-rhythm scopes are not requested (2026-10-26; they were in the first sign-in). The Worker
+  requests those four read scopes plus `googlehealth.nutrition.writeonly`, and uses the write scope
+  only for `nutrition_log_add` and `nutrition_log_delete`. Token in
   `~/.config/health-coach-mcp/` (0600), own login (Q2).
 - **Refresh token in Testing mode expires in ~7 days** → detect `invalid_grant`, return
   `auth_expired` with instructions; evaluate publishing the app as "In production" unverified (Q5).
@@ -297,7 +299,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 
 ## 7. Non-Goals
 
-- Writing to Google Health (log meals/weight via chat) — outside the MVP (brief §6).
+- Writing to Google Health beyond nutrition-log entries. The Go server does not write to the API. The Worker writes only through `nutrition_log_add` and `nutrition_log_delete`, and a delete removes only an entry this server created. Logging weight, or any type other than a nutrition-log entry, stays outside this server.
 - Multiple users, signup, billing.
 - Own UI/dashboard; WhatsApp channel and cron (phase 2, they consume the same tools).
 - Raw sensor series (1s HR, PPG, accelerometer) — not exposed.
@@ -311,7 +313,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 |---|---|
 | Q1 | **Readiness:** `red` if HRV z < −1.5 **or** resting HR ≥ +5 bpm vs 28d **or** `asleep_min` < 360; `yellow` if HRV z < −0.5 **or** resting HR ≥ +3 **or** `asleep_min` < 420; otherwise `green`. A missing signal **doesn't count** (neither red nor green): it's left out and listed in `reasons` as `missing:<signal>`; with no signal at all → `level: unknown`. z-score only with ≥ 7 nights of baseline. `confidence: low` until 7 nights. Thresholds live in a single constant so they can be tuned. |
 | Q2 | **Token in its own directory** `~/.config/health-coach-mcp/` (0600), with its own login `health-coach-mcp auth login`. Independent from ghealth. |
-| Q3 | **Targets set by Athos** (or a nutritionist) via `targets_set`. The coach can suggest, but only saves after explicit confirmation in chat. |
+| Q3 | **Targets set by the user** (or a nutritionist) via `targets_set`. The coach can suggest, but only saves after explicit confirmation in chat. |
 | Q4 | **Week Monday–Sunday** (ISO). |
 
 ### Open (non-blocking, with defaults)

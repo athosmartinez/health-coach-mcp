@@ -14,6 +14,9 @@ Remote MCP server for the health coach. The Go server at the repo root stays the
   - `nutrition_day`: the food log of a day, per nutrient and per meal, against the targets in force and the calories burned.
   - `weekly_report`: an ISO week against the week before and the 28 days before it, the adherence to the targets, and the week's decision notes.
   - `metric_series`: one metric per day or per week, at most 366 days and 180 points.
+- The 2 tools that write the food log. The Go server does not have them: it only reads Google Health. [Food log writes](#food-log-writes) has their rules.
+  - `nutrition_log_add`: logs one meal or food item in Google Health, with the calories and macros that the MCP client estimated (for example from a photo), and returns the id of the new entry.
+  - `nutrition_log_delete`: deletes one entry, and only an entry that this server created.
 - The 4 MCP prompts of the Go server: `morning_briefing`, `nutrition_review`, `workout_review`, `weekly_report`. Each tells the model to call `profile_get` and its tool, with the guardrails inline. The optional day is parsed as a calendar date before it reaches the text.
 - The resource `coach://guardrails`: the coach guardrails of the Go server, byte for byte.
 
@@ -25,9 +28,9 @@ The 17 tools of the Go server have the same names, descriptions, annotations, sc
 2. The Worker forwards the request to the `CoachStore` Durable Object (`stub.fetch`) without the `Authorization` header, and returns the object's response without reading its body.
 3. The object serves the whole MCP request (`CoachStore.fetch`): JSON-RPC parsing, the Host and Origin checks, the input-schema check, the tool body next to its SQLite data, every request to Google, the log line and the serialization of the result. A tool calls the store directly: there is no Durable Object RPC call per tool. The object's `fetch` answers only `/mcp`, and only the Worker's stub can call it.
 4. Every tool goes through `register` (`src/tools/register.ts`). A tool error reaches the client as JSON `{code,message,hint}` in the text content, with `isError` and no `structuredContent`. Arguments that fail the input schema are `invalid_input`. An unexpected error is `internal_error`: its text is never sent or logged.
-5. One log line per call: `tool_call` with the tool name, `duration_ms`, `is_error` and `code`. Never arguments, results, error messages or stored values. An internal error also logs `tool_internal_error` with the tool name and the error's type names. The Google Health client logs a retry, a rejected token and a rejected request with the data type, the HTTP status and Google's status enum: never a response body or a token.
+5. One log line per call: `tool_call` with the tool name, `duration_ms`, `is_error` and `code`. Never arguments, results, error messages or stored values. An internal error also logs `tool_internal_error` with the tool name and the error's type names. The Google Health client logs a retry, a rejected token and a rejected request with the data type, the HTTP status and Google's status enum, and a write answer that it cannot use with the reason: never a request body, a response body or a token.
 
-The source layout mirrors the Go packages: `src/coach/` (local dates, tool errors, the envelope), `src/store/` (profile, targets, health items, preferences, labs, notes, the `daily_metrics` cache), `src/googlehealth/` (the read-only API client, the request budget, the access token of one request), `src/healthdata/` (records to daily values through the cache), `src/metrics/` (pure math), `src/tools/` (`register`, the schema builders, the memory tools, the coach tools) and `src/prompts/`. The schema migrations and the Durable Object class are in `src/store.ts`.
+The source layout mirrors the Go packages: `src/coach/` (local dates, tool errors, the envelope), `src/store/` (profile, targets, health items, preferences, labs, notes, the `daily_metrics` cache, the food entries this server created), `src/googlehealth/` (the API client with its reads and its two food log writes, the request budget, the access token of one request), `src/healthdata/` (records to daily values through the cache), `src/metrics/` (pure math), `src/tools/` (`register`, the schema builders, the memory tools, the coach tools, the two food log tools) and `src/prompts/`. The schema migrations and the Durable Object class are in `src/store.ts`.
 
 ## Google Health reads
 
@@ -123,9 +126,6 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | `metric_series` | `total_calories`, 366 days; Google Health answers 503 three times before each answer | 45 | 0 | 45 | upstream_unavailable | none | — |
 | the five coach tools and `google_account_status` | one POST; today's briefing, a day with one session, a day of food, the current week, 7 days of steps; the access token is renewed first | 32 | 1 | 33 | ok | 1 | 28 |
 | the five coach tools and `google_account_status` | one POST; the worst-case input of each tool; the access token is renewed first | 45, 45, 45, 45 | 1, 0, 0, 0 | 46, 45, 45, 45 | ok, budget error ×4, ok | none | — |
-
-The highest count is **49 external fetches** in one MCP HTTP request: 45 Google Health requests and 4 token requests, in the row with the sign-in race. Without that race the highest count is 47. No row passes 50.
-
 | `nutrition_log_add` | one entry | 1 | 0 | 1 | ok | 1 | 1 |
 | `nutrition_log_add` | one entry; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 1 |
 | `nutrition_log_add` | one entry; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
@@ -133,6 +133,9 @@ The highest count is **49 external fetches** in one MCP HTTP request: 45 Google 
 | `nutrition_log_delete` | an entry this server created; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 0 |
 | `nutrition_log_delete` | an entry this server created; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
 | `nutrition_log_add`, 100 calls | one POST with 100 entries; the access token is renewed first | 45, 45, 45, 45 | 1, 0, 0, 0 | 46, 45, 45, 45 | ok ×45, budget error ×55 | none | — |
+
+The highest count is **49 external fetches** in one MCP HTTP request: 45 Google Health requests and 4 token requests, in the row with the sign-in race. Without that race the highest count is 47. No row passes 50.
+
 What the table shows:
 
 1. **Every tool answers its worst-case input, in at most 2 requests.** Request 1 of the largest cases ends with the budget error after 45 requests; request 2 continues from the cached windows.
@@ -141,9 +144,6 @@ What the table shows:
 4. **A day without band data is checked again on every call.** Over a year the repeated "band worn" check costs `5 + 13 × pages` requests, where `pages` is the pages of one 31-day list of the band's steps: 18 with one page, 31 with two (the table has 29 to 31). With three pages it is 44, and with four it is 57: over the budget on every call. Three and four pages are not measured.
 5. **A JSON-RPC batch shares one budget.** A call that does not fit answers the budget error, and no request is sent for it. Its hint names a request of its own when the calls before it took units (the four calls of the last row). The same POST sent again succeeds only when the parts of its calls that are never cached fit one budget together. The POST with the worst-case input of each tool never does: send such calls in requests of their own.
 6. **Retries count.** With 503 on every request the call ends after 4 attempts. With three 503 answers before each answer the call ends at 45 requests with `upstream_unavailable`, after 33 waits (about a minute).
-
-## Settings
-
 7. **A write is one Google Health request, and at most 5.** `nutrition_log_add` and `nutrition_log_delete` send one request. Their worst case is 5 Google Health requests and 2 token requests (7 external fetches): the token is renewed first, Google rejects the new one (1 request), and Google then answers 429 to the 4 attempts. For an add, a 5xx answer or a network error ends the call at 1 request: see [A create is never sent twice](#a-create-is-never-sent-twice). In the two write rows that succeed, the request sent once more is one more entry for an add (1 request), and `no_data` with no request for a delete (the entry is gone).
 8. **One POST with 100 `nutrition_log_add` calls creates 45 entries.** The calls take turns in the order of the POST. Each of the first 45 creates its entry and answers its `entry_id`. Each of the other 55 answers `invalid_input`, `this MCP request already sent all the Google Health requests one request may send: the entry was not sent`, with the hint `send this call in a request of its own`, and nothing is sent for it. So no entry is sent without being reported: the test compares the entries the fake API holds with the ids the calls answered. The row never succeeds, because it sends the same 100 calls again, and each POST creates 45 more entries. A client sends again only the calls that answered this error: the test then needs 3 POSTs for the 100 entries (45, 45 and 10), and each entry exists once.
 
@@ -265,6 +265,9 @@ Where the pages disagree or say nothing, the server takes the reading that canno
 12. **An entry cannot be changed.** The guide says that a log of a food without a food ID cannot be updated: delete it and create a new one. So there is no edit tool.
 
 Also not proven, because no real call was made: that Google accepts each field as sent; how a list reports an entry that was written through the API (its platform, the form of its name); and that the `nutrition.writeonly` scope alone allows the delete.
+
+## Settings
+
 | Variable | Kind | Meaning |
 |---|---|---|
 | `HCM_TZ` | var in `wrangler.jsonc` | The IANA zone that defines a "day": today, the target in force, a note's creation day, the day a night ends. Default `America/Sao_Paulo`. `Local`, a UTC offset or an unknown name is rejected. |
@@ -325,13 +328,15 @@ npm run typecheck
 
 The tests run in workerd through `@cloudflare/vitest-plugin`. They mock every Google call (`fetch` in the isolate) and use synthetic values from `vitest.config.ts`. Nothing calls Google or Cloudflare.
 
-- `test/health-e2e.test.ts`: the OAuth sign-in through the Worker, then `tools/list` (18 tools), the prompts, `coach://guardrails`, one call of each coach tool, and one error of each kind (`no_data`, `invalid_input`, `auth_expired`, `scope_missing`, `upstream_unavailable`).
+- `test/health-e2e.test.ts`: the OAuth sign-in through the Worker, then `tools/list` (20 tools), the prompts, `coach://guardrails`, one call of each coach tool, and one error of each kind (`no_data`, `invalid_input`, `auth_expired`, `scope_missing`, `upstream_unavailable`).
+- `test/foodlog-e2e.test.ts`: the same sign-in, then `nutrition_log_add`, `nutrition_day` of that day, `nutrition_log_delete`, a second delete of the same id (`no_data`), and one error of each kind that a write can give.
+- `test/tools-foodlog.test.ts` (the input and time rules of the two write tools, and each tool through `/mcp` of the object) and `test/googlehealth-write.test.ts` (the allowlist of the client, the request bodies, the retry rules and the `Operation` cases).
 - `test/subrequests.test.ts`: the table of [Measured subrequests](#measured-subrequests).
 - `test/coach-e2e.test.ts` and `test/memory-e2e.test.ts`: the detailed cases of the coach tools and of the memory tools over `/mcp`.
 
 ### Parity with the Go server
 
-`test/parity.test.ts` compares the 17 tools that the Go server lists with `test/fixtures/go-tools-list.json`, the `tools/list` result of the Go server. `test/prompts.test.ts` compares the prompts and the resource with `test/fixtures/go-prompts.json`, the Go server's answers to `prompts/list`, each `prompts/get`, `resources/list` and `resources/read`. Generate the fixtures again after a tool definition, a prompt or the guardrails change in Go:
+`test/parity.test.ts` compares the 17 tools that the Go server lists with `test/fixtures/go-tools-list.json`, the `tools/list` result of the Go server. The Worker lists 3 tools more. The test pins them in a list of tools the Go server does not have (`google_account_status`, `nutrition_log_add`, `nutrition_log_delete`), so a tool that is in neither list fails the test. `test/prompts.test.ts` compares the prompts and the resource with `test/fixtures/go-prompts.json`, the Go server's answers to `prompts/list`, each `prompts/get`, `resources/list` and `resources/read`. Generate the fixtures again after a tool definition, a prompt or the guardrails change in Go:
 
 ```bash
 (cd .. && make build) && node scripts/go-tools-list.mjs && node scripts/go-prompts.mjs
@@ -410,6 +415,12 @@ Decoding of Google Health records:
 - **A record longer than 1 MiB makes its whole page unreadable** (`upstream_unavailable`). The Go server has only its byte limits per response and per call.
 - **A page field that the client does not read may nest at most 512 levels.** It is checked as JSON without being parsed, and a deeper one makes the page unreadable. Go's decoder allows deeper nesting.
 
+Writes to Google Health (the Go server has none):
+
+- **Two tools write the food log.** `nutrition_log_add` and `nutrition_log_delete` exist only here; the Go server is read-only on Google Health. They are the only tools with `openWorldHint: true`. See [Food log writes](#food-log-writes).
+- **The Google Health client is not read-only.** Next to the reads of the Go client, it sends the create of one nutrition-log data point and the delete of nutrition-log data points by name, and no other write.
+- **The store has a table that the Go store does not have:** `nutrition_entries` (migration 5), the entries this server created.
+
 Logs:
 
 - **Log lines are `console.*(message, {fields})`** with the Go messages and field names. `wait_ms` is a number (Go logs a duration as `wait`). A network error logs only the type names of its cause. `from` and `to` of an "unreadable …" line are the range of the Worker's own request, which can be wider than the Go server's run.
@@ -419,7 +430,7 @@ Logs:
 - **Worker CPU: 10 ms per request.** The Worker isolate does OAuth and the allowlist check, then forwards the request. Its work does not grow with the size of the arguments or of the result, and it makes no request to Google.
 - **Subrequests: 50 per invocation.** See [The request budget](#the-request-budget) and [Measured subrequests](#measured-subrequests): the highest measured count of one MCP HTTP request is 49.
 - **Google Health rate limit: 300 requests per minute per user.** One MCP HTTP request sends at most 45, one after the other; requests at the same time send at most 45 each. Over the limit Google answers 429, which is retried.
-- **Rows written: 100,000 per day** for SQLite in Durable Objects. A note also writes rows to its full-text index. The `daily_metrics` cache writes up to 15 values per day when the day settles. Each value counts 3 rows written: its row, its primary key entry and its entry in the index `(metric, date)`. A cold year is about 16,500 rows written, once.
+- **Rows written: 100,000 per day** for SQLite in Durable Objects. A note also writes rows to its full-text index. The `daily_metrics` cache writes up to 15 values per day when the day settles. Each value counts 3 rows written: its row, its primary key entry and its entry in the index `(metric, date)`. A cold year is about 16,500 rows written, once. An entry that `nutrition_log_add` creates counts 3 rows written too (its row, its primary key entry and its entry in the index of the day), and the check of a delete reads 1 row.
 - **Rows read: 5 million per day** for SQLite in Durable Objects. Each write to the coach memory counts its table first (`SELECT COUNT(*)`), as the Go store does, to enforce the caps. A count scans the table: `note_add` can read up to 50,000 rows, `labs_record` up to 20,000, a new item in `health_item_upsert` up to 500 and a new key in `preference_set` up to 200. If a scanned row counts as a row read (the pricing page does not say how a count is billed), about 100 `note_add` calls in a day use the whole quota once the notes table is full. A new store is far from that. The coach tools read the `daily_metrics` cache one metric at a time, through the index `(metric, date)`: one metric over N cached days reads N + 1 rows, not the rows of all 15 metrics of those days. The largest read is the recovery of 366 days, 10 metrics: 3,670 rows. The row counts of the cache are the ones the local runtime reports (`rowsRead`, `rowsWritten`); a deploy has not confirmed them.
 - **A statement binds at most 100 parameters and is at most 100 KB long** (SQLite in Durable Objects). The store binds at most 13 parameters, and writes a lab batch one row per statement.
 - **Bundle:** `wrangler deploy --dry-run` reports 1,210 KiB, 268 KiB with gzip.
@@ -453,4 +464,9 @@ How to measure after a deploy:
 - The tool calls of one MCP HTTP request share the 45 requests. A call that finds units taken by the calls before it can answer the budget error for a range that fits a request of its own. Its hint says so: `use a shorter date range, or send this call in a request of its own`.
 - Two MCP HTTP requests at the same time are not ordered. Each has its own budget, so together they can send more than 45 Google Health requests, fetch the same window twice, and need twice the memory of one request. The estimate of 64 MiB is for one request; nothing stops two of the largest calls at the same time.
 - `workout_review` by `date` of a day whose session lists and heart-rate lists need more than 45 requests cannot succeed: nothing of them is cached. `exercise_id` reviews one session of such a day with one heart-rate list.
+- The two food log tools rest on Google's documentation only: no real call has tested their request shapes. See [What the documentation does not settle](#what-the-documentation-does-not-settle).
+- `nutrition_log_delete` needs the `entry_id` that `nutrition_log_add` returned. `nutrition_day` does not list the ids of its items (its output is the Go server's), so an entry whose id the client did not keep cannot be deleted through this server.
+- An add whose outcome is unknown, or whose row could not be stored, can leave an entry in Google Health that this server does not own. The server cannot delete it.
+- Two MCP HTTP requests at the same time are not ordered, so the same food sent in two requests is logged twice. Inside one request the adds take turns, and each call adds its own entry: the server does not look for an equal entry.
+- An entry cannot be changed: delete it and add it again. An entry can be dated at most 30 days back, and has one of four meal types.
 - A year in which every 31-day window has days without band data, in an account whose 31-day list of the band's steps has four pages or more, makes `metric_series` for `azm`, `total_calories`, `kcal_in` and `protein_g` over that year answer the budget error on every call. Use a shorter range.

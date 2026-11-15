@@ -150,7 +150,7 @@ What the table shows:
 
 ## Food log writes
 
-Two tools write to Google Health. `nutrition_log_add` creates one entry of the food log, and `nutrition_log_delete` deletes one entry that this server created. The Go server has no write tool (`docs/CAPABILITY.md` R2: read-only on Google Health), so these two are the Worker's own. They follow the contract of every tool: `defineTool` and `register`, the stable error codes, one `tool_call` log line.
+Two tools write to Google Health. `nutrition_log_add` creates one entry of the food log, and `nutrition_log_delete` deletes one entry that this server created. The Go server has no write tool (`docs/CAPABILITY.md` R2: the Go server makes no write calls), so these two are the Worker's own. They follow the contract of every tool: `defineTool` and `register`, the stable error codes, one `tool_call` log line.
 
 **The request shapes come from Google's documentation. No call to the real API has tested them.** [What the documentation does not settle](#what-the-documentation-does-not-settle) lists each open point and what the server does about it.
 
@@ -313,16 +313,18 @@ The object holds one link. A sign-in replaces it. When the operator changes `ALL
 
 ## Setup
 
-The Google Health API scopes and `nutrition.writeonly` must be enabled on the Google Cloud project.
+Deploy your own single-user instance from the `workers` directory. Sign in to Cloudflare first (`npx wrangler login`), in the account where this Worker should live. You need your own Google Cloud project and OAuth client (type **Web application**), your own KV namespace, and the one Google account that may sign in. This repository does not include a Cloudflare account id, a project id, a real KV namespace id, or an account address.
+
+The Google Health API scopes and `nutrition.writeonly` must be enabled on your Google Cloud project.
 
 1. In Google Cloud console, create an OAuth client of type **Web application**.
    - Authorized redirect URIs: `https://<worker host>/callback` and, for local runs, `http://localhost:8788/callback`.
    - While the consent screen is in **Testing** status, add your account as a test user. Google expires refresh tokens of Testing apps after 7 days.
-2. Create the KV namespace and put its `id` in `wrangler.jsonc` under `kv_namespaces` (`OAUTH_KV`):
+2. Create your own KV namespace and set its `id` in `wrangler.jsonc` under `kv_namespaces` (`OAUTH_KV`). The committed `id` (`00000000000000000000000000000000`) is a placeholder so tests and `wrangler types` have a value; replace it with the id this command prints:
    ```bash
    npx wrangler kv namespace create OAUTH_KV
    ```
-3. Set the secrets. `ALLOWED_GOOGLE_EMAIL` is a secret too, so the address stays out of git:
+3. Set the three secrets. `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are that OAuth client. `ALLOWED_GOOGLE_EMAIL` is the one Google account allowed to sign in, and it is a secret so the address stays out of git:
    ```bash
    npx wrangler secret put GOOGLE_CLIENT_ID
    npx wrangler secret put GOOGLE_CLIENT_SECRET

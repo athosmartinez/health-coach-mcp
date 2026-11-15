@@ -3,7 +3,7 @@
 > Status: discovery · 2026-10-13 · source: product-lens interview
 
 ## 1. Who it's for
-Just me (Athos). One user, one Google Health account, one Fitbit Air (in use for 1 week).
+The owner. One user, one Google Health account, one Fitbit Air (in use for 1 week).
 Starting a gym + diet routine.
 
 ## 2. The pain

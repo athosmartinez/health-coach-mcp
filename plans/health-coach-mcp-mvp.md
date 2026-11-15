@@ -147,7 +147,7 @@ lab upsert replaces the value; FTS finds a note **inserted after** the migration
 ## Step 3 — Coach memory tools
 **Branch:** `feat/memory-tools` · **Depends on:** 1, 2
 
-**Context brief.** CAPABILITY §4.2: 11 tools over the store. Q3: targets set by Athos — the
+**Context brief.** CAPABILITY §4.2: 11 tools over the store. Q3: targets set by the user — the
 `targets_set` `Description` says it should only be called after explicit confirmation from the user.
 `labs_record` takes `source` (default `chat`) and upserts. Schemas via `internal/tools/schema.go` (enums
 for `kind`, `status`, `source`). Wire `store.Open` into `main` and `Deps.Store`.
@@ -170,10 +170,10 @@ force on `Now()`; lab outside the reference flagged; invalid enum → SDK error 
 ## Step 4a — OAuth: login, token, refresh
 **Branch:** `feat/googlehealth-auth` · **Depends on:** 1
 
-**Context brief.** Project `health-coach-mcp-511601`, OAuth **Desktop app** client, 9 read-only scopes
+**Context brief.** Project `<your-gcp-project-id>`, OAuth **Desktop app** client, 9 read-only scopes
 (`https://www.googleapis.com/auth/googlehealth.{activity_and_fitness,health_metrics_and_measurements,sleep,nutrition,profile,settings,location,ecg,irn}.readonly`).
 Q2: `<ConfigDir>/client_secret.json` and `<ConfigDir>/credentials.json` (0600), independent from ghealth.
-Reference to **adapt** (not importable, module `ghealth`): `~/Documents/github/google-health-cli/pkg/auth/auth.go`
+Reference to **adapt** (not importable, module `ghealth`): `pkg/auth/auth.go` in [google-health-cli](https://github.com/Google-Health-API/google-health-cli)
 (Apache-2.0 → keep the header in the adapted files and create `NOTICE`). The app is in "Testing": the refresh
 token expires in ~7 days.
 
@@ -199,7 +199,7 @@ refresh_token keeps the old one; file written with 0600; mtime reload. Manual: `
 **Branch:** `feat/googlehealth-client` · **Depends on:** 4a
 
 **Context brief.** Google Health API v4, read-only. Reference for paths, data-type IDs and request formats:
-`~/Documents/github/google-health-cli/pkg/client/client.go` and `pkg/types/registry.go` (40 types; e.g.
+`pkg/client/client.go` and `pkg/types/registry.go` in [google-health-cli](https://github.com/Google-Health-API/google-health-cli) (40 types; e.g.
 `sleep`, `heart-rate-variability`, `daily-resting-heart-rate`, `steps`, `active-zone-minutes`, `exercise`,
 `nutrition-log`, `total-calories`, `weight`, `body-fat`; operations `list`, `daily-rollup`, `reconcile`).
 To see a real request without executing it: `ghealth data <type> list --dry-run`.

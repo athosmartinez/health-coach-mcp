@@ -6,10 +6,15 @@ import { MCP_PATH } from "./mcp";
 import { publicPage } from "./pages";
 import { CoachStore, coachStore } from "./store";
 
-export { CoachStore, MCP_PATH };
+export { CoachStore };
 
-export const TOKEN_PATH = "/token";
-export const REGISTER_PATH = "/register";
+// Module-local on purpose. workerd rejects a named entry export that is not a
+// function, class, or ExportedHandler, and exporting these strings stops
+// `wrangler dev`. So the entry exports only the CoachStore class and functions:
+// forwardedRequest and providerOptions stay exported because tests call them.
+// MCP_PATH lives in ./mcp, where the other modules import it.
+const TOKEN_PATH = "/token";
+const REGISTER_PATH = "/register";
 
 /**
  * Called by the provider only with a valid access token for this resource.

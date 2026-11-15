@@ -9,9 +9,12 @@ import { CoachStore } from "./store";
 
 export { CoachStore };
 
-export const MCP_PATH = "/mcp";
-export const TOKEN_PATH = "/token";
-export const REGISTER_PATH = "/register";
+// Module-local on purpose. workerd rejects a named entry export that is not a
+// function, class, or ExportedHandler, and exporting these strings stops
+// `wrangler dev`. providerOptions stays exported: it is a function, and tests call it.
+const MCP_PATH = "/mcp";
+const TOKEN_PATH = "/token";
+const REGISTER_PATH = "/register";
 
 const mcpHandler = createMcpHandler(createServer, { route: MCP_PATH });
 

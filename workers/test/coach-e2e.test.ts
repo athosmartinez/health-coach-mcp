@@ -6,45 +6,39 @@
 // The clock is fixed at 2026-10-16 10:00 in São Paulo. All values are synthetic.
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { addDays } from "../src/coach/date";
 import type { WireError } from "../src/coach/errors";
-import { GOOGLE_HEALTH_SCOPES, GOOGLE_TOKEN_URL, OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../src/google";
+import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../src/google";
 import { HEALTH_REQUESTS, MAX_SUBREQUESTS, TOKEN_REQUESTS } from "../src/googlehealth/budget";
-import { CoachStore, type GoogleLink } from "../src/store";
+import { CoachStore } from "../src/store";
 import { NUTRITION_NOTICE } from "../src/tools/nutrition";
 import { SERIES_NOTICE } from "../src/tools/series";
 import { WEEKLY_NOTICE } from "../src/tools/weekly";
 import {
-  FakeGoogle,
-  NOW,
-  at,
-  azmRollup,
-  bodyFatRec,
-  exerciseRec,
-  foodRec,
-  hrvNight,
-  kcalRollup,
-  restingRec,
-  samplesEvery2s,
-  sleepRec,
-  stepRec,
-  stepsRollup,
-  weightRec,
-} from "./healthdata-helpers";
-import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, type JsonRpc, OWNER_EMAIL, OWNER_SUB, rpc, signInAsOwner } from "./helpers";
+  FOOD_NAME,
+  RENEWED_TOKEN,
+  RUN_ID,
+  SESSION_NAME,
+  STORED_TOKEN,
+  TODAY,
+  type ToolCall,
+  batch,
+  day,
+  daysOfData,
+  everything,
+  foodDays,
+  googleMock,
+  linkedStore,
+  meals,
+  sessions,
+  untilOk,
+} from "./e2e-helpers";
+import { at, exerciseRec, foodRec } from "./healthdata-helpers";
+import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, rpc, signInAsOwner } from "./helpers";
 import { COACH_TOOL_NAMES, type McpTarget, SCHEMA_HINT, freshStore, mcpRequest, objectTool } from "./memory-helpers";
 
-const TODAY = "2026-10-16";
-const day = (offset: number) => addDays(TODAY, offset) as string;
-
-const STORED_TOKEN = "at-stored-51c2";
-const RENEWED_TOKEN = "at-renewed-8e07";
-
 /** Text that must never reach a log line or an error: names, tokens and marked values. */
-const SESSION_NAME = "JIU JITSU";
-const FOOD_NAME = "Synthetic food";
 const DECISION_TEXT = "Synthetic decision 7733: eat more at lunch";
 const SECRETS = [
   STORED_TOKEN,
@@ -59,175 +53,9 @@ const SECRETS = [
   "Synthetic Scale",
 ];
 
-const LEVELS = ["log", "info", "warn", "error", "debug"] as const;
-const spies = new Map<string, MockInstance>();
-let google: FakeGoogle;
-/** Every external fetch of the test so far: "token", or the Health data type. */
-let external: string[];
-/** The Authorization header of every Health API request. */
-let auths: string[];
-let tokenReply: () => Response | Promise<Response>;
-/** When set, answers a Health API request instead of the fake API. */
-let healthReply: ((request: Request) => Response | undefined) | undefined;
-
-const newToken = (accessToken: string) => Response.json({ access_token: accessToken, expires_in: 3600, token_type: "Bearer" });
-
-beforeEach(() => {
-  // Only the clock is fixed: timers stay real.
-  vi.useFakeTimers({ toFake: ["Date"], now: NOW });
-  for (const level of LEVELS) spies.set(level, vi.spyOn(console, level).mockImplementation(() => undefined));
-  google = new FakeGoogle();
-  external = [];
-  auths = [];
-  tokenReply = () => newToken(RENEWED_TOKEN);
-  healthReply = undefined;
-  installFetch();
-});
-
-/** Google behind `fetch`: the token endpoint and the fake Health API. Any other URL fails the test. */
-function installFetch(): void {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    const request = new Request(input, init);
-    if (request.url === GOOGLE_TOKEN_URL && request.method === "POST") {
-      external.push("token");
-      return tokenReply();
-    }
-    if (!google.serves(request)) throw new Error(`unexpected fetch in test: ${request.method} ${request.url}`);
-    const [, , , , , dataType = "?", operation = ""] = new URL(request.url).pathname.split("/");
-    external.push(operation.endsWith(":dailyRollUp") ? `rollup ${dataType}` : dataType);
-    auths.push(request.headers.get("authorization") ?? "");
-    return healthReply?.(request) ?? google.respond(request);
-  });
-}
-
-afterEach(() => {
-  vi.useRealTimers();
-  vi.restoreAllMocks();
-});
-
-const logged = () => JSON.stringify(LEVELS.flatMap((level) => spies.get(level)?.mock.calls ?? []));
-const logLines = (level: (typeof LEVELS)[number]) => spies.get(level)?.mock.calls ?? [];
-
-/** The external fetches since the last take: a count per kind, and the total. */
-function takeExternal(): Record<string, number> {
-  const counts: Record<string, number> = { total: external.length };
-  for (const kind of external) counts[kind] = (counts[kind] ?? 0) + 1;
-  external = [];
-  return counts;
-}
-
-function link(overrides: Partial<GoogleLink> = {}): GoogleLink {
-  return {
-    sub: OWNER_SUB,
-    email: OWNER_EMAIL,
-    refreshToken: GOOGLE_REFRESH_TOKEN,
-    accessToken: STORED_TOKEN,
-    accessTokenExpiresAt: Date.now() + 3_600_000,
-    scopes: ["openid", "email", ...GOOGLE_HEALTH_SCOPES].join(" "),
-    ...overrides,
-  };
-}
-
-/** A new store with a linked Google account. */
-async function linkedStore(overrides: Partial<GoogleLink> = {}): Promise<DurableObjectStub<CoachStore>> {
-  const stub = freshStore();
-  await stub.linkGoogleAccount(link(overrides));
-  return stub;
-}
-
-type Outcome = { ok: true; output: Record<string, any> } | { ok: false; error: WireError };
-
-/** One HTTP request with several JSON-RPC messages; the answers by request id. */
-async function batch(target: McpTarget, calls: [string, Record<string, unknown>][]): Promise<Outcome[]> {
-  const body = calls.map(([name, args], i) => ({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: { name, arguments: args } }));
-  const response = await target.fetch(mcpRequest(body));
-  const text = await response.text();
-  expect(response.status, text).toBe(200);
-  const replies = new Map<number, JsonRpc>();
-  const lines = response.headers.get("content-type")?.includes("text/event-stream")
-    ? text
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice("data:".length).trim())
-        .filter((line) => line !== "")
-    : [text];
-  for (const line of lines) {
-    const parsed = JSON.parse(line) as JsonRpc | JsonRpc[];
-    for (const reply of Array.isArray(parsed) ? parsed : [parsed]) replies.set(Number(reply.id), reply);
-  }
-  return calls.map((_call, i) => {
-    const reply = replies.get(i + 1);
-    expect(reply?.error, JSON.stringify(reply)).toBeUndefined();
-    const result = reply?.result as { isError?: boolean; content?: { text: string }[]; structuredContent?: Record<string, any> };
-    if (result.isError) return { ok: false, error: JSON.parse(result.content?.[0]?.text ?? "") as WireError };
-    return { ok: true, output: result.structuredContent ?? {} };
-  });
-}
-
-/**
- * Synthetic data for today and the `back` days before it: each day a night of
- * 480 minutes in bed with 97 HRV samples, a resting heart rate, and the daily
- * totals. Every fifth day has no zone-minutes row but step records of the
- * band (`bandStepRecords` of them). A weigh-in with body fat every third day.
- * A day that `offWrist` picks has no band data: no zone-minutes row and no
- * step record.
- */
-function daysOfData(back: number, offWrist: (i: number) => boolean = () => false, bandStepRecords = 1): void {
-  for (let i = back; i >= 0; i--) {
-    const [end, start] = [day(-i), day(-i - 1)];
-    google.add("sleep", sleepRec(at(start, 23, 0), at(end, 7, 0), { deep: 60 }));
-    google.add("heart-rate-variability", ...hrvNight(at(start, 23, 0), at(end, 7, 0), 40 + (i % 5)));
-    google.add("daily-resting-heart-rate", restingRec(end, 55 + (i % 3), "WITH_SLEEP", "FITBIT"));
-    google.addRollup("steps", stepsRollup(end, 8000 + 10 * (i % 100)));
-    google.addRollup("total-calories", kcalRollup(end, 2400 + (i % 100)));
-    // A day off the wrist has neither a zone-minutes row nor step records of the band.
-    if (!offWrist(i)) {
-      if (i % 5 === 3) for (let n = 0; n < bandStepRecords; n++) google.add("steps", stepRec(end, "FITBIT"));
-      else google.addRollup("active-zone-minutes", azmRollup(end, 20, 5, 0));
-    }
-    if (i % 3 === 0) {
-      google.add("weight", weightRec(at(end, 7, 30), 80_000 + 100 * (i % 4), "FITBIT"));
-      google.add("body-fat", bodyFatRec(at(end, 7, 30), 20 + (i % 2)));
-    }
-  }
-}
-
-/** One month, 2026-09-16 to 2026-10-16. */
-const month = () => daysOfData(30);
-
-const RUN_ID = "users/me/dataTypes/exercise/dataPoints/syn-run";
-
-/** A jiu-jitsu class and a run on 2026-10-14, a walk on the 15th and a run on the 12th. */
-function sessions(): void {
-  const add = (date: string, hour: number, minutes: number, options: Parameters<typeof exerciseRec>[2], bpm: number) => {
-    const [start, end] = [at(date, hour, 0), new Date(at(date, hour, 0).getTime() + minutes * 60_000)];
-    google.add("exercise", exerciseRec(start, end, options));
-    google.add("heart-rate", ...samplesEvery2s(start, end, bpm));
-  };
-  add(day(-2), 7, 60, { type: "JIU_JITSU", avgHR: 81, kcal: 400, azm: 10, zones: [40, 10, 0, 0] }, 95);
-  add(day(-2), 18, 30, { type: "RUNNING", avgHR: 150, kcal: 350, azm: 50, zones: [2, 8, 15, 5], name: RUN_ID }, 164);
-  add(day(-1), 12, 30, { type: "WALKING", avgHR: 100, kcal: 120, azm: 5, zones: [25, 5, 0, 0] }, 104);
-  add(day(-4), 7, 40, { type: "RUNNING", avgHR: 148, kcal: 420, azm: 60, zones: [2, 8, 20, 10] }, 160);
-}
-
-/** Four meals on 2026-10-14 (kcal 2200, protein 130) and a snack today. */
-function meals(): void {
-  const closed = day(-2);
-  google.add(
-    "nutrition-log",
-    foodRec(at(closed, 8, 0), { meal: "BREAKFAST", kcal: 500, carb: 60, fat: 15, list: { PROTEIN: 30 } }),
-    foodRec(at(closed, 12, 0), { meal: "LUNCH", kcal: 800, carb: 90, fat: 25, list: { PROTEIN: 50, DIETARY_FIBER: 10 } }),
-    foodRec(at(closed, 16, 0), { meal: "SNACK", kcal: 200, carb: 20, fat: 8, list: { PROTEIN: 10 } }),
-    foodRec(at(closed, 20, 0), { meal: "DINNER", kcal: 700, carb: 70, fat: 20, list: { PROTEIN: 40 } }),
-    foodRec(at(TODAY, 7, 0), { meal: "SNACK", kcal: 200, list: { PROTEIN: 10 } }),
-  );
-}
-
-function everything(): void {
-  month();
-  sessions();
-  meals();
-}
+// The clock fixed at 2026-10-16, a spy on every console level, and Google
+// behind `fetch` with every external fetch counted.
+const g = googleMock();
 
 async function ok(target: McpTarget, name: string, args: Record<string, unknown> = {}): Promise<Record<string, any>> {
   const outcome = await objectTool(target, name, args);
@@ -243,7 +71,7 @@ async function fails(target: McpTarget, name: string, args: Record<string, unkno
 
 describe("the coach tools over /mcp, inside the object", () => {
   it("serves morning_briefing", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     const out = await ok(stub, "morning_briefing");
     expect(out.data.sleep).toMatchObject({
@@ -273,16 +101,16 @@ describe("the coach tools over /mcp, inside the object", () => {
     expect(out.quality_flags).toEqual([]);
     expect(out.generated_at).toBe("2026-10-16T13:00:00Z");
     // The stored access token is sent, and nothing is asked of the token endpoint.
-    expect(new Set(auths)).toEqual(new Set([`Bearer ${STORED_TOKEN}`]));
-    expect(external).not.toContain("token");
+    expect(new Set(g.auths)).toEqual(new Set([`Bearer ${STORED_TOKEN}`]));
+    expect(g.external).not.toContain("token");
     // One log line: the tool name, the duration and the outcome.
-    expect(logLines("log")).toEqual([["tool_call", { tool: "morning_briefing", duration_ms: expect.any(Number), is_error: false }]]);
-    expect(logLines("warn")).toEqual([]);
-    expect(logLines("error")).toEqual([]);
+    expect(g.logLines("log")).toEqual([["tool_call", { tool: "morning_briefing", duration_ms: expect.any(Number), is_error: false }]]);
+    expect(g.logLines("warn")).toEqual([]);
+    expect(g.logLines("error")).toEqual([]);
   });
 
   it("serves workout_review, with the target of the store", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     await ok(stub, "targets_set", { effective_from: "2026-10-01", weekly_sessions: 4 });
     const out = await ok(stub, "workout_review", { date: day(-2) });
@@ -351,7 +179,7 @@ describe("the coach tools over /mcp, inside the object", () => {
   });
 
   it("serves nutrition_day, with the target of the store", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     await ok(stub, "targets_set", { effective_from: "2026-10-01", kcal: 2000, protein_g: 150 });
     const out = await ok(stub, "nutrition_day", { date: day(-2) });
@@ -406,7 +234,7 @@ describe("the coach tools over /mcp, inside the object", () => {
   });
 
   it("serves weekly_report, with the targets and the decision notes of the store", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     await ok(stub, "targets_set", { effective_from: "2026-10-01", kcal: 2000, protein_g: 150, weekly_sessions: 4 });
     const decision = await ok(stub, "note_add", { kind: "decision", text: DECISION_TEXT, related_date: day(-2) });
@@ -443,8 +271,8 @@ describe("the coach tools over /mcp, inside the object", () => {
     expect(out.coverage).toEqual({ n_days: 5, confidence: "low" });
     expect(out.sources).toEqual(["Synthetic Band", "Synthetic Scale"]);
     expect(out.quality_flags).toEqual(["partial_day"]);
-    expect(logLines("log").at(-1)).toEqual(["tool_call", { tool: "weekly_report", duration_ms: expect.any(Number), is_error: false }]);
-    expect(logLines("warn")).toEqual([]);
+    expect(g.logLines("log").at(-1)).toEqual(["tool_call", { tool: "weekly_report", duration_ms: expect.any(Number), is_error: false }]);
+    expect(g.logLines("warn")).toEqual([]);
 
     // A closed week, by any of its days.
     const closed = await ok(stub, "weekly_report", { week_end: day(-7) });
@@ -454,7 +282,7 @@ describe("the coach tools over /mcp, inside the object", () => {
   });
 
   it("serves metric_series", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     const steps = await ok(stub, "metric_series", { metric: "steps", from: day(-3), to: TODAY });
     expect(steps.data).toEqual({
@@ -522,8 +350,8 @@ describe("the coach tools over /mcp, inside the object", () => {
 
   it("serves a coach tool through the Worker, which forwards the request to the object", async () => {
     const { access_token: accessToken } = await signInAsOwner();
-    installFetch();
-    everything();
+    g.install();
+    everything(g.google);
     const served = vi.spyOn(CoachStore.prototype, "fetch");
     const reply = await rpc(accessToken, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "nutrition_day", arguments: { date: day(-2) } } });
     expect(reply.error).toBeUndefined();
@@ -532,12 +360,12 @@ describe("the coach tools over /mcp, inside the object", () => {
     expect(result.structuredContent?.data.totals.kcal).toEqual({ value: 2200, items_reporting: 4, complete: true });
     // The Google token of the sign-in is the one sent to the Health API, and the
     // Worker itself made no request to Google.
-    expect(new Set(auths)).toEqual(new Set([`Bearer ${GOOGLE_ACCESS_TOKEN}`]));
+    expect(new Set(g.auths)).toEqual(new Set([`Bearer ${GOOGLE_ACCESS_TOKEN}`]));
     expect(served).toHaveBeenCalledTimes(1);
   });
 });
 
-const CALLS: [string, Record<string, unknown>][] = [
+const CALLS: ToolCall[] = [
   ["morning_briefing", {}],
   ["workout_review", { date: day(-2) }],
   ["nutrition_day", { date: day(-2) }],
@@ -554,59 +382,59 @@ describe("a coach tool without a usable Google link", () => {
   function expectNoLeak(error: WireError): void {
     for (const secret of [...SECRETS, "7711", "invalid_client", "invalid_grant"]) {
       expect(JSON.stringify(error)).not.toContain(secret);
-      expect(logged()).not.toContain(secret);
+      expect(g.logged()).not.toContain(secret);
     }
   }
 
   it.each(CALLS)("%s answers auth_expired with the reconnect hint when no account is linked", async (name, args) => {
-    everything();
+    everything(g.google);
     const error = await fails(freshStore(), name, args);
     expect(error).toEqual({ code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT });
     // Nothing is asked of Google.
-    expect(external).toEqual([]);
-    expect(logLines("log")).toEqual([["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: true, code: "auth_expired" }]]);
+    expect(g.external).toEqual([]);
+    expect(g.logLines("log")).toEqual([["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: true, code: "auth_expired" }]]);
   });
 
   it.each(CALLS)("%s answers auth_expired when Google rejects the stored token and the renewed one", async (name, args) => {
-    everything();
-    healthReply = googleError(401, "UNAUTHENTICATED");
+    everything(g.google);
+    g.healthReply = googleError(401, "UNAUTHENTICATED");
     const error = await fails(await linkedStore(), name, args);
     expect(error).toEqual({ code: "auth_expired", message: "Google Health rejected the sign-in", hint: RECONNECT_HINT });
     // One renewal, and the request sent once more with the new token.
-    expect(auths).toEqual([`Bearer ${STORED_TOKEN}`, `Bearer ${RENEWED_TOKEN}`]);
-    expect(takeExternal()).toMatchObject({ total: 3, token: 1 });
+    expect(g.auths).toEqual([`Bearer ${STORED_TOKEN}`, `Bearer ${RENEWED_TOKEN}`]);
+    expect(g.takeExternal()).toMatchObject({ total: 3, token: 1 });
     expectNoLeak(error);
   });
 
   it.each(CALLS)("%s answers auth_expired when Google revoked the link", async (name, args) => {
-    everything();
-    tokenReply = () => Response.json({ error: "invalid_grant", error_description: `revoked ${GOOGLE_REFRESH_TOKEN}` }, { status: 400 });
+    everything(g.google);
+    g.tokenReply = () => Response.json({ error: "invalid_grant", error_description: `revoked ${GOOGLE_REFRESH_TOKEN}` }, { status: 400 });
     const stub = await linkedStore({ accessTokenExpiresAt: 0 });
     const error = await fails(stub, name, args);
     expect(error).toEqual({ code: "auth_expired", message: "the Google sign-in expired or was revoked", hint: RECONNECT_HINT });
-    expect(external).toEqual(["token"]);
+    expect(g.external).toEqual(["token"]);
     expectNoLeak(error);
     // The link is gone: the status tool says so.
     expect((await ok(stub, "google_account_status")).linked).toBe(false);
   });
 
   it.each(CALLS)("%s answers auth_expired when Google refuses the token renewal", async (name, args) => {
-    everything();
-    tokenReply = () => Response.json({ error: "invalid_client", error_description: "synthetic body 7711" }, { status: 401 });
+    everything(g.google);
+    g.tokenReply = () => Response.json({ error: "invalid_client", error_description: "synthetic body 7711" }, { status: 401 });
     const error = await fails(await linkedStore({ accessTokenExpiresAt: 0 }), name, args);
     expect(error).toEqual({ code: "auth_expired", message: "Google rejected the token renewal", hint: `${OAUTH_CLIENT_HINT} ${RECONNECT_HINT}` });
-    expect(external).toEqual(["token"]);
+    expect(g.external).toEqual(["token"]);
     expectNoLeak(error);
   });
 
   it.each(CALLS)("%s answers upstream_unavailable for a renewal answered without a usable token", async (name, args) => {
-    everything();
-    tokenReply = () => Response.json({ token_type: "Bearer", note: "synthetic body 7711" });
+    everything(g.google);
+    g.tokenReply = () => Response.json({ token_type: "Bearer", note: "synthetic body 7711" });
     const stub = await linkedStore({ accessTokenExpiresAt: 0 });
     const error = await fails(stub, name, args);
     // The link and the OAuth client are fine: the same call can work later.
     expect(error).toEqual({ code: "upstream_unavailable", message: "Google's token service is unavailable", hint: "try again in a few minutes" });
-    expect(external).toEqual(["token"]);
+    expect(g.external).toEqual(["token"]);
     expectNoLeak(error);
     expect(await ok(stub, "google_account_status")).toMatchObject({
       linked: true,
@@ -616,34 +444,34 @@ describe("a coach tool without a usable Google link", () => {
   });
 
   it.each(CALLS)("%s answers scope_missing when Google denies the data", async (name, args) => {
-    everything();
-    healthReply = googleError(403, "PERMISSION_DENIED");
+    everything(g.google);
+    g.healthReply = googleError(403, "PERMISSION_DENIED");
     const error = await fails(await linkedStore(), name, args);
     expect(error.code).toBe("scope_missing");
     expect(error.message).toMatch(/^Google Health denied access to [a-z-]+ data$/);
     expect(error.hint).toBe(SCOPE_HINT);
     // A denial is not retried, and it is not a reason to renew the token.
-    expect(takeExternal()).toMatchObject({ total: 1 });
+    expect(g.takeExternal()).toMatchObject({ total: 1 });
     expectNoLeak(error);
   });
 
   it.each(CALLS)("%s hides a request that Google rejects behind internal_error", async (name, args) => {
-    everything();
-    healthReply = googleError(400, "INVALID_ARGUMENT");
+    everything(g.google);
+    g.healthReply = googleError(400, "INVALID_ARGUMENT");
     const error = await fails(await linkedStore(), name, args);
     expect(error).toEqual({ code: "internal_error", message: "unexpected internal error" });
     // The logs carry the data type, the HTTP status, Google's status enum and
     // the error types: never the answer's text.
-    expect(logLines("warn")).toEqual([
+    expect(g.logLines("warn")).toEqual([
       ["google health request rejected", { data_type: expect.any(String), http_status: 400, google_status: "INVALID_ARGUMENT" }],
     ]);
-    expect(logLines("error")).toEqual([["tool_internal_error", { tool: name, error_types: "Error > StatusError" }]]);
-    expect(logLines("log")).toEqual([["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: true, code: "internal_error" }]]);
+    expect(g.logLines("error")).toEqual([["tool_internal_error", { tool: name, error_types: "Error > StatusError" }]]);
+    expect(g.logLines("log")).toEqual([["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: true, code: "internal_error" }]]);
     expectNoLeak(error);
   });
 
   it("fails every coach tool, and names the variable in the log, with a zone it cannot use", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     await runInDurableObject(stub, async (instance) => {
       Object.assign(instance, { env: { ...env, HCM_TZ: "Local" } });
@@ -651,20 +479,20 @@ describe("a coach tool without a usable Google link", () => {
         expect(await objectTool(instance, name, args)).toEqual({ ok: false, error: { code: "internal_error", message: "unexpected internal error" } });
       }
     });
-    expect(logLines("error")).toEqual(CALLS.map(() => ["config_error", { variable: "HCM_TZ" }]));
-    expect(external).toEqual([]);
+    expect(g.logLines("error")).toEqual(CALLS.map(() => ["config_error", { variable: "HCM_TZ" }]));
+    expect(g.external).toEqual([]);
   });
 });
 
 describe("the logs of the coach tools", () => {
   it("carry no health value, name, token or response body", async () => {
-    everything();
+    everything(g.google);
     // A record that cannot be read, with a marked value.
-    google.add("sleep", { dataSource: { platform: "FITBIT" }, sleep: { interval: { endTime: "2026-10-16T10:00:00Z" }, summary: { minutesAsleep: { marked: "7711" } } } });
+    g.google.add("sleep", { dataSource: { platform: "FITBIT" }, sleep: { interval: { endTime: "2026-10-16T10:00:00Z" }, summary: { minutesAsleep: { marked: "7711" } } } });
     const stub = await linkedStore();
     // A decision note of this week: weekly_report returns its text.
     await ok(stub, "note_add", { kind: "decision", text: DECISION_TEXT, related_date: day(-2) });
-    for (const level of LEVELS) spies.get(level)?.mockClear();
+    g.clearLogs();
     const outputs = new Map<string, Record<string, any>>();
     for (const [name, args] of CALLS) outputs.set(name, await ok(stub, name, args));
     expect(outputs.get("morning_briefing")?.quality_flags).toEqual(["unreadable_records"]);
@@ -672,25 +500,25 @@ describe("the logs of the coach tools", () => {
     expect(outputs.get("weekly_report")?.data.decisions_this_week).toMatchObject([{ text: DECISION_TEXT }]);
     expect(COACH_TOOL_NAMES).toEqual(CALLS.map(([name]) => name));
     // One line per call, with the tool name, the duration and the outcome.
-    expect(logLines("log")).toEqual(CALLS.map(([name]) => ["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: false }]));
+    expect(g.logLines("log")).toEqual(CALLS.map(([name]) => ["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: false }]));
     // The unreadable record: the range asked and a count, once per call that fetched it.
-    expect(logLines("warn")).toEqual([
+    expect(g.logLines("warn")).toEqual([
       ["unreadable records in a recovery fetch", { from: "2026-09-18", to: "2026-10-16", skipped: 1 }],
       ["unreadable records in a recovery fetch", { from: "2026-09-17", to: "2026-10-15", skipped: 1 }],
       ["unreadable records in a recovery fetch", { from: "2026-09-14", to: "2026-10-16", skipped: 1 }],
     ]);
-    expect(logLines("error")).toEqual([]);
+    expect(g.logLines("error")).toEqual([]);
     // No token, name or note text, and no value of a result: steps, kcal, weight, minutes, weekly means.
-    for (const secret of [...SECRETS, "7711", "8010", "2200", "80.3", "440", "8025", "55.8", "18.8"]) expect(logged()).not.toContain(secret);
+    for (const secret of [...SECRETS, "7711", "8010", "2200", "80.3", "440", "8025", "55.8", "18.8"]) expect(g.logged()).not.toContain(secret);
   });
 
   it("carry no health value or note text for a call that fails", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     await ok(stub, "note_add", { kind: "decision", text: DECISION_TEXT, related_date: day(-2) });
-    for (const level of LEVELS) spies.get(level)?.mockClear();
+    g.clearLogs();
     // Google rejects one data type with a body that quotes a value; the reads before it succeed.
-    healthReply = (request) =>
+    g.healthReply = (request) =>
       request.url.includes("/nutrition-log/") || request.url.includes("/weight/")
         ? Response.json({ error: { code: 400, message: "bad filter near 8025 for Synthetic food", status: "INVALID_ARGUMENT" } }, { status: 400 })
         : undefined;
@@ -698,19 +526,19 @@ describe("the logs of the coach tools", () => {
     expect(await fails(stub, "weekly_report")).toEqual(internal);
     expect(await fails(stub, "metric_series", { metric: "kcal_in", from: day(-6), to: TODAY })).toEqual(internal);
     expect(await fails(stub, "metric_series", { metric: "weight", from: day(-6), to: TODAY })).toEqual(internal);
-    expect(logLines("log")).toEqual(
+    expect(g.logLines("log")).toEqual(
       ["weekly_report", "metric_series", "metric_series"].map((tool) => ["tool_call", { tool, duration_ms: expect.any(Number), is_error: true, code: "internal_error" }]),
     );
     // The data type, the HTTP status and Google's status enum: never the answer's text.
-    expect(logLines("warn")).toEqual([
+    expect(g.logLines("warn")).toEqual([
       ["google health request rejected", { data_type: "weight", http_status: 400, google_status: "INVALID_ARGUMENT" }],
       ["google health request rejected", { data_type: "nutrition-log", http_status: 400, google_status: "INVALID_ARGUMENT" }],
       ["google health request rejected", { data_type: "weight", http_status: 400, google_status: "INVALID_ARGUMENT" }],
     ]);
-    expect(logLines("error")).toEqual(
+    expect(g.logLines("error")).toEqual(
       ["weekly_report", "metric_series", "metric_series"].map((tool) => ["tool_internal_error", { tool, error_types: "Error > StatusError" }]),
     );
-    for (const secret of [...SECRETS, "8025", "bad filter", "2200", "80.3", "440"]) expect(logged()).not.toContain(secret);
+    for (const secret of [...SECRETS, "8025", "bad filter", "2200", "80.3", "440"]) expect(g.logged()).not.toContain(secret);
   });
 });
 
@@ -743,75 +571,44 @@ describe("the Google requests of one MCP request", () => {
       { total: 4, "nutrition-log": 1, "rollup active-zone-minutes": 1, "rollup total-calories": 1, weight: 1 },
     ],
   ])("%s on a cold cache with one month of data, then on the cache it filled", async (name, args, cold, warm) => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     const first = await ok(stub, name, args);
-    expect(takeExternal(), "cold").toEqual(cold);
+    expect(g.takeExternal(), "cold").toEqual(cold);
     const second = await ok(stub, name, args);
-    expect(takeExternal(), "warm").toEqual(warm);
+    expect(g.takeExternal(), "warm").toEqual(warm);
     expect(second.data).toEqual(first.data);
   });
 
   it("lists the band's steps only when the day has no zone-minutes row", async () => {
-    everything();
+    everything(g.google);
     const stub = await linkedStore();
     // 2026-10-13 has no zone-minutes row; the band's step records show it was worn.
     await ok(stub, "targets_set", { effective_from: "2026-10-01", kcal: 2000 });
-    google.add("nutrition-log", foodRec(at(day(-3), 12, 0), { meal: "LUNCH", kcal: 1800, list: { PROTEIN: 90 } }));
+    g.google.add("nutrition-log", foodRec(at(day(-3), 12, 0), { meal: "LUNCH", kcal: 1800, list: { PROTEIN: 90 } }));
     const out = await ok(stub, "nutrition_day", { date: day(-3) });
     expect(out.quality_flags).toEqual([]);
     expect(out.data.energy_balance).toEqual({ intake_kcal: 1800, total_calories_kcal: 2400, balance_kcal: -600 });
-    expect(takeExternal()).toEqual({ total: 5, "nutrition-log": 1, "rollup active-zone-minutes": 1, steps: 1, "rollup total-calories": 1, weight: 1 });
+    expect(g.takeExternal()).toEqual({ total: 5, "nutrition-log": 1, "rollup active-zone-minutes": 1, steps: 1, "rollup total-calories": 1, weight: 1 });
     // The day is settled: its activity now comes from the cache, with the same result.
     const again = await ok(stub, "nutrition_day", { date: day(-3) });
-    expect(takeExternal()).toEqual({ total: 2, "nutrition-log": 1, weight: 1 });
+    expect(g.takeExternal()).toEqual({ total: 2, "nutrition-log": 1, weight: 1 });
     expect(again.data).toEqual(out.data);
     expect(again.quality_flags).toEqual([]);
   });
 });
 
-/** Two meals on each of the `back` days before today. */
-function foodDays(back: number): void {
-  for (let i = back; i >= 1; i--) {
-    google.add(
-      "nutrition-log",
-      foodRec(at(day(-i), 12, 0), { meal: "LUNCH", kcal: 1200, list: { PROTEIN: 70 } }),
-      foodRec(at(day(-i), 20, 0), { meal: "DINNER", kcal: 900, list: { PROTEIN: 60 } }),
-    );
-  }
-}
-
-/**
- * Calls a tool on one store, one MCP HTTP request per call, until it
- * succeeds. Returns the Google requests of each call. A call may fail only
- * with the budget error of the client, and never sends more than the budget.
- */
-async function untilOk(target: McpTarget, name: string, args: Record<string, unknown>): Promise<{ output: Record<string, any>; calls: Record<string, number>[] }> {
-  const calls: Record<string, number>[] = [];
-  for (let n = 0; n < 6; n++) {
-    const outcome = await objectTool(target, name, args);
-    const counts = takeExternal();
-    calls.push(counts);
-    expect(counts.total, `call ${n + 1}`).toBeLessThanOrEqual(HEALTH_REQUESTS);
-    expect(counts.token ?? 0).toBe(0);
-    if (outcome.ok) return { output: outcome.output, calls };
-    expect(outcome.error.message, `call ${n + 1}`).toMatch(/^the date range holds more [a-z-]+ data than one call reads$/);
-    expect(outcome.error).toMatchObject({ code: "invalid_input", hint: "use a shorter date range" });
-  }
-  throw new Error(`${name} did not succeed in ${calls.length} calls: ${JSON.stringify(calls)}`);
-}
-
 // The request plans of weekly_report and metric_series, counted as HTTP
 // requests to Google on a cold cache. One MCP HTTP request may send 45.
 describe("the Google requests of the two report tools on a cold cache", () => {
   it("weekly_report with six weeks of data", async () => {
-    daysOfData(41);
-    sessions();
-    meals();
+    daysOfData(g.google, 41);
+    sessions(g.google);
+    meals(g.google);
     const stub = await linkedStore();
     const first = await ok(stub, "weekly_report");
     // No kcal target: the log check of the week's two logged days reads total calories too.
-    expect(takeExternal(), "cold, no targets").toEqual({
+    expect(g.takeExternal(), "cold, no targets").toEqual({
       total: 12,
       // recovery of the 28 days before the week and the week: sleep in 2 pages, HRV, resting heart rate
       sleep: 2,
@@ -832,7 +629,7 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     });
     const second = await ok(stub, "weekly_report");
     // The settled days come from the cache: one sleep page less, and no steps list.
-    expect(takeExternal(), "the cache it filled").toEqual({
+    expect(g.takeExternal(), "the cache it filled").toEqual({
       total: 10,
       sleep: 1,
       "heart-rate-variability": 1,
@@ -850,12 +647,12 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     const withTarget = await linkedStore();
     await ok(withTarget, "targets_set", { effective_from: "2026-10-01", kcal: 2000, protein_g: 150, weekly_sessions: 4 });
     await ok(withTarget, "weekly_report");
-    const targeted = takeExternal();
+    const targeted = g.takeExternal();
     expect(targeted.total, "cold, with a kcal target").toBe(11);
     expect(targeted).not.toHaveProperty("rollup total-calories");
     // A closed week reads the same data types over a range that ends on its Sunday.
     await ok(await linkedStore(), "weekly_report", { week_end: day(-7) });
-    expect(takeExternal().total, "cold, the week before").toBe(11);
+    expect(g.takeExternal().total, "cold, the week before").toBe(11);
   });
 
   // Harder years than the one below. A day without band data has no
@@ -881,15 +678,15 @@ describe("the Google requests of the two report tools on a cold cache", () => {
       { total_calories: [[45, 42], 30], azm: [[31], 29], kcal_in: [[45, 43], 30] },
     ],
   ])("metric_series over 366 days with %s", async (_name, offWrist, twoPages, expected) => {
-    daysOfData(365, offWrist, twoPages ? 2 : 1);
-    foodDays(365);
-    if (twoPages) google.twoPages.add("steps");
+    daysOfData(g.google, 365, offWrist, twoPages ? 2 : 1);
+    foodDays(g.google, 365);
+    if (twoPages) g.google.twoPages.add("steps");
     const measured: Record<string, [number[], number]> = {};
     for (const metric of Object.keys(expected)) {
       const stub = await linkedStore();
       const args = { metric, from: day(-365), to: TODAY, granularity: "week" };
-      const cold = await untilOk(stub, "metric_series", args);
-      const warm = await untilOk(stub, "metric_series", args);
+      const cold = await untilOk(g, stub,"metric_series", args);
+      const warm = await untilOk(g, stub,"metric_series", args);
       expect(warm.calls, metric).toHaveLength(1);
       expect(warm.output.data, metric).toEqual(cold.output.data);
       measured[metric] = [cold.calls.map((counts) => counts.total), warm.calls[0]?.total ?? 0];
@@ -923,14 +720,14 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     ["kcal_in", [45, 3], 3],
     ["protein_g", [45, 3], 3],
   ])("metric_series %s over 366 days", async (metric, calls, again) => {
-    daysOfData(365);
-    foodDays(365);
+    daysOfData(g.google, 365);
+    foodDays(g.google, 365);
     const stub = await linkedStore();
     const args = { metric, from: day(-365), to: TODAY, granularity: "week" };
-    const cold = await untilOk(stub, "metric_series", args);
+    const cold = await untilOk(g, stub,"metric_series", args);
     expect(cold.output.data.points).toHaveLength(53);
     expect(cold.calls.map((counts) => counts.total), JSON.stringify(cold.calls)).toEqual(calls);
-    const warm = await untilOk(stub, "metric_series", args);
+    const warm = await untilOk(g, stub,"metric_series", args);
     expect(warm.calls.map((counts) => counts.total), JSON.stringify(warm.calls)).toEqual([again]);
     expect(warm.output.data).toEqual(cold.output.data);
   });
@@ -940,7 +737,7 @@ describe("the Google requests of the two report tools on a cold cache", () => {
 // JSON-RPC batch. The limit of 50 subrequests is for the whole HTTP request.
 describe("one HTTP request with several tool calls", () => {
   it("shares one request budget and one token answer between the coach tools and google_account_status", async () => {
-    everything();
+    everything(g.google);
     // An expired access token and a cold cache: the worst start.
     const stub = await linkedStore({ accessTokenExpiresAt: 0 });
     const [briefing, workout, nutrition, weekly, series, status] = await batch(stub, [...CALLS, ["google_account_status", {}]]);
@@ -954,7 +751,7 @@ describe("one HTTP request with several tool calls", () => {
     // calls, and the Google Health requests of the five tools, which take
     // turns: a later tool finds in the cache what an earlier one fetched.
     // 8 + 8 + 4 for the three day tools, 12 for the weekly report and 1 for the series.
-    const counts = takeExternal();
+    const counts = g.takeExternal();
     expect(counts).toEqual({
       total: 34,
       token: 1,
@@ -972,15 +769,15 @@ describe("one HTTP request with several tool calls", () => {
       "body-fat": 1,
     });
     expect(counts.total).toBeLessThanOrEqual(MAX_SUBREQUESTS);
-    expect(new Set(auths)).toEqual(new Set([`Bearer ${RENEWED_TOKEN}`]));
-    expect(logLines("log").map(([, fields]) => (fields as { tool: string }).tool).sort()).toEqual(
+    expect(new Set(g.auths)).toEqual(new Set([`Bearer ${RENEWED_TOKEN}`]));
+    expect(g.logLines("log").map(([, fields]) => (fields as { tool: string }).tool).sort()).toEqual(
       ["google_account_status", ...COACH_TOOL_NAMES].sort(),
     );
   });
 
   it("asks a token endpoint that is down once, whatever the request calls", async () => {
-    everything();
-    tokenReply = () => new Response("<html>down</html>", { status: 503 });
+    everything(g.google);
+    g.tokenReply = () => new Response("<html>down</html>", { status: 503 });
     const stub = await linkedStore({ accessTokenExpiresAt: 0 });
     const calls: [string, Record<string, unknown>][] = [];
     for (let i = 0; i < 30; i++) calls.push(["google_account_status", {}], CALLS[i % CALLS.length] as [string, Record<string, unknown>]);
@@ -990,19 +787,19 @@ describe("one HTTP request with several tool calls", () => {
       else expect(answer).toMatchObject({ ok: false, error: { code: "upstream_unavailable", message: "Google's token service is unavailable" } });
     }
     // 60 tool calls, one token request, no Google Health request.
-    expect(external).toEqual(["token"]);
+    expect(g.external).toEqual(["token"]);
     // The next HTTP request asks again.
     await ok(stub, "google_account_status");
-    expect(external).toEqual(["token", "token"]);
+    expect(g.external).toEqual(["token", "token"]);
   });
 
   it("does not send the request that would pass the budget, also across tool calls", async () => {
-    month();
+    daysOfData(g.google, 30);
     // 25 sessions with heart rate on a day: its review lists heart rate once per session.
     const heavy = day(-8);
     for (let n = 0; n < 25; n++) {
       const start = new Date(at(heavy, 6, 0).getTime() + n * 20 * 60_000);
-      google.add("exercise", exerciseRec(start, new Date(start.getTime() + 10 * 60_000), { type: "WALKING", avgHR: 120, kcal: 50, zones: [5, 5, 0, 0] }));
+      g.google.add("exercise", exerciseRec(start, new Date(start.getTime() + 10 * 60_000), { type: "WALKING", avgHR: 120, kcal: 50, zones: [5, 5, 0, 0] }));
     }
     const stub = await linkedStore();
     const [first, second] = await batch(stub, [
@@ -1016,12 +813,12 @@ describe("one HTTP request with several tool calls", () => {
       ok: false,
       error: { code: "invalid_input", message: "the date range holds more heart-rate data than one call reads", hint: "use a shorter date range" },
     });
-    const counts = takeExternal();
+    const counts = g.takeExternal();
     expect(counts.total).toBe(HEALTH_REQUESTS);
     expect(counts).toEqual({ total: 45, exercise: 3, "heart-rate": 39, sleep: 1, "heart-rate-variability": 1, "daily-resting-heart-rate": 1 });
     // The next HTTP request has a budget of its own.
     expect((await objectTool(stub, "workout_review", { date: heavy })).ok).toBe(true);
-    expect(takeExternal().total).toBe(30);
+    expect(g.takeExternal().total).toBe(30);
   });
 
   it("is refused by the transport above 100 messages", async () => {
@@ -1029,10 +826,10 @@ describe("one HTTP request with several tool calls", () => {
     const message = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "google_account_status", arguments: {} } });
     const response = await stub.fetch(mcpRequest(Array.from({ length: 101 }, (_unused, i) => message(i + 1))));
     expect(response.status).toBe(400);
-    expect(logLines("log")).toEqual([]);
+    expect(g.logLines("log")).toEqual([]);
     // 100 messages are served, with one token answer for all of them.
     expect(await batch(stub, Array.from({ length: 100 }, (): [string, Record<string, unknown>] => ["google_account_status", {}]))).toHaveLength(100);
-    expect(external).toEqual([]);
+    expect(g.external).toEqual([]);
     expect(TOKEN_REQUESTS).toBe(2);
   });
 });

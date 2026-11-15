@@ -222,6 +222,14 @@ describe("rounding", () => {
     expect(roundStep(25, 50)).toBe(50);
   });
 
+  it("gives 0, never −0, for a small negative value", () => {
+    // JSON.stringify writes −0 as 0: the result holds what its JSON text carries.
+    for (const zero of [round(-0.04), roundTo(-0.004, 2), roundTo(-0.4, 0), roundStep(-10, 50), round1(-0.01), round(-0)]) {
+      expect(Object.is(zero, 0), String(zero)).toBe(true);
+    }
+    expect(round(-0.05)).toBe(-0.1);
+  });
+
   it("rounds to a step", () => {
     expect(roundStep(2626.4, 50)).toBe(2650);
     expect(roundStep(-526.3, 50)).toBe(-550);

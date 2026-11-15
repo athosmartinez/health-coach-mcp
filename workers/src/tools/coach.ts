@@ -198,11 +198,16 @@ function roundHalfAway(x: number): number {
   return x < 0 ? -Math.round(-x) : Math.round(x);
 }
 
+/** JSON.stringify writes −0 as 0: a result holds the value its JSON text carries. */
+function unsigned(zero: number): number {
+  return zero === 0 ? 0 : zero;
+}
+
 /** Rounds to `digits` decimals; null for a value that is missing or not finite. */
 export function roundTo(p: number | null | undefined, digits: number): number | null {
   if (p === null || p === undefined || !Number.isFinite(p)) return null;
   const f = 10 ** digits;
-  return roundHalfAway(p * f) / f;
+  return unsigned(roundHalfAway(p * f) / f);
 }
 
 /** Keeps one decimal: the readings are not more precise than that. */
@@ -222,7 +227,7 @@ export function round1(v: number): number {
 /** Rounds to the nearest multiple of `step`; null for a value that is missing or not finite. */
 export function roundStep(p: number | null | undefined, step: number): number | null {
   if (roundTo(p, 0) === null) return null;
-  return roundHalfAway((p as number) / step) * step;
+  return unsigned(roundHalfAway((p as number) / step) * step);
 }
 
 // --- times ---

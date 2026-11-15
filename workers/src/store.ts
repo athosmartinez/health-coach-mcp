@@ -137,6 +137,20 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (sub, name)
   );
   CREATE INDEX nutrition_entries_by_day ON nutrition_entries (day)`,
+  // 6: the workout sessions this server created in Google Health, with the
+  // columns and the index of the food entries of migration 5, and the same
+  // rules: a row proves that a session is this server's own, for the Google
+  // account in `sub`. It holds no activity name, no notes and no value.
+  // `name` is the data point name as the create answered it; `day` is the
+  // local day the session started.
+  `CREATE TABLE exercise_entries (
+    sub TEXT NOT NULL,
+    name TEXT NOT NULL,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sub, name)
+  );
+  CREATE INDEX exercise_entries_by_day ON exercise_entries (day)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

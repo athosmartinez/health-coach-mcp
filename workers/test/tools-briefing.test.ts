@@ -350,6 +350,47 @@ describe("morning_briefing", () => {
     expect((await briefing(h)).quality_flags).toEqual(flags);
   });
 
+  describe("a day that an unreadable row left out of yesterday's load", () => {
+    const NARROW = "activity 2026-10-15..2026-10-15 values=steps,azm,worn";
+    const KCAL = "activity 2026-10-15..2026-10-15 values=total_calories";
+    const activityCalls = (h: FakeHealth) => h.calls.filter((call) => call.startsWith("activity"));
+
+    it("is off the wrist when it has total calories, which the Go server reads", async () => {
+      // A total-calories row, no zone minutes, no step record of the band, and
+      // a steps row that cannot be read: in the Go server the day is there,
+      // without band data.
+      const h = history(28);
+      h.activityDays.set(YESTERDAY, activityDay({ totalKcal: 1700 }));
+      h.activitySkipped = 1;
+      const out = await briefing(h);
+      expect(out.quality_flags).toEqual(["band_not_worn", "unreadable_records"]);
+      expect(out.data.yesterday_load).toEqual({ date: YESTERDAY, exercises: [], azm_min: null, steps: null });
+      // One more read: the total calories of that day alone.
+      expect(activityCalls(h)).toEqual([NARROW, KCAL]);
+    });
+
+    it("is not off the wrist when it has no total calories either", async () => {
+      const h = history(28);
+      h.activitySkipped = 1;
+      const out = await briefing(h);
+      expect(out.quality_flags).toEqual(["unreadable_records"]);
+      expect(activityCalls(h)).toEqual([NARROW, KCAL]);
+    });
+
+    it("costs no read when every row was readable, or when the narrow read has the day", async () => {
+      const off = history(28);
+      off.activityDays.set(YESTERDAY, activityDay({ totalKcal: 1700 }));
+      expect((await briefing(off)).quality_flags).toEqual(["band_not_worn"]);
+      expect(activityCalls(off)).toEqual([NARROW]);
+
+      const worn = history(28);
+      worn.activityDays.set(YESTERDAY, activityDay({ steps: 8000, azm: 0, worn: true }));
+      worn.activitySkipped = 1;
+      expect((await briefing(worn)).quality_flags).toEqual(["unreadable_records"]);
+      expect(activityCalls(worn)).toEqual([NARROW]);
+    });
+  });
+
   it("caps the sessions and lists each flag and source once", async () => {
     const h = history(28);
     h.activityDays.set(YESTERDAY, activityDay({ steps: 8000, azm: 0, worn: true }));

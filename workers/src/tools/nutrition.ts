@@ -14,6 +14,7 @@ import {
   READ_ONLY,
   SourceSet,
   WEIGHT_LOOKBACK_DAYS,
+  bandNotWorn,
   coachTool,
   dayOf,
   daysBetween,
@@ -225,6 +226,7 @@ async function nutritionDay(deps: CoachDeps, args: Record<string, unknown>): Pro
   if (!logged || logged.items.length === 0) throw noFood(food);
   // The balance reads total calories and whether the band was worn: the steps rollup is not read.
   const act = await deps.health.activity(day, day, { values: ["total_calories", "worn"] });
+  const notWorn = await bandNotWorn(deps, act, day, "steps");
   const body = await deps.health.body(plusDays(day, -(WEIGHT_LOOKBACK_DAYS - 1)), day, { values: ["weight"] });
   const target = targetOn(deps, day);
 
@@ -235,11 +237,7 @@ async function nutritionDay(deps: CoachDeps, args: Record<string, unknown>): Pro
   const meals = mealsOf(deps, items, sources);
   const itemsOmitted = meals.reduce((sum, meal) => sum + meal.items_omitted, 0);
 
-  const a = act.days.get(day);
-  // A day missing because its row was unreadable is not a day off the wrist:
-  // unreadable_records covers it.
-  const notWorn = a ? !a.worn : act.skipped === 0;
-  const burned = notWorn ? null : (a?.totalKcal ?? null);
+  const burned = notWorn ? null : (act.days.get(day)?.totalKcal ?? null);
   const fc = checkFood(items, food.otherSource, food.skipped, target, burned, partial);
 
   const targets = targetsOf(target, fc.kcal, fc.protein);

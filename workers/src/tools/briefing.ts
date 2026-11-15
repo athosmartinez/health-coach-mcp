@@ -35,6 +35,7 @@ import {
   VENDOR_NOTICE,
   type Versus,
   WEIGHT_LOOKBACK_DAYS,
+  bandNotWorn,
   baselineOf,
   coachTool,
   dayOf,
@@ -138,6 +139,7 @@ async function morningBriefing(deps: CoachDeps, args: Record<string, unknown>): 
   const yesterday = plusDays(day, -1);
   // The load shows steps and zone minutes: the total-calories rollup is not read.
   const act = await deps.health.activity(yesterday, yesterday, { values: ["steps", "azm", "worn"] });
+  const notWorn = await bandNotWorn(deps, act, yesterday, "total_calories");
   const ex = await deps.health.exercises(yesterday, yesterday, false);
   const body = await deps.health.body(plusDays(day, -(WEIGHT_LOOKBACK_DAYS - 1)), day, { values: ["weight"] });
 
@@ -161,7 +163,7 @@ async function morningBriefing(deps: CoachDeps, args: Record<string, unknown>): 
 
   const nDays = Math.min(baselineOf(rec, KEY_ASLEEP, day).n, sig.hrvN, sig.rhrN);
 
-  const load = loadOf(act, ex, yesterday, flags, sources);
+  const load = loadOf(act, notWorn, ex, yesterday, flags, sources);
   const weighed = last(body.weight);
   if (weighed) sources.add(weighed.reading.source);
   flags.add(FLAG_UNREADABLE_RECORDS, act.skipped + ex.skipped + body.skipped > 0);
@@ -236,17 +238,15 @@ export function efficiencySeries(rec: Recovery): Point[] {
   });
 }
 
-/** Summarizes a day's sessions, zone minutes and steps. */
-export function loadOf(act: Activity, ex: Exercises, day: LocalDate, flags: FlagSet, sources: SourceSet): DayLoad {
+/** Summarizes a day's sessions, zone minutes and steps. `notWorn` is what bandNotWorn decided for the day. */
+export function loadOf(act: Activity, notWorn: boolean, ex: Exercises, day: LocalDate, flags: FlagSet, sources: SourceSet): DayLoad {
   const load: DayLoad = { date: day, exercises: [], azm_min: null, steps: null };
   const a = act.days.get(day);
   if (a) {
     load.azm_min = round(a.azm);
     load.steps = round(a.steps);
   }
-  // A day missing because its row was unreadable is not a day off the wrist:
-  // unreadable_records covers it.
-  flags.add(FLAG_NOT_WORN, a ? !a.worn : act.skipped === 0);
+  flags.add(FLAG_NOT_WORN, notWorn);
   flags.add(FLAG_OTHER_SOURCE_SESSIONS, ex.otherSource > 0);
   for (const [i, session] of ex.sessions.entries()) {
     if (i === MAX_SESSIONS) {

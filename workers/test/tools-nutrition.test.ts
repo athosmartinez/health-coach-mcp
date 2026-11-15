@@ -10,6 +10,9 @@ import { COACH_TODAY, FakeHealth, type FoodSpec, activityDay, coachSession, fake
 // All values below are synthetic.
 
 const CLOSED_DAY: LocalDate = "2026-10-14";
+/** The activity read of the balance, and the read of the steps that it leaves out. */
+const NARROW_ACTIVITY = "activity 2026-10-14..2026-10-14 values=total_calories,worn";
+const STEPS_ACTIVITY = "activity 2026-10-14..2026-10-14 values=steps";
 
 function nutritionHealth(): FakeHealth {
   const h = new FakeHealth();
@@ -199,6 +202,8 @@ describe("nutrition_day", () => {
     // Without the band, total calories is mostly a resting estimate.
     expect(out.data.energy_balance).toEqual({ intake_kcal: 2200, total_calories_kcal: null, balance_kcal: null, unavailable: "band_not_worn" });
     expect(out.quality_flags).toContain("band_not_worn");
+    // Every row was readable: the steps are not read.
+    expect(h.calls.filter((call) => call.startsWith("activity"))).toEqual([NARROW_ACTIVITY]);
   });
 
   it("does not read an unreadable activity row as a day off the wrist", async () => {
@@ -206,9 +211,34 @@ describe("nutrition_day", () => {
     h.activityDays.clear();
     h.activitySkipped = 1;
     const out = await closed(h);
-    expect(out.data.energy_balance.unavailable).toBe("no_total_calories");
-    expect(out.quality_flags).not.toContain("band_not_worn");
-    expect(out.quality_flags).toContain("unreadable_records");
+    expect(out.data.energy_balance).toEqual({ intake_kcal: 2200, total_calories_kcal: null, balance_kcal: null, unavailable: "no_total_calories" });
+    expect(out.quality_flags).toEqual(["unreadable_records"]);
+    // The day has no steps either: it is missing in the Go server too.
+    expect(h.calls).toEqual(["nutrition 2026-10-14..2026-10-14", NARROW_ACTIVITY, STEPS_ACTIVITY, "body 2026-07-17..2026-10-14 values=weight"]);
+  });
+
+  it("reads the steps of a day that an unreadable row left out, and finds the day off the wrist", async () => {
+    // A phone's steps, no zone minutes, no step record of the band, and a
+    // total-calories row that cannot be read. The Go server reads the three
+    // totals: the day is there, without band data.
+    const h = nutritionHealth();
+    h.activityDays.clear();
+    h.activityDays.set(CLOSED_DAY, activityDay({ steps: 400 }));
+    h.activitySkipped = 1;
+    const out = await closed(h);
+    expect(out.data.energy_balance).toEqual({ intake_kcal: 2200, total_calories_kcal: null, balance_kcal: null, unavailable: "band_not_worn" });
+    expect(out.quality_flags).toEqual(["band_not_worn", "unreadable_records"]);
+    // One more read: the steps of that day alone.
+    expect(h.calls).toEqual(["nutrition 2026-10-14..2026-10-14", NARROW_ACTIVITY, STEPS_ACTIVITY, "body 2026-07-17..2026-10-14 values=weight"]);
+  });
+
+  it("does not read the steps when the narrow read has the day", async () => {
+    const h = nutritionHealth();
+    h.activitySkipped = 1;
+    const out = await closed(h);
+    expect(out.data.energy_balance).toEqual({ intake_kcal: 2200, total_calories_kcal: 2600, balance_kcal: -400 });
+    expect(out.quality_flags).toEqual(["unreadable_records"]);
+    expect(h.calls.filter((call) => call.startsWith("activity"))).toEqual([NARROW_ACTIVITY]);
   });
 
   it("names a worn day without total calories", async () => {

@@ -12,7 +12,17 @@ import { type LocalDate, type Zone, addDays, parseDate, today } from "../coach/d
 import { type Envelope, newEnvelope } from "../coach/envelope";
 import { ToolError } from "../coach/errors";
 import { compareText } from "../coach/text";
-import { KEY_HRV, KEY_RESTING_HR, type Recovery, type RecoveryKey, type Source, hrvWithheld, restingStandard } from "../healthdata";
+import {
+  type Activity,
+  type ActivityValue,
+  KEY_HRV,
+  KEY_RESTING_HR,
+  type Recovery,
+  type RecoveryKey,
+  type Source,
+  hrvWithheld,
+  restingStandard,
+} from "../healthdata";
 import { type Point, type Stats, baseline, delta, deltaPct, zScore } from "../metrics/stats";
 import type { Target } from "../store/memory";
 import type { NoteFilter, NoteResults } from "../store/notes";
@@ -161,6 +171,26 @@ export function daysBetween(from: LocalDate, to: LocalDate): number {
 /** The target in force on `day`, undefined when none was ever set or no store holds targets. */
 export function targetOn(deps: CoachDeps, day: LocalDate): Target | undefined {
   return deps.targets?.(day);
+}
+
+/**
+ * Whether `day` counts as a day without the band, from the narrow read `act`
+ * of its totals. A day missing because its row was unreadable is not a day
+ * off the wrist: unreadable_records covers it.
+ *
+ * The Go server reads all three totals, so there a day is missing only when
+ * none of them has a value. A narrow read leaves one total out (`unread`), so
+ * its day can be missing while that total has a value: in the Go server the
+ * day is then there, without band data. So when the narrow read has no day
+ * and dropped a row, that total is read for the one day: one more request, in
+ * this case only.
+ */
+export async function bandNotWorn(deps: CoachDeps, act: Activity, day: LocalDate, unread: ActivityValue): Promise<boolean> {
+  const a = act.days.get(day);
+  if (a) return !a.worn;
+  if (act.skipped === 0) return true;
+  const rest = await deps.health.activity(day, day, { values: [unread] });
+  return rest.days.has(day);
 }
 
 // --- flags and sources ---

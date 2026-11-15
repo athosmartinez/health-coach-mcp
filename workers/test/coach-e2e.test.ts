@@ -34,7 +34,7 @@ import {
   sessions,
   untilOk,
 } from "./e2e-helpers";
-import { at, exerciseRec, foodRec, samplesEvery2s } from "./healthdata-helpers";
+import { at, civil, exerciseRec, foodRec, hrvNight, kcalRollup, restingRec, samplesEvery2s, sleepRec, stepsRollup } from "./healthdata-helpers";
 import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, rpc, signInAsOwner } from "./helpers";
 import { COACH_TOOL_NAMES, type McpTarget, SCHEMA_HINT, freshStore, mcpRequest, objectTool } from "./memory-helpers";
 
@@ -595,6 +595,84 @@ describe("the Google requests of one MCP request", () => {
     expect(g.takeExternal()).toEqual({ total: 2, "nutrition-log": 1, weight: 1 });
     expect(again.data).toEqual(out.data);
     expect(again.quality_flags).toEqual([]);
+  });
+
+  // A narrow read leaves one total out. When it has no day and dropped a row,
+  // the total that was left out is read for that day: the Go server reads all
+  // three totals, and a day with any of them is a day, without band data here.
+  describe("a day without band data whose only readable total is the one the tool does not read", () => {
+    const unreadable = (date: string, key: string, value: Record<string, unknown>) => ({ civilStartTime: civil(date), [key]: value });
+
+    it("nutrition_day reads the steps of the day, and answers band_not_worn as the Go server does", async () => {
+      const closed = day(-5);
+      g.google.add("nutrition-log", foodRec(at(closed, 12, 0), { meal: "LUNCH", kcal: 1800, list: { PROTEIN: 90 } }));
+      // A phone counted the steps. No zone-minutes row and no step record of the band.
+      g.google.addRollup("steps", stepsRollup(closed, 4321));
+      g.google.addRollup("total-calories", unreadable(closed, "totalCalories", { kcalSum: "a lot" }));
+      const stub = await linkedStore();
+      const out = await ok(stub, "nutrition_day", { date: closed });
+      expect(out.quality_flags).toEqual(["band_not_worn", "unreadable_records"]);
+      expect(out.data.energy_balance).toEqual({ intake_kcal: 1800, total_calories_kcal: null, balance_kcal: null, unavailable: "band_not_worn" });
+      // The narrow read (zone minutes, the band's steps, total calories), then one steps rollup.
+      const narrow = { "nutrition-log": 1, "rollup active-zone-minutes": 1, steps: 1, "rollup total-calories": 1, weight: 1 };
+      expect(g.takeExternal()).toEqual({ total: 6, ...narrow, "rollup steps": 1 });
+      expect(g.logLines("warn")).toEqual([["unreadable daily rollup rows", { data_type: "total-calories", from: closed, to: closed, skipped: 1 }]]);
+      for (const value of ["a lot", "4321", "1800"]) expect(g.logged()).not.toContain(value);
+
+      // Without the phone's steps the day is missing in the Go server too: not a day off the wrist.
+      const other = day(-6);
+      g.google.add("nutrition-log", foodRec(at(other, 12, 0), { meal: "LUNCH", kcal: 1800, list: { PROTEIN: 90 } }));
+      g.google.addRollup("total-calories", unreadable(other, "totalCalories", { kcalSum: "a lot" }));
+      const missing = await ok(stub, "nutrition_day", { date: other });
+      expect(missing.quality_flags).toEqual(["unreadable_records"]);
+      expect(missing.data.energy_balance).toEqual({ intake_kcal: 1800, total_calories_kcal: null, balance_kcal: null, unavailable: "no_total_calories" });
+      expect(g.takeExternal()).toEqual({ total: 6, ...narrow, "rollup steps": 1 });
+
+      // A day whose rows are all readable costs no steps rollup.
+      const plain = day(-7);
+      g.google.add("nutrition-log", foodRec(at(plain, 12, 0), { meal: "LUNCH", kcal: 1800, list: { PROTEIN: 90 } }));
+      g.google.addRollup("steps", stepsRollup(plain, 4321));
+      const off = await ok(stub, "nutrition_day", { date: plain });
+      expect(off.quality_flags).toEqual(["band_not_worn"]);
+      expect(g.takeExternal()).toEqual({ total: 5, ...narrow });
+    });
+
+    it.each([
+      // Total calories only (the resting estimate): in the Go server the day is there, without band data.
+      { name: "answers band_not_worn as the Go server does", kcal: true, flags: ["band_not_worn", "unreadable_records"] },
+      // Without the total calories the day is missing in the Go server too: not a day off the wrist.
+      { name: "finds no total either, and does not answer band_not_worn", kcal: false, flags: ["unreadable_records"] },
+    ])("morning_briefing reads the total calories of yesterday, and $name", async ({ kcal, flags }) => {
+      for (let i = 29; i >= 0; i--) {
+        const [end, start] = [day(-i), day(-i - 1)];
+        g.google.add("sleep", sleepRec(at(start, 23, 0), at(end, 7, 0), { deep: 60 }));
+        g.google.add("heart-rate-variability", ...hrvNight(at(start, 23, 0), at(end, 7, 0), 40 + (i % 5)));
+        g.google.add("daily-resting-heart-rate", restingRec(end, 55 + (i % 3), "WITH_SLEEP", "FITBIT"));
+      }
+      const yesterday = day(-1);
+      if (kcal) g.google.addRollup("total-calories", kcalRollup(yesterday, 1711));
+      // The steps row of the day cannot be read. No zone-minutes row and no step record of the band.
+      g.google.addRollup("steps", unreadable(yesterday, "steps", { countSum: "many" }));
+      const stub = await linkedStore();
+      const out = await ok(stub, "morning_briefing");
+      expect(out.quality_flags).toEqual(flags);
+      expect(out.data.yesterday_load).toEqual({ date: yesterday, exercises: [], azm_min: null, steps: null });
+      // The narrow read (steps, zone minutes, the band's steps), then one total-calories rollup.
+      expect(g.takeExternal()).toEqual({
+        total: 10,
+        sleep: 2,
+        "heart-rate-variability": 1,
+        "daily-resting-heart-rate": 1,
+        "rollup steps": 1,
+        "rollup active-zone-minutes": 1,
+        steps: 1,
+        "rollup total-calories": 1,
+        exercise: 1,
+        weight: 1,
+      });
+      expect(g.logLines("warn")).toEqual([["unreadable daily rollup rows", { data_type: "steps", from: yesterday, to: yesterday, skipped: 1 }]]);
+      for (const value of ["many", "1711"]) expect(g.logged()).not.toContain(value);
+    });
   });
 
   it("workout_review by exercise_id lists the heart rate of that session only", async () => {

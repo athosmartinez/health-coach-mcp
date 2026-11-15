@@ -4,7 +4,7 @@
 // real client and Google behind a mocked `fetch`. All values are synthetic.
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { UTC, Zone } from "../src/coach/date";
 import { ToolError, type WireError } from "../src/coach/errors";
@@ -960,7 +960,20 @@ const storedEntries = (stub: DurableObjectStub<CoachStore>) =>
 
 const createdName = (n: number) => `users/${FAKE_USER_ID}/dataTypes/nutrition-log/dataPoints/syn-created-${n}`;
 
-const googleError = (status: number, grpc: string) => () => Response.json({ error: { code: status, message: `${BODY_MARK} for ${STORED_TOKEN}`, status: grpc } }, { status });
+/** The error.message a write refusal repeats. The marked text sits in another field, which must not be repeated. */
+const GOOGLE_MESSAGE = "Request contains an invalid argument.";
+const googleError = (status: number, grpc: string) => () =>
+  Response.json(
+    {
+      error: {
+        code: status,
+        message: GOOGLE_MESSAGE,
+        status: grpc,
+        details: [{ "@type": "type.googleapis.com/google.rpc.DebugInfo", detail: `${BODY_MARK} for ${STORED_TOKEN}` }],
+      },
+    },
+    { status },
+  );
 
 describe("the write tools through /mcp of the object", () => {
   it("are listed with the other tools: 20 in all", async () => {
@@ -986,7 +999,7 @@ describe("the write tools through /mcp of the object", () => {
     expect(g.auths).toEqual([`Bearer ${STORED_TOKEN}`]);
     expect(JSON.stringify(g.google.writes)).toBe(
       '[{"kind":"create","body":{"nutritionLog":{"interval":{"startTime":"2026-10-16T11:15:00Z","startUtcOffset":"-10800s",' +
-        '"endTime":"2026-10-16T11:15:00Z","endUtcOffset":"-10800s"},"foodDisplayName":"Feijoada completa","mealType":"LUNCH",' +
+        '"endTime":"2026-10-16T11:15:01Z","endUtcOffset":"-10800s"},"foodDisplayName":"Feijoada completa","mealType":"LUNCH",' +
         '"energy":{"kcal":431.5},"totalCarbohydrate":{"grams":51.25},"totalFat":{"grams":17.5},' +
         '"nutrients":[{"nutrient":"PROTEIN","quantity":{"grams":23.75}}]}}}]',
     );
@@ -1033,9 +1046,9 @@ describe("the write tools through /mcp of the object", () => {
   });
 
   it.each([
-    ["the HTML page of a front end", () => new Response(`<html>Error 404 ${BODY_MARK}</html>`, { status: 404, headers: { "content-type": "text/html" } })],
-    ["a JSON error without Google's status", () => Response.json({ error: { code: 404, message: BODY_MARK } }, { status: 404 })],
-  ] as [string, () => Response][])("delete keeps the entry as its own after a 404 that is %s", async (_name, reply) => {
+    ["the HTML page of a front end", () => new Response(`<html>Error 404 ${BODY_MARK}</html>`, { status: 404, headers: { "content-type": "text/html" } }), ""],
+    ["a JSON error without Google's status", () => Response.json({ error: { code: 404, message: "no such point", detail: BODY_MARK } }, { status: 404 }), "no such point"],
+  ] as [string, () => Response, string][])("delete keeps the entry as its own after a 404 that is %s", async (_name, reply, googleMessage) => {
     const stub = await linkedStore();
     const added = await objectTool(stub, "nutrition_log_add", FOOD);
     if (!added.ok) throw new Error("the add failed");
@@ -1043,15 +1056,21 @@ describe("the write tools through /mcp of the object", () => {
     g.clearLogs();
     g.healthReply = reply;
     // Not "deleted": this 404 does not prove that Google has no such entry.
+    const message = googleMessage === "" ? "Google Health refused the delete" : `Google Health refused the delete: ${googleMessage}`;
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({
       ok: false,
-      error: { code: "invalid_input", message: "Google Health refused the delete", hint: "the entry was not deleted" },
+      error: { code: "invalid_input", message, hint: "the entry was not deleted" },
     });
     expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
     // The entry is still in Google Health, and its row stays.
     expect(g.google.createdPoints()).toHaveLength(1);
     expect(await storedEntries(stub)).toMatchObject([{ name: createdName(1) }]);
-    expect(g.logLines("warn")).toEqual([["google health request rejected", { data_type: "nutrition-log", http_status: 404, google_status: "" }]]);
+    expect(g.logLines("warn")).toEqual([
+      [
+        "google health request rejected",
+        { data_type: "nutrition-log", http_status: 404, google_status: "", ...(googleMessage === "" ? {} : { google_message: googleMessage }) },
+      ],
+    ]);
     expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete", "invalid_input")]);
     expectNoSecret(g.logged());
 
@@ -1193,6 +1212,34 @@ describe("the write tools through /mcp of the object", () => {
     expect(after.output.data.per_meal.flatMap((meal: { items: { entry_id: string | null }[] }) => meal.items.map((item) => item.entry_id))).toEqual([null]);
   });
 
+  it("keeps an entry logged at 23:59:59 on that day, and nutrition_day still names it for delete", async () => {
+    // 23:59:59.400 in São Paulo. The interval's end is 00:00:00 the next local day.
+    vi.setSystemTime(new Date("2026-10-17T02:59:59.400Z"));
+    const stub = await linkedStore();
+    const added = await objectTool(stub, "nutrition_log_add", FOOD);
+    if (!added.ok) throw new Error(JSON.stringify(added.error));
+    expect(added.output).toMatchObject({ date: "2026-10-16", time: "23:59" });
+    expect(g.google.writes[0]?.body.nutritionLog.interval).toEqual({
+      startTime: "2026-10-17T02:59:59Z",
+      startUtcOffset: "-10800s",
+      endTime: "2026-10-17T03:00:00Z",
+      endUtcOffset: "-10800s",
+    });
+    g.takeExternal();
+    const review = await objectTool(stub, "nutrition_day", { date: "2026-10-16" });
+    if (!review.ok) throw new Error(JSON.stringify(review.error));
+    const items = review.output.data.per_meal.flatMap((meal: { items: { entry_id: string | null; time: string }[] }) => meal.items);
+    expect(items).toEqual([expect.objectContaining({ entry_id: added.output.entry_id, time: "2026-10-16T23:59:59-03:00" })]);
+    // The next local day is today once the clock passes midnight. The end falls on it; the entry does not.
+    vi.setSystemTime(new Date("2026-10-17T15:00:00Z"));
+    expect(await objectTool(stub, "nutrition_day", { date: "2026-10-17" })).toMatchObject({ ok: false, error: { code: "no_data" } });
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({
+      ok: true,
+      output: { entry_id: added.output.entry_id, deleted: true },
+    });
+    expect(g.google.createdPoints()).toEqual([]);
+  });
+
   it("returns the stored name when the list and the create use opposite forms of the user", async () => {
     const stub = await linkedStore();
     // The table holds the name under users/me. The list names the user by an id. Google's
@@ -1243,12 +1290,14 @@ describe("the write tools through /mcp of the object", () => {
 describe("the log of a write", () => {
   // The only lines of a call are the tool call line, the operational lines of
   // the Google Health client (a data type, an HTTP status, a count) and, for
-  // an internal error, the type chain. Never the payload.
+  // an internal error, the type chain. A refusal may also repeat Google's
+  // short message and ErrorInfo reason. Never the payload, and never the rest
+  // of the answer.
   const LOG_FIELDS: Record<string, readonly string[]> = {
     tool_call: ["tool", "duration_ms", "is_error", "code"],
     "google health request did not complete": ["data_type", "cause"],
     "google health request failed; retrying": ["data_type", "http_status", "retry", "wait_ms"],
-    "google health request rejected": ["data_type", "http_status", "google_status"],
+    "google health request rejected": ["data_type", "http_status", "google_status", "google_reason", "google_message"],
     "google health write answer not usable": ["data_type", "operation", "reason"],
   };
   const LOG_TEXT = new Set(["nutrition_log_add", "nutrition_log_delete", "nutrition-log", "upstream_unavailable", "invalid_input", "no_data", "TypeError", "INVALID_ARGUMENT", "create", "not_done"]);
@@ -1262,6 +1311,10 @@ describe("the log of a write", () => {
         expect(rest).toEqual([]);
         for (const [key, value] of Object.entries(fields)) {
           expect(LOG_FIELDS[message], `${message}.${key}`).toContain(key);
+          if (key === "google_message" || key === "google_reason") {
+            expect(typeof value, `${message}.${key}`).toBe("string");
+            continue;
+          }
           if (typeof value === "string") expect([...LOG_TEXT], `${message}.${key}`).toContain(value);
           else expect(["number", "boolean"], `${message}.${key}`).toContain(typeof value);
         }
@@ -1297,7 +1350,7 @@ describe("the log of a write", () => {
       "upstream_unavailable",
       [["log", "tool_call"], ["warn", "google health write answer not usable"]],
     ],
-  ] as [string, () => Response, string, string[][]][])("of an add that fails because %s holds no part of the entry or of the answer", async (_name, reply, code, lines) => {
+  ] as [string, () => Response, string, string[][]][])("of an add that fails because %s holds no part of the entry, and of the answer only Google's short refusal", async (_name, reply, code, lines) => {
     const stub = await linkedStore();
     g.healthReply = reply;
     const outcome = await objectTool(stub, "nutrition_log_add", { ...FOOD, time: "08:15" });

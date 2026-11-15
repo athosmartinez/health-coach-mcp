@@ -147,7 +147,7 @@ describe("the food log writes, from the sign-in to a tool result", () => {
         kind: "create",
         body: {
           nutritionLog: {
-            interval: { startTime: "2026-10-16T11:15:00Z", startUtcOffset: "-10800s", endTime: "2026-10-16T11:15:00Z", endUtcOffset: "-10800s" },
+            interval: { startTime: "2026-10-16T11:15:00Z", startUtcOffset: "-10800s", endTime: "2026-10-16T11:15:01Z", endUtcOffset: "-10800s" },
             foodDisplayName: "Feijoada completa",
             mealType: "LUNCH",
             energy: { kcal: 431.5 },

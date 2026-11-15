@@ -31,6 +31,7 @@ import {
   readCreateAnswer,
   readDeleteAnswer,
 } from "../src/googlehealth/nutritionlog";
+import { parseFood } from "../src/healthdata/nutrition";
 import { SAO_PAULO } from "./memory-helpers";
 
 const API = "https://health.googleapis.com";
@@ -81,8 +82,22 @@ function json(status: number, value: unknown, headers: Record<string, string> = 
 /** A marked text in every error body and answer of the fake: it must never reach an error or a log line. */
 const BODY_MARK = "synthetic body 7711";
 
+/** The error.message a write refusal repeats. BODY_MARK sits in another field, which must not be repeated. */
+const GOOGLE_MESSAGE = "Request contains an invalid argument.";
+
 function apiError(status: number, grpcStatus: string, headers: Record<string, string> = {}): Response {
-  return json(status, { error: { code: status, status: grpcStatus, message: BODY_MARK } }, headers);
+  return json(
+    status,
+    {
+      error: {
+        code: status,
+        status: grpcStatus,
+        message: GOOGLE_MESSAGE,
+        details: [{ "@type": "type.googleapis.com/google.rpc.DebugInfo", detail: BODY_MARK }],
+      },
+    },
+    headers,
+  );
 }
 
 const POINT = "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-point-9f3a";
@@ -167,7 +182,7 @@ const ENTRY: NewFoodEntry = {
 
 const ENTRY_JSON =
   '{"nutritionLog":{"interval":{"startTime":"2026-10-16T14:30:45Z","startUtcOffset":"-10800s",' +
-  '"endTime":"2026-10-16T14:30:45Z","endUtcOffset":"-10800s"},"foodDisplayName":"Arroz com feijão","mealType":"LUNCH",' +
+  '"endTime":"2026-10-16T14:30:46Z","endUtcOffset":"-10800s"},"foodDisplayName":"Arroz com feijão","mealType":"LUNCH",' +
   '"energy":{"kcal":431.5},"totalCarbohydrate":{"grams":51.25},"totalFat":{"grams":17.5},' +
   '"nutrients":[{"nutrient":"PROTEIN","quantity":{"grams":23.75}}]}}';
 
@@ -311,7 +326,7 @@ describe("the allowlist of the client", () => {
 });
 
 describe("the body of a create", () => {
-  it("is the documented nutritionLog, with both offsets and an interval without length", () => {
+  it("is the documented nutritionLog, with both offsets and an end one second after the start", () => {
     expect(JSON.stringify(createBody(ENTRY))).toBe(ENTRY_JSON);
   });
 
@@ -334,7 +349,27 @@ describe("the body of a create", () => {
     ["west of UTC", -34_200, "-34200s"],
   ])("writes the offset of a zone %s as seconds", (_name, seconds, text) => {
     const { interval } = createBody({ ...ENTRY, utcOffsetSeconds: seconds }).nutritionLog;
-    expect(interval).toEqual({ startTime: "2026-10-16T14:30:45Z", startUtcOffset: text, endTime: "2026-10-16T14:30:45Z", endUtcOffset: text });
+    expect(interval).toEqual({ startTime: "2026-10-16T14:30:45Z", startUtcOffset: text, endTime: "2026-10-16T14:30:46Z", endUtcOffset: text });
+  });
+
+  it("ends one second after 23:59:59 with the same offset, and the food read keeps the start's day", () => {
+    // 23:59:59.900 in São Paulo. The next second is 00:00:00 the next local day.
+    const at = new Date("2026-10-17T02:59:59.900Z");
+    const body = createBody({ ...ENTRY, at, utcOffsetSeconds: -10_800 });
+    expect(body.nutritionLog.interval).toEqual({
+      startTime: "2026-10-17T02:59:59Z",
+      startUtcOffset: "-10800s",
+      endTime: "2026-10-17T03:00:00Z",
+      endUtcOffset: "-10800s",
+    });
+    const read = parseFood(
+      { name: "users/me/dataTypes/nutrition-log/dataPoints/syn-late", dataSource: { platform: "GOOGLE_WEB_API" }, ...body },
+      new Set(["syn-late"]),
+    );
+    expect(read.kind).toBe("item");
+    if (read.kind !== "item") return;
+    expect(SAO_PAULO.dateOf(read.item.at)).toBe("2026-10-16");
+    expect(SAO_PAULO.dateOf(Date.parse(body.nutritionLog.interval.endTime))).toBe("2026-10-17");
   });
 
   it.each([
@@ -582,13 +617,15 @@ describe("createNutritionLog", () => {
     const error = await failure(client.createNutritionLog(ENTRY));
     expect(toWire(error)).toEqual({
       code: "invalid_input",
-      message: "Google Health refused the entry",
+      message: `Google Health refused the entry: ${GOOGLE_MESSAGE}`,
       hint: "the entry was not created; check the date, the time and the values",
     });
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
-    // The operator reads the status in the log; the body is in neither place.
-    expect(warnings()).toEqual([["google health request rejected", { data_type: "nutrition-log", http_status: status, google_status: grpc }]]);
+    // The status, Google's enum and the short message. Not the rest of the body.
+    expect(warnings()).toEqual([
+      ["google health request rejected", { data_type: "nutrition-log", http_status: status, google_status: grpc, google_message: GOOGLE_MESSAGE }],
+    ]);
     expectNoSecret(error);
   });
 
@@ -753,22 +790,28 @@ describe("deleteNutritionLog", () => {
   // front end answers it for a path or a body that is wrong. Taken as "gone",
   // the server would forget an entry that Google still holds.
   it.each([
-    ["the HTML page of a front end", () => new Response(`<html><title>Error 404 (Not Found)</title>${BODY_MARK} NOT_FOUND</html>`, { status: 404, headers: { "content-type": "text/html" } }), ""],
-    ["an empty body", () => new Response(null, { status: 404 }), ""],
-    ["a JSON error without a status", () => json(404, { error: { code: 404, message: BODY_MARK } }), ""],
-    ["a JSON error whose status is not an enum text", () => json(404, { error: { code: 404, status: "not found", message: BODY_MARK } }), ""],
-    ["a JSON error with another status", () => apiError(404, "UNIMPLEMENTED"), "UNIMPLEMENTED"],
-    ["a JSON body that only names NOT_FOUND in a text", () => json(404, { message: "NOT_FOUND", status: "NOT_FOUND" }), ""],
-    ["a JSON text NOT_FOUND", () => json(404, "NOT_FOUND"), ""],
-  ] as [string, () => Response, string][])("takes a 404 with %s as a refused delete, not as a point that is gone", async (_name, reply, grpc) => {
+    ["the HTML page of a front end", () => new Response(`<html><title>Error 404 (Not Found)</title>${BODY_MARK} NOT_FOUND</html>`, { status: 404, headers: { "content-type": "text/html" } }), "", ""],
+    ["an empty body", () => new Response(null, { status: 404 }), "", ""],
+    ["a JSON error without a status", () => json(404, { error: { code: 404, message: "no such point", detail: BODY_MARK } }), "", "no such point"],
+    ["a JSON error whose status is not an enum text", () => json(404, { error: { code: 404, status: "not found", message: "no such point", detail: BODY_MARK } }), "", "no such point"],
+    ["a JSON error with another status", () => apiError(404, "UNIMPLEMENTED"), "UNIMPLEMENTED", GOOGLE_MESSAGE],
+    ["a JSON body that only names NOT_FOUND in a text", () => json(404, { message: "NOT_FOUND", status: "NOT_FOUND" }), "", ""],
+    ["a JSON text NOT_FOUND", () => json(404, "NOT_FOUND"), "", ""],
+  ] as [string, () => Response, string, string][])("takes a 404 with %s as a refused delete, not as a point that is gone", async (_name, reply, grpc, googleMessage) => {
     const requests = fakeApi(reply);
     const { client, waits } = testClient();
     const error = await failure(client.deleteNutritionLog("syn-point-9f3a"));
-    expect(toWire(error)).toEqual({ code: "invalid_input", message: "Google Health refused the delete", hint: "the entry was not deleted" });
+    const message = googleMessage === "" ? "Google Health refused the delete" : `Google Health refused the delete: ${googleMessage}`;
+    expect(toWire(error)).toEqual({ code: "invalid_input", message, hint: "the entry was not deleted" });
     // An answer, so no retry.
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
-    expect(warnings()).toEqual([["google health request rejected", { data_type: "nutrition-log", http_status: 404, google_status: grpc }]]);
+    expect(warnings()).toEqual([
+      [
+        "google health request rejected",
+        { data_type: "nutrition-log", http_status: 404, google_status: grpc, ...(googleMessage === "" ? {} : { google_message: googleMessage }) },
+      ],
+    ]);
     expectNoSecret(error);
   });
 
@@ -828,9 +871,94 @@ describe("deleteNutritionLog", () => {
   it("answers that Google refused the delete for another 4xx", async () => {
     const requests = fakeApi(() => apiError(400, "INVALID_ARGUMENT"));
     const error = await failure(testClient().client.deleteNutritionLog("syn-point-9f3a"));
-    expect(toWire(error)).toEqual({ code: "invalid_input", message: "Google Health refused the delete", hint: "the entry was not deleted" });
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: `Google Health refused the delete: ${GOOGLE_MESSAGE}`, hint: "the entry was not deleted" });
     expect(requests).toHaveLength(1);
-    expect(warnings()).toEqual([["google health request rejected", { data_type: "nutrition-log", http_status: 400, google_status: "INVALID_ARGUMENT" }]]);
+    expect(warnings()).toEqual([
+      ["google health request rejected", { data_type: "nutrition-log", http_status: 400, google_status: "INVALID_ARGUMENT", google_message: GOOGLE_MESSAGE }],
+    ]);
+    expectNoSecret(error);
+  });
+
+  it.each(["create", "delete"] as const)("a 400 %s repeats Google's reason and a short message, and nothing else of the body", async (kind) => {
+    const head = "endTime must be after startTime. ";
+    const tail = "TAIL_NOT_SHOWN";
+    const message = `${head}owner@example.com users/1122334455 ya29.a0AfH6SM-secret Bearer at-stored-51c2 ${"x".repeat(220)}${tail}`;
+    const requests = fakeApi(() =>
+      json(400, {
+        error: {
+          code: 400,
+          message,
+          status: "INVALID_ARGUMENT",
+          details: [
+            { "@type": "type.googleapis.com/google.rpc.BadRequest", reason: "NOT_AN_ERRORINFO", fieldViolations: [{ description: BODY_MARK }] },
+            {
+              "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+              reason: "BAD_INTERVAL",
+              domain: "health.googleapis.com",
+              metadata: { user: "owner@example.com", token: "ya29.a0AfH6SM-secret" },
+            },
+            { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "END_TIME_EMPTY", domain: "health.googleapis.com" },
+            { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "owner@example.com" },
+            { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "BAD_INTERVAL" },
+          ],
+        },
+      }),
+    );
+    const error = await failure(kind === "create" ? testClient().client.createNutritionLog(ENTRY) : testClient().client.deleteNutritionLog("syn-point-9f3a"));
+    const wire = toWire(error);
+    const base = kind === "create" ? "Google Health refused the entry" : "Google Health refused the delete";
+    const loggedMessage = (warnings()[0]?.[1] as { google_message?: string } | undefined)?.google_message ?? "";
+    expect(loggedMessage.startsWith(head)).toBe(true);
+    expect(loggedMessage.endsWith("…")).toBe(true);
+    expect(loggedMessage.length).toBe(201);
+    expect(loggedMessage).not.toContain(tail);
+    expect(wire).toEqual({
+      code: "invalid_input",
+      message: `${base}: BAD_INTERVAL, END_TIME_EMPTY: ${loggedMessage}`,
+      hint: kind === "create" ? "the entry was not created; check the date, the time and the values" : "the entry was not deleted",
+    });
+    expect(requests).toHaveLength(1);
+    expect(warnings()).toEqual([
+      [
+        "google health request rejected",
+        {
+          data_type: "nutrition-log",
+          http_status: 400,
+          google_status: "INVALID_ARGUMENT",
+          google_reason: "BAD_INTERVAL, END_TIME_EMPTY",
+          google_message: loggedMessage,
+        },
+      ],
+    ]);
+    const shown = `${texts(error)} ${logged()}`;
+    for (const secret of ["owner@example.com", "1122334455", "ya29", "at-stored-51c2", "Bearer", BODY_MARK, "NOT_AN_ERRORINFO", tail]) {
+      expect(shown, secret).not.toContain(secret);
+    }
+    expectNoSecret(error);
+  });
+
+  it("drops a write message that is only a token, an email or a user id", async () => {
+    fakeApi(() =>
+      json(400, {
+        error: {
+          code: 400,
+          status: "INVALID_ARGUMENT",
+          message: "owner@example.com users/1122334455 ya29.a0AfH6SM-secret",
+          details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "BAD_INTERVAL", domain: "health.googleapis.com" }],
+        },
+      }),
+    );
+    const error = await failure(testClient().client.createNutritionLog(ENTRY));
+    expect(toWire(error)).toEqual({
+      code: "invalid_input",
+      message: "Google Health refused the entry: BAD_INTERVAL",
+      hint: "the entry was not created; check the date, the time and the values",
+    });
+    expect(warnings()).toEqual([
+      ["google health request rejected", { data_type: "nutrition-log", http_status: 400, google_status: "INVALID_ARGUMENT", google_reason: "BAD_INTERVAL" }],
+    ]);
+    const shown = `${texts(error)} ${logged()}`;
+    for (const secret of ["owner@example.com", "1122334455", "ya29"]) expect(shown, secret).not.toContain(secret);
     expectNoSecret(error);
   });
 

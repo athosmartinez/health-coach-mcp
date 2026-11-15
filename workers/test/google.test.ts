@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isAllowedEmail, readIdToken } from "../src/google";
-import { idToken } from "./helpers";
+import { exchangeCode, isAllowedEmail, readIdToken, refreshAccessToken } from "../src/google";
+import { idToken, mockGoogle } from "./helpers";
 
 const CLIENT_ID = "client.apps.googleusercontent.com";
 const NOW = Date.UTC(2026, 10, 14, 12);
@@ -45,6 +45,45 @@ describe("readIdToken", () => {
 
   it("reports an unverified email as unverified", () => {
     expect(readIdToken(idToken({ ...valid, email_verified: "true" }), CLIENT_ID, "n-1", NOW)?.emailVerified).toBe(false);
+  });
+});
+
+describe("a token endpoint answer of HTTP 200 without a usable token", () => {
+  const client = { clientId: CLIENT_ID, clientSecret: "synthetic-client-secret" };
+  const malformed = [
+    { name: "no access token", body: { token_type: "Bearer", expires_in: 3599 } },
+    { name: "an empty access token", body: { access_token: "", expires_in: 3599 } },
+    { name: "no lifetime", body: { access_token: "at-synthetic" } },
+    { name: "a zero lifetime", body: { access_token: "at-synthetic", expires_in: 0 } },
+    { name: "a lifetime that is not a number", body: { access_token: "at-synthetic", expires_in: "3599" } },
+    { name: "a body that is not JSON", body: "<html>ok</html>" },
+  ];
+  const reply = (body: unknown) => () => (typeof body === "string" ? new Response(body) : Response.json(body));
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(malformed)("is upstream_unavailable for a renewal: $name", async ({ body }) => {
+    mockGoogle(reply(body));
+    const result = await refreshAccessToken(client, "rt-synthetic", NOW);
+    // The same request can work later: the person has nothing to fix.
+    expect(result).toEqual({ ok: false, code: "upstream_unavailable", message: "Google token endpoint: malformed response" });
+  });
+
+  it.each(malformed)("stays internal_error for the sign-in code exchange: $name", async ({ body }) => {
+    mockGoogle(reply(body));
+    const result = await exchangeCode(client, "code-synthetic", "verifier", "http://localhost/callback", NOW);
+    expect(result).toEqual({ ok: false, code: "internal_error", message: "Google token endpoint: malformed response" });
+  });
+
+  it("keeps internal_error for a renewal that Google refuses", async () => {
+    mockGoogle(() => Response.json({ error: "invalid_client" }, { status: 401 }));
+    expect(await refreshAccessToken(client, "rt-synthetic", NOW)).toEqual({
+      ok: false,
+      code: "internal_error",
+      message: "Google token endpoint: invalid_client (HTTP 401)",
+    });
   });
 });
 

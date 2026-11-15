@@ -114,9 +114,17 @@ export function exchangeCode(
       client_secret: client.clientSecret,
     },
     now,
+    // A sign-in that got no usable token cannot go on: a fault of this server's flow.
+    "internal_error",
   );
 }
 
+/**
+ * Renews the access token. HTTP 200 without a usable token is a fault of the
+ * token service, not of the link or the OAuth client: the same request can
+ * work later, so it is upstream_unavailable (the Go server: "could not be
+ * reached"). An answer that Google refuses stays internal_error.
+ */
 export function refreshAccessToken(
   client: GoogleClient,
   refreshToken: string,
@@ -130,10 +138,16 @@ export function refreshAccessToken(
       client_secret: client.clientSecret,
     },
     now,
+    "upstream_unavailable",
   );
 }
 
-async function tokenRequest(form: Record<string, string>, now: number): Promise<GoogleTokens | GoogleError> {
+/** `malformed` is the code for HTTP 200 with a body that holds no usable token. */
+async function tokenRequest(
+  form: Record<string, string>,
+  now: number,
+  malformed: GoogleErrorCode,
+): Promise<GoogleTokens | GoogleError> {
   let response: Response;
   try {
     response = await fetch(GOOGLE_TOKEN_URL, {
@@ -175,7 +189,7 @@ async function tokenRequest(form: Record<string, string>, now: number): Promise<
   const accessToken = body.access_token;
   const expiresIn = body.expires_in;
   if (typeof accessToken !== "string" || accessToken === "" || typeof expiresIn !== "number" || !(expiresIn > 0)) {
-    return { ok: false, code: "internal_error", message: "Google token endpoint: malformed response" };
+    return { ok: false, code: malformed, message: "Google token endpoint: malformed response" };
   }
   return {
     ok: true,

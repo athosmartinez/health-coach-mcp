@@ -1404,6 +1404,31 @@ describe("with the CoachStore token source", () => {
     expect(api.auths).toHaveLength(0);
   });
 
+  it("answers upstream_unavailable for a renewal answered with HTTP 200 and no usable token", async () => {
+    const api = health(() => json(200, {}));
+    const stray = "stray-text-in-the-answer";
+    const calls = mockGoogle(() => Response.json({ token_type: "Bearer", note: stray }), api.other);
+    const stub = freshStore();
+    await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
+    const budget = new RequestBudget();
+    const result = await listIn(stub, budget);
+    // Not auth_expired: the link and the OAuth client are fine, and a retry can work.
+    expect(result).toMatchObject({
+      ok: false,
+      wire: { code: "upstream_unavailable", message: "Google's token service is unavailable", hint: "try again in a few minutes" },
+    });
+    for (const text of [stray, GOOGLE_REFRESH_TOKEN, "at-old"]) {
+      expect(JSON.stringify(result)).not.toContain(text);
+      expect(logged()).not.toContain(text);
+    }
+    // The failure is remembered: another call of the same MCP request asks no more.
+    expect(await listIn(stub, budget)).toMatchObject({ ok: false, wire: { code: "upstream_unavailable" } });
+    expect(calls.token).toHaveLength(1);
+    // The link stays, and the status tool reports the same state.
+    expect(await stub.googleAccountStatus()).toMatchObject({ linked: true, token: "upstream_unavailable" });
+    expect(api.auths).toHaveLength(0);
+  });
+
   it("answers auth_expired when Google refuses the token request", async () => {
     const api = health(() => json(200, {}));
     const secret = "client-secret-in-the-answer";

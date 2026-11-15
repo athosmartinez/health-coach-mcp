@@ -254,7 +254,8 @@ describe("CoachStore Google token", () => {
     { name: "HTTP 429", reply: () => Response.json({ error: "rate_limit" }, { status: 429 }), code: "upstream_unavailable" },
     { name: "a network error", reply: () => Promise.reject(new TypeError("network down")), code: "upstream_unavailable" },
     { name: "invalid_client", reply: () => Response.json({ error: "invalid_client" }, { status: 401 }), code: "internal_error" },
-    { name: "a malformed body", reply: () => Response.json({ token_type: "Bearer" }), code: "internal_error" },
+    // HTTP 200 without a token: the token service is at fault, and a retry can work.
+    { name: "a malformed body", reply: () => Response.json({ token_type: "Bearer" }), code: "upstream_unavailable" },
   ])("maps $name to $code and keeps the link", async ({ reply, code }) => {
     mockGoogle(reply);
     const stub = coachStore(env);

@@ -14,6 +14,7 @@ import {
   rpc,
   signInAsOwner,
 } from "./helpers";
+import { ALL_TOOL_NAMES } from "./memory-helpers";
 
 const MODERN_PROTOCOL = "2026-07-28";
 
@@ -49,7 +50,7 @@ describe("MCP /mcp", () => {
     const listed = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     expect(listed.error).toBeUndefined();
     const tools = (listed.result as { tools?: { name: string }[] }).tools ?? [];
-    expect(tools.map((tool) => tool.name).sort()).toEqual(["google_account_status", "server_info"]);
+    expect(tools.map((tool) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
 
     const called = await post({
       jsonrpc: "2.0",

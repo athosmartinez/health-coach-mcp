@@ -28,6 +28,7 @@ import {
   signInAsOwner,
   startSignIn,
 } from "./helpers";
+import { ALL_TOOL_NAMES } from "./memory-helpers";
 
 async function accountRows(): Promise<Record<string, SqlStorageValue>[]> {
   return runInDurableObject(coachStore(env), async (_instance, state) =>
@@ -141,7 +142,7 @@ describe("Google sign-in", () => {
     // The MCP access token opens /mcp.
     const listed = await rpc(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const names = ((listed.result as { tools?: { name: string }[] }).tools ?? []).map((tool) => tool.name);
-    expect(names.sort()).toEqual(["google_account_status", "server_info"]);
+    expect(names.sort()).toEqual(ALL_TOOL_NAMES);
 
     // The MCP refresh token works and rotates.
     const refreshed = await call("/token", {

@@ -2,6 +2,13 @@ import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  test: {
+    // The files run in parallel, and the store limit tests fill tables with
+    // tens of thousands of rows. Under that load the first request of a file
+    // (it loads the Worker) can pass the default 5 s.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+  },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },

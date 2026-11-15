@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // Shared by the healthdata tests: synthetic records in the API's raw shapes
 // (they mirror the fixtures of internal/healthdata/*_test.go), a fake Google
 // Health API behind `fetch`, and the source as one MCP request builds it.
@@ -11,7 +12,17 @@ import { type Cache, HealthData, RECOVERY_KEYS, type Recovery, type Source, dbCa
 import { ALGO_VERSION, type Point } from "../src/metrics/stats";
 import type { Db } from "../src/store/db";
 import { metricRange } from "../src/store/metrics";
+import exerciseTypesText from "./fixtures/exercise-types.txt?raw";
 import { SAO_PAULO, withDb } from "./memory-helpers";
+
+/**
+ * The values of Google's ExerciseType enum, as the reference lists them
+ * (fixtures/exercise-types.txt names the page and the day it was read).
+ */
+export const DOCUMENTED_EXERCISE_TYPES: readonly string[] = exerciseTypesText
+  .split("\n")
+  .map((line) => line.trim())
+  .filter((line) => line !== "" && !line.startsWith("#"));
 
 // All values in the healthdata tests are synthetic.
 
@@ -270,6 +281,9 @@ export const FAKE_USER_ID = "1122334455";
 export const FAKE_CLIENT_ID = "synthetic-client.apps.example";
 
 const TYPE_URL = "type.googleapis.com/google.devicesandservices.health.v4";
+
+/** The display name the fake API writes for an exercise type other than OTHER, as Google writes one of its own. */
+export const generatedName = (exerciseType: string) => `Generated ${exerciseType.toLowerCase().replaceAll("_", " ")}`;
 const FILTER = /^([a-z_]+)\.([a-z_.]+) >= "([^"]+)" AND \1\.\2 < "([^"]+)"$/;
 
 function dateText(date: Json | undefined): string {
@@ -320,6 +334,11 @@ function sampleMs(dataType: string, record: Json | null): number {
  * shows them: the create of one nutrition-log data point, and batchDelete by
  * name. A created point is listed like any other record, with the data
  * source of the documented answer (platform GOOGLE_WEB_API).
+ *
+ * And the two writes of the exercise log. A create is checked against the
+ * rules the reference documents for an Exercise, and one that breaks a rule
+ * gets HTTP 400 (INVALID_ARGUMENT) with an ErrorInfo: a fake that accepts a
+ * body the real API refuses hides the defect until production.
  */
 export class FakeGoogle {
   private readonly records = new Map<string, Json[]>();
@@ -390,9 +409,9 @@ export class FakeGoogle {
     return request.method === "POST" ? `create ${dataType}` : dataType;
   }
 
-  /** The nutrition-log points that were created through the API and not deleted. */
-  createdPoints(): Json[] {
-    return (this.records.get("nutrition-log") ?? []).filter((record) => record?.dataSource?.platform === "GOOGLE_WEB_API");
+  /** The points of a data type (default: nutrition-log) that were created through the API and not deleted. */
+  createdPoints(dataType: "nutrition-log" | "exercise" = "nutrition-log"): Json[] {
+    return (this.records.get(dataType) ?? []).filter((record) => record?.dataSource?.platform === "GOOGLE_WEB_API");
   }
 
   /** Answers one request to the API; any other URL fails the test. */
@@ -414,6 +433,62 @@ export class FakeGoogle {
     return Response.json({ error: { code: status, status: grpc, message: "synthetic refusal" } }, { status });
   }
 
+  /** HTTP 400 for a body that breaks a documented rule: Google's error with an ErrorInfo. */
+  private invalid(message: string, reason: string): Response {
+    return Response.json(
+      {
+        error: {
+          code: 400,
+          status: "INVALID_ARGUMENT",
+          message,
+          details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason, domain: "health.googleapis.com" }],
+        },
+      },
+      { status: 400 },
+    );
+  }
+
+  /**
+   * Creates one exercise point and answers the finished Operation of the
+   * documented example ("Write a workout session"). The body is checked
+   * against the reference: the four fields of the interval, an end after the
+   * start, an exerciseType of the documented enum, a displayName and a
+   * metricsSummary. As the reference says, the display name of the body is
+   * kept only for the type OTHER: for any other type the point gets a name
+   * the server made.
+   */
+  private createExercise(body: Json): Response {
+    const exercise = body?.exercise;
+    const interval = exercise?.interval;
+    const isTime = (time: unknown) => typeof time === "string" && !Number.isNaN(Date.parse(time));
+    const isOffset = (value: unknown) => typeof value === "string" && /^-?\d+(\.\d+)?s$/.test(value);
+    if (typeof exercise !== "object" || exercise === null) return this.invalid("exercise is required", "SYNTHETIC_EXERCISE_MISSING");
+    if (!isTime(interval?.startTime) || !isTime(interval?.endTime) || !isOffset(interval?.startUtcOffset) || !isOffset(interval?.endUtcOffset)) {
+      return this.invalid("interval needs start_time, start_utc_offset, end_time and end_utc_offset", "SYNTHETIC_INTERVAL_INCOMPLETE");
+    }
+    if (!(Date.parse(interval.endTime) > Date.parse(interval.startTime))) return this.invalid("interval.end_time must be after interval.start_time", "SYNTHETIC_INTERVAL_EMPTY");
+    if (!DOCUMENTED_EXERCISE_TYPES.includes(exercise.exerciseType)) return this.invalid("exercise_type is not a valid ExerciseType", "SYNTHETIC_EXERCISE_TYPE_UNKNOWN");
+    if (typeof exercise.displayName !== "string" || exercise.displayName === "") return this.invalid("display_name is required", "SYNTHETIC_DISPLAY_NAME_MISSING");
+    const summary = exercise.metricsSummary;
+    if (typeof summary !== "object" || summary === null || Array.isArray(summary)) return this.invalid("metrics_summary is required", "SYNTHETIC_METRICS_SUMMARY_MISSING");
+
+    const id = `syn-created-${++this.createdCount}`;
+    const dataSource = { recordingMethod: body.dataSource?.recordingMethod ?? "UNKNOWN", application: { googleWebClientId: FAKE_CLIENT_ID }, platform: "GOOGLE_WEB_API" };
+    const stamp = new Date().toISOString();
+    const stored = {
+      ...exercise,
+      displayName: exercise.exerciseType === "OTHER" ? exercise.displayName : generatedName(exercise.exerciseType),
+      exerciseMetadata: {},
+      updateTime: stamp,
+      createTime: stamp,
+    };
+    this.add("exercise", { name: `users/me/dataTypes/exercise/dataPoints/${id}`, dataSource, exercise: stored });
+    return Response.json({
+      done: true,
+      response: { "@type": `${TYPE_URL}.DataPoint`, name: `users/${FAKE_USER_ID}/dataTypes/exercise/dataPoints/${id}`, dataSource, exercise: stored },
+    });
+  }
+
   /**
    * Creates one nutrition-log point and answers the finished Operation of the
    * documented example. The answer names the point under the user's ID; a
@@ -421,6 +496,7 @@ export class FakeGoogle {
    */
   private create(dataType: string, body: Json): Response {
     this.writes.push({ kind: "create", body });
+    if (dataType === "exercise") return this.createExercise(body);
     const log = body?.nutritionLog;
     const interval = log?.interval;
     const offset = /^-?\d+s$/;

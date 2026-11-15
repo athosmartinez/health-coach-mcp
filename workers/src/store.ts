@@ -4,7 +4,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Zone } from "./coach/date";
 import { INTERNAL_ERROR } from "./coach/errors";
 import { timeZone } from "./config";
-import { type GoogleErrorCode, missingHealthScopes, refreshAccessToken, splitScopes } from "./google";
+import { type GoogleErrorCode, type WriteDataType, missingHealthScopes, refreshAccessToken, splitScopes } from "./google";
 import { RequestBudget } from "./googlehealth/budget";
 import { GoogleHealthClient } from "./googlehealth/client";
 import { RequestTokens } from "./googlehealth/tokens";
@@ -16,7 +16,8 @@ import { targetInForce } from "./store/memory";
 import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
 import type { CoachDeps } from "./tools/coach";
-import { type WriteDeps, runWriteTool } from "./tools/foodlog";
+import { type ExerciseLogDeps, isExerciseLogTool, runExerciseLogTool } from "./tools/exerciselog";
+import { type Entries, type WriteDeps, runWriteTool } from "./tools/foodlog";
 import { runMemoryTool } from "./tools/memory";
 import { runCoachTool } from "./tools/moments";
 import type { ToolOutcome } from "./tools/register";
@@ -291,25 +292,28 @@ export class CoachStore extends DurableObject<Env> {
           zone,
         };
       };
+      // The entries this server created of one data type, each in its own table.
+      const entriesOf = (type: WriteDataType): Entries => ({
+        owner: () => linkedAccount(db),
+        record: (name, day, owner) => {
+          // An add always has a linked account: the create needs its token.
+          if (owner === undefined) throw new Error("store: no Google account was linked");
+          recordEntry(db, name, day, owner, type);
+        },
+        has: (name) => hasEntry(db, name, type),
+        forget: (name) => forgetEntry(db, name, type),
+      });
       let writeDeps: WriteDeps | undefined;
       const newWriteDeps = (): WriteDeps | undefined => {
         const zone = zoneOrError();
         if (!zone) return undefined;
-        return {
-          api: clientIn(zone),
-          entries: {
-            owner: () => linkedAccount(db),
-            record: (name, day, owner) => {
-              // An add always has a linked account: the create needs its token.
-              if (owner === undefined) throw new Error("store: no Google account was linked");
-              recordEntry(db, name, day, owner);
-            },
-            has: (name) => hasEntry(db, name),
-            forget: (name) => forgetEntry(db, name),
-          },
-          now: db.now,
-          zone,
-        };
+        return { api: clientIn(zone), entries: entriesOf("nutrition-log"), now: db.now, zone };
+      };
+      let exerciseLogDeps: ExerciseLogDeps | undefined;
+      const newExerciseLogDeps = (): ExerciseLogDeps | undefined => {
+        const zone = zoneOrError();
+        if (!zone) return undefined;
+        return { api: clientIn(zone), entries: entriesOf("exercise"), now: db.now, zone };
       };
       // The tool calls of a batch start together. The tools that reach Google
       // take turns, so the Google requests of one MCP request run one after
@@ -340,6 +344,11 @@ export class CoachStore extends DurableObject<Env> {
         });
       const write = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> =>
         inTurn(() => {
+          // The tools of each data type have their own table of entries.
+          if (isExerciseLogTool(name)) {
+            exerciseLogDeps ??= newExerciseLogDeps();
+            return exerciseLogDeps ? runExerciseLogTool(exerciseLogDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
+          }
           writeDeps ??= newWriteDeps();
           return writeDeps ? runWriteTool(writeDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
         });

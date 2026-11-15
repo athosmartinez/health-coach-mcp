@@ -18,14 +18,15 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { LOGGED_SESSIONS } from "../src/tools/workout";
 import fixtureText from "./fixtures/go-tools-list.json?raw";
 import { rpc, signInAsOwner } from "./helpers";
-import { COACH_TOOL_NAMES, MEMORY_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
+import { COACH_TOOL_NAMES, EXERCISE_LOG_TOOL_NAMES, MEMORY_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
 
 /**
- * Tools the Go server does not have, sorted: the account status of the
- * Worker's own sign-in, and the two tools that write the food log (the Go
- * server never writes to Google Health).
+ * Tools the Go server does not have, sorted: the two tools that write the
+ * exercise log, the account status of the Worker's own sign-in, and the two
+ * tools that write the food log (the Go server never writes to Google
+ * Health).
  */
-const NOT_IN_THE_GO_SERVER = ["google_account_status", "nutrition_log_add", "nutrition_log_delete"];
+const NOT_IN_THE_GO_SERVER = ["exercise_log_add", "exercise_log_delete", "google_account_status", "nutrition_log_add", "nutrition_log_delete"];
 
 interface ListedTool {
   name: string;
@@ -160,12 +161,14 @@ describe("parity with the Go server's tools/list", () => {
     expect([...workerTools.keys()].filter((name) => !goTools.has(name)).sort()).toEqual(NOT_IN_THE_GO_SERVER);
     expect(goTools.size).toBe(17);
     expect(workerTools.size).toBe(goTools.size + NOT_IN_THE_GO_SERVER.length);
-    expect(workerTools.size).toBe(20);
+    expect(NOT_IN_THE_GO_SERVER).toHaveLength(5);
+    expect(workerTools.size).toBe(22);
   });
 
   it("lists the write tools as not in the Go server, which only reads Google Health", () => {
     expect(WRITE_TOOL_NAMES).toEqual(["nutrition_log_add", "nutrition_log_delete"]);
-    for (const name of WRITE_TOOL_NAMES) {
+    expect(EXERCISE_LOG_TOOL_NAMES).toEqual(["exercise_log_add", "exercise_log_delete"]);
+    for (const name of [...WRITE_TOOL_NAMES, ...EXERCISE_LOG_TOOL_NAMES]) {
       expect(NOT_IN_THE_GO_SERVER, name).toContain(name);
       expect(goTools.has(name), `${name} in the Go fixture`).toBe(false);
       expect(workerTools.has(name), `${name} in the Worker`).toBe(true);

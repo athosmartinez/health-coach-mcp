@@ -15,10 +15,11 @@ function tableNames(sql: SqlStorage): string[] {
     .filter((name) => !name.startsWith("sqlite_") && !name.startsWith("_cf_"));
 }
 
-const ALL_TABLES = ["google_account", ...MEMORY_TABLES, "schema_version"].sort();
+const ALL_TABLES = ["daily_metrics", "google_account", ...MEMORY_TABLES, "schema_version"].sort();
 
-/** Undoes migration 3. The triggers and the FTS5 shadow tables go with their tables. */
+/** Undoes migrations 4 and 3. The triggers and the FTS5 shadow tables go with their tables. */
 function dropMemoryTables(sql: SqlStorage): void {
+  sql.exec("DROP TABLE daily_metrics");
   sql.exec("DROP TABLE notes_fts");
   for (const table of ["profile", "targets", "health_items", "lab_results", "preferences", "notes"]) {
     sql.exec(`DROP TABLE ${table}`);
@@ -46,7 +47,7 @@ async function row(): Promise<Record<string, SqlStorageValue> | undefined> {
 describe("CoachStore schema", () => {
   it("migrates a new object to the latest version", async () => {
     const stub = coachStore(env);
-    expect(SCHEMA_VERSION).toBe(3);
+    expect(SCHEMA_VERSION).toBe(4);
     expect(await stub.schemaVersion()).toBe(SCHEMA_VERSION);
     await runInDurableObject(stub, async (_instance, state) => {
       expect(tableNames(state.storage.sql)).toEqual(ALL_TABLES);
@@ -90,9 +91,28 @@ describe("CoachStore schema", () => {
 
       migrate(state.storage);
       expect(tableNames(sql)).toEqual(ALL_TABLES);
-      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(3);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(SCHEMA_VERSION);
       // The link survives the upgrade.
       expect(sql.exec("SELECT email FROM google_account").one()).toEqual({ email: OWNER_EMAIL });
+    });
+  });
+
+  it("adds the metrics cache to an object that already holds the coach memory", async () => {
+    await runInDurableObject(freshStore(), async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("DROP TABLE daily_metrics");
+      sql.exec("UPDATE schema_version SET version = 3 WHERE id = 1");
+      sql.exec("INSERT INTO preferences (key, value_json, updated_at) VALUES ('units', '\"metric\"', '2026-10-14T12:00:00.000000000Z')");
+
+      migrate(state.storage);
+      expect(tableNames(sql)).toEqual(ALL_TABLES);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(4);
+      // The memory survives the upgrade, and the cache starts empty.
+      expect(sql.exec("SELECT key FROM preferences").one()).toEqual({ key: "units" });
+      expect(sql.exec("SELECT COUNT(*) AS n FROM daily_metrics").one()).toEqual({ n: 0 });
+      // The step creates the table and its index together.
+      const indexes = sql.exec("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'daily_metrics' AND sql IS NOT NULL").toArray();
+      expect(indexes).toEqual([{ name: "daily_metrics_by_metric", sql: "CREATE INDEX daily_metrics_by_metric ON daily_metrics (metric, date)" }]);
     });
   });
 
@@ -100,7 +120,9 @@ describe("CoachStore schema", () => {
     await runInDurableObject(freshStore(), async (_instance, state) => {
       const sql = state.storage.sql;
       // Leave one memory table behind: migration 3 fails when it creates it again.
-      for (const table of ["profile", "targets", "health_items", "lab_results", "preferences"]) sql.exec(`DROP TABLE ${table}`);
+      for (const table of ["daily_metrics", "profile", "targets", "health_items", "lab_results", "preferences"]) {
+        sql.exec(`DROP TABLE ${table}`);
+      }
       sql.exec("DROP TABLE notes_fts");
       sql.exec("UPDATE schema_version SET version = 2 WHERE id = 1");
 
@@ -235,7 +257,8 @@ describe("CoachStore Google token", () => {
     { name: "HTTP 429", reply: () => Response.json({ error: "rate_limit" }, { status: 429 }), code: "upstream_unavailable" },
     { name: "a network error", reply: () => Promise.reject(new TypeError("network down")), code: "upstream_unavailable" },
     { name: "invalid_client", reply: () => Response.json({ error: "invalid_client" }, { status: 401 }), code: "internal_error" },
-    { name: "a malformed body", reply: () => Response.json({ token_type: "Bearer" }), code: "internal_error" },
+    // HTTP 200 without a token: the token service is at fault, and a retry can work.
+    { name: "a malformed body", reply: () => Response.json({ token_type: "Bearer" }), code: "upstream_unavailable" },
   ])("maps $name to $code and keeps the link", async ({ reply, code }) => {
     mockGoogle(reply);
     const stub = coachStore(env);
@@ -244,6 +267,66 @@ describe("CoachStore Google token", () => {
     expect(result).toMatchObject({ ok: false, code });
     expect(JSON.stringify(result)).not.toContain(GOOGLE_REFRESH_TOKEN);
     expect(await row()).toMatchObject({ refresh_token: GOOGLE_REFRESH_TOKEN });
+  });
+
+  it("renews a token that Google rejected, although its stored expiry is ahead", async () => {
+    const calls = mockGoogle(() => Response.json({ access_token: "renewed-access-token", expires_in: 3599 }));
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link());
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: GOOGLE_ACCESS_TOKEN });
+    expect(calls.token).toHaveLength(0);
+
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(true);
+    // Only the expiry is marked: the link and its tokens stay as they are.
+    expect(await row()).toMatchObject({
+      access_token: GOOGLE_ACCESS_TOKEN,
+      access_token_expires_at: 0,
+      refresh_token: GOOGLE_REFRESH_TOKEN,
+    });
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+    expect(calls.token).toHaveLength(1);
+    expect(calls.token[0]?.get("refresh_token")).toBe(GOOGLE_REFRESH_TOKEN);
+  });
+
+  it("ignores the rejection of a token that was already replaced", async () => {
+    const calls = mockGoogle(() => Response.json({ access_token: "renewed-access-token", expires_in: 3599 }));
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link());
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(true);
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+
+    // A request that saw the same 401 a moment later reports the old token.
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(false);
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+    expect(calls.token).toHaveLength(1);
+  });
+
+  it("shares one renewal between requests that report the same rejected token", async () => {
+    const calls = mockGoogle(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return Response.json({ access_token: "renewed-access-token", expires_in: 3599 });
+    });
+    const stub = coachStore(env);
+    await stub.linkGoogleAccount(link());
+    const renewed = async () => {
+      await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN);
+      return stub.googleAccessToken();
+    };
+    for (const result of await Promise.all([renewed(), renewed(), renewed()])) {
+      expect(result).toMatchObject({ ok: true, accessToken: "renewed-access-token" });
+    }
+    expect(calls.token).toHaveLength(1);
+  });
+
+  it("marks nothing for an empty token, another token or a missing link", async () => {
+    const calls = mockGoogle(() => new Response(null, { status: 500 }));
+    const stub = coachStore(env);
+    expect(await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN)).toBe(false);
+    await stub.linkGoogleAccount(link());
+    expect(await stub.invalidateGoogleAccessToken("")).toBe(false);
+    expect(await stub.invalidateGoogleAccessToken("another-token")).toBe(false);
+    expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: GOOGLE_ACCESS_TOKEN });
+    expect(calls.token).toHaveLength(0);
   });
 
   it("reports the account without any token", async () => {

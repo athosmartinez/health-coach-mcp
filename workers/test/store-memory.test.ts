@@ -50,8 +50,6 @@ describe("schema", () => {
       for (const name of objects) {
         expect(sql.exec("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", name).one().n, name).toBe(1);
       }
-      // The metrics cache comes with the code that fills it.
-      expect(sql.exec("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'daily_metrics'").one().n).toBe(0);
     }));
 
   it("has the Go store's final columns, in the same order", () =>

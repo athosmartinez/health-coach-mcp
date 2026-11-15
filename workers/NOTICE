@@ -1,0 +1,13 @@
+health-coach-mcp (Cloudflare Workers)
+
+This product includes code adapted from google-health-cli
+(https://github.com/Google-Health-API/google-health-cli),
+Copyright 2026 Google LLC, licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+
+Adapted files keep the original license header and list their changes:
+- src/googlehealth/client.ts (from pkg/client/client.go, Do; cmd/data.go, pagination)
+- src/googlehealth/datatypes.ts (from pkg/types/registry.go; cmd/data.go, filter and rollup bodies)
+
+Both are ports of the Go files of this repository that the root NOTICE lists
+(internal/googlehealth/client.go and internal/googlehealth/datatypes.go).

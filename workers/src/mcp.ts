@@ -1,7 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
+import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "./google";
+import { registerGuardrails, registerPrompts } from "./prompts";
 import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
+import { registerCoach } from "./tools/moments";
 import { type ToolOutcome, defineTool, register } from "./tools/register";
 import { inputSchema, s } from "./tools/schema";
 import { SERVER_NAME, TRANSPORT, VERSION } from "./version";
@@ -17,6 +20,12 @@ export const MCP_PATH = "/mcp";
 export interface ServerDeps {
   /** Runs the body of a coach memory tool on the store. */
   memory(name: string, args: Record<string, unknown>): ToolOutcome;
+  /**
+   * Runs the body of a coach-moment tool. It reads Google Health on the
+   * request budget of this MCP HTTP request, which every call here shares.
+   */
+  coach(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
+  /** Shares the access token answer of this MCP HTTP request with the coach tools. */
   googleAccountStatus(): Promise<GoogleAccountStatus>;
 }
 
@@ -84,21 +93,23 @@ export function createServer(deps: ServerDeps): McpServer {
   });
 
   registerMemory(server, deps.memory);
+  registerCoach(server, deps.coach);
+  registerGuardrails(server);
+  // The prompts call profile_get and the coach tools: this server has both.
+  registerPrompts(server);
 
   return server;
 }
-
-const RECONNECT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
 
 function hintFor(token: string, scopesMissing: boolean): string | null {
   switch (token) {
     case "not_linked":
     case "auth_expired":
-      return RECONNECT;
+      return RECONNECT_HINT;
     case "upstream_unavailable":
       return "Google is unavailable right now. Try again in a few minutes.";
     case "internal_error":
-      return "The Google token request failed. Check the server's Google OAuth client settings.";
+      return `The Google token request failed. ${OAUTH_CLIENT_HINT}`;
   }
-  return scopesMissing ? `Some Google Health permissions were not granted. ${RECONNECT}` : null;
+  return scopesMissing ? `Some Google Health permissions were not granted. ${RECONNECT_HINT}` : null;
 }

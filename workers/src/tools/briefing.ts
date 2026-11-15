@@ -226,7 +226,7 @@ export function efficiency(asleep: number, inBed: number): number | null {
 }
 
 /** Asleep / in bed per night, over the baseline nights. */
-function efficiencySeries(rec: Recovery): Point[] {
+export function efficiencySeries(rec: Recovery): Point[] {
   const asleep = rec.baselineSeries(KEY_ASLEEP);
   const inBed = rec.baselineSeries(KEY_IN_BED);
   return asleep.map((point, i): Point => {

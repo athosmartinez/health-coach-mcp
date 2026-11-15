@@ -12,10 +12,12 @@ import { MORNING_BRIEFING } from "./briefing";
 import type { Args, CoachDeps, CoachTool } from "./coach";
 import { NUTRITION_DAY } from "./nutrition";
 import { type Tool, type ToolOutcome, captureAsync, register } from "./register";
+import { METRIC_SERIES } from "./series";
+import { WEEKLY_REPORT } from "./weekly";
 import { WORKOUT_REVIEW } from "./workout";
 
 /** The coach-moment tools, in the order the Go server registers them. */
-const COACH: readonly CoachTool[] = [MORNING_BRIEFING, WORKOUT_REVIEW, NUTRITION_DAY];
+const COACH: readonly CoachTool[] = [MORNING_BRIEFING, WORKOUT_REVIEW, NUTRITION_DAY, WEEKLY_REPORT, METRIC_SERIES];
 
 export const COACH_TOOLS: readonly Tool[] = COACH.map((one) => one.tool);
 

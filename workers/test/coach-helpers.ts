@@ -30,6 +30,7 @@ import {
   type Source,
 } from "../src/healthdata";
 import type { Target } from "../src/store/memory";
+import type { NoteFilter, NoteResults } from "../src/store/notes";
 import type { CoachDeps, Notes, Targets } from "../src/tools/coach";
 import { COACH_TOOLS, runCoachTool } from "../src/tools/moments";
 import { invoke } from "../src/tools/register";
@@ -295,6 +296,85 @@ export function foodDay(day: LocalDate, ...specs: FoodSpec[]): NutritionDay {
     }
   }
   return logged;
+}
+
+/**
+ * The four meals, kcal 2200 and protein 130 in every item, and fiber in one
+ * item only.
+ */
+export function fullDay(day: LocalDate): NutritionDay {
+  return foodDay(
+    day,
+    food(8, "BREAKFAST", { kcal: 500, protein_g: 30, carb_g: 60, fat_g: 15 }),
+    food(12, "LUNCH", { kcal: 800, protein_g: 50, carb_g: 90, fat_g: 25, fiber_g: 10 }),
+    food(16, "SNACK", { kcal: 200, protein_g: 10, carb_g: 20, fat_g: 8 }),
+    food(20, "DINNER", { kcal: 700, protein_g: 40, carb_g: 70, fat_g: 20 }),
+  );
+}
+
+// The closed week the weekly_report and metric_series tests review, and the days around it.
+export const WEEK_START: LocalDate = "2026-10-05";
+export const WEEK_END: LocalDate = "2026-10-11";
+export const PREV_WEEK_START: LocalDate = "2026-09-28";
+/** 28 days before WEEK_START. */
+export const HISTORY_START: LocalDate = "2026-09-07";
+
+/**
+ * Picks a value by where the day falls: before the previous week, the
+ * previous week, the week under review, or the current week.
+ */
+export function period<T>(day: LocalDate, base: T, prev: T, current: T, running: T): T {
+  if (day < PREV_WEEK_START) return base;
+  if (day < WEEK_START) return prev;
+  return day <= WEEK_END ? current : running;
+}
+
+/**
+ * Fills 2026-09-07 to today. Asleep 420/420/400/430 min, HRV 60/55/54/50 ms,
+ * resting HR 56/58/60/61, steps 8000/8000/10000/9000, AZM 20, weight falling
+ * 0.1 kg a day from 80, food logs for the week under review.
+ */
+export function weeklyHealth(): FakeHealth {
+  const h = new FakeHealth();
+  for (let i = 0, d = HISTORY_START; d <= COACH_TODAY; i++, d = plus(d, 1)) {
+    const asleep = period(d, 420, 420, 400, 430);
+    h.nights.set(d, night(d, asleep, asleep + 50, period(d, 60, 55, 54, 50)));
+    h.resting.set(d, { bpm: period(d, 56, 58, 60, 61), method: "WITH_SLEEP" });
+    h.activityDays.set(d, activityDay({ steps: period(d, 8000, 8000, 10000, 9000), azm: 20, totalKcal: 2600, worn: true }));
+    h.weight.set(d, { at: undefined, value: 80 - 0.1 * i, source: "Synthetic scale" });
+  }
+  h.activityDays.set(COACH_TODAY, activityDay({ steps: 3000, azm: 5, totalKcal: 1200, worn: true, partial: true }));
+  // kcal 2200, protein 130
+  for (const d of ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]) h.nutritionDays.set(d, fullDay(d));
+  h.nutritionOtherDays.set("2026-10-08", 1);
+  // Protein 50 is a lower bound under the target.
+  h.nutritionDays.set("2026-10-09", foodDay("2026-10-09", food(12, "LUNCH", { kcal: 1000, protein_g: 50 }), food(20, "DINNER", { kcal: 1100 })));
+  // Protein 160 is a lower bound over the target.
+  h.nutritionDays.set("2026-10-10", foodDay("2026-10-10", food(8, "BREAKFAST", { kcal: 1000, protein_g: 160 }), food(20, "DINNER", { kcal: 1100 })));
+  // Snacks only: likely incomplete.
+  h.nutritionDays.set(
+    "2026-10-11",
+    foodDay("2026-10-11", food(10, "SNACK", { kcal: 300, protein_g: 20 }), food(15, "SNACK", { kcal: 250, protein_g: 10 })),
+  );
+  h.sessions = [
+    session("a", "2026-10-06", 18, "JIU_JITSU", 60, null),
+    session("b", "2026-10-08", 7, "RUNNING", 30, null),
+    session("c", "2026-10-10", 9, "STRENGTH_TRAINING", 45, null),
+    session("d", "2026-10-13", 18, "JIU_JITSU", 60, null),
+  ];
+  return h;
+}
+
+/** One target version, in force over the whole week under review. */
+export const REPORT_TARGET: Omit<Target, "created_at"> = { effective_from: "2026-10-01", kcal: 2000, protein_g: 150, weekly_sessions: 4 };
+export const REPORT_TARGETS = fakeTargets(REPORT_TARGET);
+
+/** A note store that returns `results` and records each filter in `filters`. */
+export function fakeNotes(results: NoteResults = { notes: [], more: false }, filters: NoteFilter[] = []): Notes {
+  return (filter) => {
+    filters.push(filter);
+    return results;
+  };
 }
 
 export interface CoachSessionOptions {

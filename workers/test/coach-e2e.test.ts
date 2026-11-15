@@ -14,11 +14,14 @@ import { GOOGLE_HEALTH_SCOPES, GOOGLE_TOKEN_URL, OAUTH_CLIENT_HINT, RECONNECT_HI
 import { HEALTH_REQUESTS, MAX_SUBREQUESTS, TOKEN_REQUESTS } from "../src/googlehealth/budget";
 import { CoachStore, type GoogleLink } from "../src/store";
 import { NUTRITION_NOTICE } from "../src/tools/nutrition";
+import { SERIES_NOTICE } from "../src/tools/series";
+import { WEEKLY_NOTICE } from "../src/tools/weekly";
 import {
   FakeGoogle,
   NOW,
   at,
   azmRollup,
+  bodyFatRec,
   exerciseRec,
   foodRec,
   hrvNight,
@@ -31,7 +34,7 @@ import {
   weightRec,
 } from "./healthdata-helpers";
 import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, type JsonRpc, OWNER_EMAIL, OWNER_SUB, rpc, signInAsOwner } from "./helpers";
-import { COACH_TOOL_NAMES, type McpTarget, freshStore, mcpRequest, objectTool } from "./memory-helpers";
+import { COACH_TOOL_NAMES, type McpTarget, SCHEMA_HINT, freshStore, mcpRequest, objectTool } from "./memory-helpers";
 
 const TODAY = "2026-10-16";
 const day = (offset: number) => addDays(TODAY, offset) as string;
@@ -42,7 +45,19 @@ const RENEWED_TOKEN = "at-renewed-8e07";
 /** Text that must never reach a log line or an error: names, tokens and marked values. */
 const SESSION_NAME = "JIU JITSU";
 const FOOD_NAME = "Synthetic food";
-const SECRETS = [STORED_TOKEN, RENEWED_TOKEN, GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, SESSION_NAME, FOOD_NAME, "Synthetic Band", "Synthetic Scale"];
+const DECISION_TEXT = "Synthetic decision 7733: eat more at lunch";
+const SECRETS = [
+  STORED_TOKEN,
+  RENEWED_TOKEN,
+  GOOGLE_ACCESS_TOKEN,
+  GOOGLE_REFRESH_TOKEN,
+  SESSION_NAME,
+  FOOD_NAME,
+  DECISION_TEXT,
+  "7733",
+  "Synthetic Band",
+  "Synthetic Scale",
+];
 
 const LEVELS = ["log", "info", "warn", "error", "debug"] as const;
 const spies = new Map<string, MockInstance>();
@@ -150,24 +165,34 @@ async function batch(target: McpTarget, calls: [string, Record<string, unknown>]
 }
 
 /**
- * One month of synthetic data, 2026-09-16 to 2026-10-16: each day a night of
- * 480 minutes in bed with HRV samples, a resting heart rate, and the daily
+ * Synthetic data for today and the `back` days before it: each day a night of
+ * 480 minutes in bed with 97 HRV samples, a resting heart rate, and the daily
  * totals. Every fifth day has no zone-minutes row but step records of the
- * band. A weigh-in every third day.
+ * band. A weigh-in with body fat every third day. A day that `offWrist` picks
+ * has no band data: no zone-minutes row and no step record.
  */
-function month(): void {
-  for (let i = 30; i >= 0; i--) {
+function daysOfData(back: number, offWrist: (i: number) => boolean = () => false): void {
+  for (let i = back; i >= 0; i--) {
     const [end, start] = [day(-i), day(-i - 1)];
     google.add("sleep", sleepRec(at(start, 23, 0), at(end, 7, 0), { deep: 60 }));
     google.add("heart-rate-variability", ...hrvNight(at(start, 23, 0), at(end, 7, 0), 40 + (i % 5)));
     google.add("daily-resting-heart-rate", restingRec(end, 55 + (i % 3), "WITH_SLEEP", "FITBIT"));
-    google.addRollup("steps", stepsRollup(end, 8000 + 10 * i));
-    google.addRollup("total-calories", kcalRollup(end, 2400 + i));
-    if (i % 5 === 3) google.add("steps", stepRec(end, "FITBIT"));
-    else google.addRollup("active-zone-minutes", azmRollup(end, 20, 5, 0));
-    if (i % 3 === 0) google.add("weight", weightRec(at(end, 7, 30), 80_000 + 100 * (i % 4), "FITBIT"));
+    google.addRollup("steps", stepsRollup(end, 8000 + 10 * (i % 100)));
+    google.addRollup("total-calories", kcalRollup(end, 2400 + (i % 100)));
+    // A day off the wrist has neither a zone-minutes row nor step records of the band.
+    if (!offWrist(i)) {
+      if (i % 5 === 3) google.add("steps", stepRec(end, "FITBIT"));
+      else google.addRollup("active-zone-minutes", azmRollup(end, 20, 5, 0));
+    }
+    if (i % 3 === 0) {
+      google.add("weight", weightRec(at(end, 7, 30), 80_000 + 100 * (i % 4), "FITBIT"));
+      google.add("body-fat", bodyFatRec(at(end, 7, 30), 20 + (i % 2)));
+    }
   }
 }
+
+/** One month, 2026-09-16 to 2026-10-16. */
+const month = () => daysOfData(30);
 
 const RUN_ID = "users/me/dataTypes/exercise/dataPoints/syn-run";
 
@@ -379,6 +404,103 @@ describe("the coach tools over /mcp, inside the object", () => {
     expect(await fails(stub, "nutrition_day", { date: day(-1) })).toMatchObject({ code: "no_data", message: "no food logged on that day" });
   });
 
+  it("serves weekly_report, with the targets and the decision notes of the store", async () => {
+    everything();
+    const stub = await linkedStore();
+    await ok(stub, "targets_set", { effective_from: "2026-10-01", kcal: 2000, protein_g: 150, weekly_sessions: 4 });
+    const decision = await ok(stub, "note_add", { kind: "decision", text: DECISION_TEXT, related_date: day(-2) });
+    // A decision of another week, and a note of another kind in this week: not listed.
+    await ok(stub, "note_add", { kind: "decision", text: "An older synthetic decision", related_date: day(-9) });
+    await ok(stub, "note_add", { kind: "insight", text: "A synthetic insight", related_date: day(-2) });
+    const out = await ok(stub, "weekly_report");
+    const data = out.data;
+    // Friday 2026-10-16: the week runs from Monday the 12th and counts up to today.
+    expect(data).toMatchObject({ week_start: "2026-10-12", week_end: "2026-10-18", through: TODAY, prev_week_start: "2026-10-05", notice: WEEKLY_NOTICE });
+    // Today's running totals are left out: four days this week, and the month's 26 days before the week.
+    expect(data.cardio.steps_per_day).toEqual({ this_week: 8025, prev_week: 8080, avg_28d: 8175, trend: "flat", n_days: 4, prev_week_n_days: 7, avg_28d_n_days: 26 });
+    // 2026-10-13 has no zone-minutes row, but the band counted steps: 0 minutes, not a missing day.
+    expect(data.cardio.azm_per_day).toMatchObject({ this_week: 18.8, prev_week: 21.4, trend: "flat", n_days: 4, prev_week_n_days: 7 });
+    expect(data.cardio.resting_hr_bpm).toMatchObject({ this_week: 55.8, prev_week: 56.1, trend: "flat", n_days: 5, prev_week_n_days: 7, avg_28d_n_days: 26 });
+    expect(data.cardio.hrv_ms).toMatchObject({ this_week: 42, prev_week: 41.6, trend: "flat", n_days: 5, prev_week_n_days: 7 });
+    expect(data.sleep.asleep_min).toEqual({ this_week: 440, prev_week: 440, avg_28d: 440, trend: "flat", n_days: 5, prev_week_n_days: 7, avg_28d_n_days: 26 });
+    expect(data.sleep.efficiency_pct).toMatchObject({ this_week: 91.7, prev_week: 91.7, trend: "flat" });
+    expect(data.sleep.onset_sd_min).toMatchObject({ this_week: 0, prev_week: 0, trend: "flat" });
+    // Two weigh-ins this week (the 13th and today): too few for a trend.
+    expect(data.body.weight_kg).toMatchObject({ trend: "unknown", trend_unavailable: "insufficient_days", n_days: 2, prev_week_n_days: 2 });
+    expect(data.body).toMatchObject({ last_weigh_in: TODAY, weight_age_days: 0, weight_slope_n_days: 10, weight_slope_span_days: 27 });
+    expect(data.body.body_fat_pct).toMatchObject({ trend: "unknown", trend_unavailable: "insufficient_days", n_days: 2 });
+    // The 14th (2200 kcal, 130 g protein) against 2000 kcal and 150 g; today's log is still growing.
+    expect(data.adherence).toEqual({
+      kcal_within_10pct: { pct: 100, days_hit: 1, days_counted: 1, days_below: 0, days_above: 0, days_left_out: { partial_day: 1 } },
+      protein_at_least_target: { pct: 0, days_hit: 0, days_counted: 1, days_left_out: { partial_day: 1 } },
+      days_logged: 2,
+      sessions: 4,
+      weekly_sessions_target: 4,
+    });
+    expect(data.decisions_this_week).toEqual([decision]);
+    expect(data.decisions_more).toBe(false);
+    expect(out.coverage).toEqual({ n_days: 5, confidence: "low" });
+    expect(out.sources).toEqual(["Synthetic Band", "Synthetic Scale"]);
+    expect(out.quality_flags).toEqual(["partial_day"]);
+    expect(logLines("log").at(-1)).toEqual(["tool_call", { tool: "weekly_report", duration_ms: expect.any(Number), is_error: false }]);
+    expect(logLines("warn")).toEqual([]);
+
+    // A closed week, by any of its days.
+    const closed = await ok(stub, "weekly_report", { week_end: day(-7) });
+    expect(closed.data).toMatchObject({ week_start: "2026-10-05", week_end: "2026-10-11", through: "2026-10-11", decisions_this_week: [{ text: "An older synthetic decision" }] });
+    expect(closed.coverage.n_days).toBe(7);
+    expect(await fails(stub, "weekly_report", { week_end: day(1) })).toEqual({ code: "invalid_input", message: "date is after today", hint: "omit date for today" });
+  });
+
+  it("serves metric_series", async () => {
+    everything();
+    const stub = await linkedStore();
+    const steps = await ok(stub, "metric_series", { metric: "steps", from: day(-3), to: TODAY });
+    expect(steps.data).toEqual({
+      metric: "steps",
+      unit: "steps",
+      granularity: "day",
+      from: "2026-10-13",
+      to: TODAY,
+      points: [
+        { date: "2026-10-13", value: 8030, n_days: 1, complete: true },
+        { date: "2026-10-14", value: 8020, n_days: 1, complete: true },
+        { date: "2026-10-15", value: 8010, n_days: 1, complete: true },
+        // Today's total still grows: null with the reason, never a low value.
+        { date: TODAY, value: null, n_days: 0, complete: true, reason: "partial_day" },
+      ],
+      notice: SERIES_NOTICE,
+    });
+    expect(steps.coverage).toEqual({ n_days: 3, confidence: "low" });
+    expect(steps.quality_flags).toEqual(["partial_day"]);
+    expect(steps.sources).toEqual([]);
+
+    // Weeks from their Monday; the month of data starts on Wednesday 2026-09-16.
+    const hrv = await ok(stub, "metric_series", { metric: "hrv", from: "2026-09-14", to: "2026-09-27", granularity: "week" });
+    expect(hrv.data.points).toEqual([
+      { date: "2026-09-14", value: 42, n_days: 5, complete: true },
+      { date: "2026-09-21", value: 42, n_days: 7, complete: true },
+    ]);
+    expect(hrv.data.unit).toBe("ms");
+    expect(hrv.sources).toEqual(["Synthetic Band"]);
+
+    // Food without a kcal target: the log check takes the calories burned as its reference.
+    const kcal = await ok(stub, "metric_series", { metric: "kcal_in", from: day(-3), to: day(-1) });
+    expect(kcal.data.points).toEqual([
+      { date: "2026-10-13", value: null, n_days: 0, complete: true },
+      { date: "2026-10-14", value: 2200, n_days: 1, complete: true },
+      { date: "2026-10-15", value: null, n_days: 0, complete: true },
+    ]);
+    expect(kcal.sources).toEqual(["FITBIT"]);
+
+    expect(await fails(stub, "metric_series", { metric: "steps", from: day(-200), to: TODAY })).toEqual({
+      code: "invalid_input",
+      message: "the series would have 201 points, more than 180",
+      hint: "use granularity week or a shorter range",
+    });
+    expect(await fails(stub, "metric_series", { metric: "mood", from: day(-3), to: TODAY })).toMatchObject({ code: "invalid_input", hint: SCHEMA_HINT });
+  });
+
   it("serves a coach tool through the Worker, which forwards the request to the object", async () => {
     const { access_token: accessToken } = await signInAsOwner();
     installFetch();
@@ -400,6 +522,8 @@ const CALLS: [string, Record<string, unknown>][] = [
   ["morning_briefing", {}],
   ["workout_review", { date: day(-2) }],
   ["nutrition_day", { date: day(-2) }],
+  ["weekly_report", {}],
+  ["metric_series", { metric: "steps", from: day(-6), to: TODAY }],
 ];
 
 describe("a coach tool without a usable Google link", () => {
@@ -519,10 +643,14 @@ describe("the logs of the coach tools", () => {
     // A record that cannot be read, with a marked value.
     google.add("sleep", { dataSource: { platform: "FITBIT" }, sleep: { interval: { endTime: "2026-10-16T10:00:00Z" }, summary: { minutesAsleep: { marked: "7711" } } } });
     const stub = await linkedStore();
-    const briefing = await ok(stub, "morning_briefing");
-    expect(briefing.quality_flags).toEqual(["unreadable_records"]);
-    await ok(stub, "workout_review", { date: day(-2) });
-    await ok(stub, "nutrition_day", { date: day(-2) });
+    // A decision note of this week: weekly_report returns its text.
+    await ok(stub, "note_add", { kind: "decision", text: DECISION_TEXT, related_date: day(-2) });
+    for (const level of LEVELS) spies.get(level)?.mockClear();
+    const outputs = new Map<string, Record<string, any>>();
+    for (const [name, args] of CALLS) outputs.set(name, await ok(stub, name, args));
+    expect(outputs.get("morning_briefing")?.quality_flags).toEqual(["unreadable_records"]);
+    expect(outputs.get("weekly_report")?.quality_flags).toEqual(["partial_day", "unreadable_records"]);
+    expect(outputs.get("weekly_report")?.data.decisions_this_week).toMatchObject([{ text: DECISION_TEXT }]);
     expect(COACH_TOOL_NAMES).toEqual(CALLS.map(([name]) => name));
     // One line per call, with the tool name, the duration and the outcome.
     expect(logLines("log")).toEqual(CALLS.map(([name]) => ["tool_call", { tool: name, duration_ms: expect.any(Number), is_error: false }]));
@@ -530,9 +658,40 @@ describe("the logs of the coach tools", () => {
     expect(logLines("warn")).toEqual([
       ["unreadable records in a recovery fetch", { from: "2026-09-18", to: "2026-10-16", skipped: 1 }],
       ["unreadable records in a recovery fetch", { from: "2026-09-17", to: "2026-10-15", skipped: 1 }],
+      ["unreadable records in a recovery fetch", { from: "2026-09-14", to: "2026-10-16", skipped: 1 }],
     ]);
     expect(logLines("error")).toEqual([]);
-    for (const secret of [...SECRETS, "7711", "8010", "2200", "80.3", "440"]) expect(logged()).not.toContain(secret);
+    // No token, name or note text, and no value of a result: steps, kcal, weight, minutes, weekly means.
+    for (const secret of [...SECRETS, "7711", "8010", "2200", "80.3", "440", "8025", "55.8", "18.8"]) expect(logged()).not.toContain(secret);
+  });
+
+  it("carry no health value or note text for a call that fails", async () => {
+    everything();
+    const stub = await linkedStore();
+    await ok(stub, "note_add", { kind: "decision", text: DECISION_TEXT, related_date: day(-2) });
+    for (const level of LEVELS) spies.get(level)?.mockClear();
+    // Google rejects one data type with a body that quotes a value; the reads before it succeed.
+    healthReply = (request) =>
+      request.url.includes("/nutrition-log/") || request.url.includes("/weight/")
+        ? Response.json({ error: { code: 400, message: "bad filter near 8025 for Synthetic food", status: "INVALID_ARGUMENT" } }, { status: 400 })
+        : undefined;
+    const internal = { code: "internal_error", message: "unexpected internal error" };
+    expect(await fails(stub, "weekly_report")).toEqual(internal);
+    expect(await fails(stub, "metric_series", { metric: "kcal_in", from: day(-6), to: TODAY })).toEqual(internal);
+    expect(await fails(stub, "metric_series", { metric: "weight", from: day(-6), to: TODAY })).toEqual(internal);
+    expect(logLines("log")).toEqual(
+      ["weekly_report", "metric_series", "metric_series"].map((tool) => ["tool_call", { tool, duration_ms: expect.any(Number), is_error: true, code: "internal_error" }]),
+    );
+    // The data type, the HTTP status and Google's status enum: never the answer's text.
+    expect(logLines("warn")).toEqual([
+      ["google health request rejected", { data_type: "weight", http_status: 400, google_status: "INVALID_ARGUMENT" }],
+      ["google health request rejected", { data_type: "nutrition-log", http_status: 400, google_status: "INVALID_ARGUMENT" }],
+      ["google health request rejected", { data_type: "weight", http_status: 400, google_status: "INVALID_ARGUMENT" }],
+    ]);
+    expect(logLines("error")).toEqual(
+      ["weekly_report", "metric_series", "metric_series"].map((tool) => ["tool_internal_error", { tool, error_types: "Error > StatusError" }]),
+    );
+    for (const secret of [...SECRETS, "8025", "bad filter", "2200", "80.3", "440"]) expect(logged()).not.toContain(secret);
   });
 });
 
@@ -592,6 +751,158 @@ describe("the Google requests of one MCP request", () => {
   });
 });
 
+/** Two meals on each of the `back` days before today. */
+function foodDays(back: number): void {
+  for (let i = back; i >= 1; i--) {
+    google.add(
+      "nutrition-log",
+      foodRec(at(day(-i), 12, 0), { meal: "LUNCH", kcal: 1200, list: { PROTEIN: 70 } }),
+      foodRec(at(day(-i), 20, 0), { meal: "DINNER", kcal: 900, list: { PROTEIN: 60 } }),
+    );
+  }
+}
+
+/**
+ * Calls a tool on one store, one MCP HTTP request per call, until it
+ * succeeds. Returns the Google requests of each call. A call may fail only
+ * with the budget error of the client, and never sends more than the budget.
+ */
+async function untilOk(target: McpTarget, name: string, args: Record<string, unknown>): Promise<{ output: Record<string, any>; calls: Record<string, number>[] }> {
+  const calls: Record<string, number>[] = [];
+  for (let n = 0; n < 6; n++) {
+    const outcome = await objectTool(target, name, args);
+    const counts = takeExternal();
+    calls.push(counts);
+    expect(counts.total, `call ${n + 1}`).toBeLessThanOrEqual(HEALTH_REQUESTS);
+    expect(counts.token ?? 0).toBe(0);
+    if (outcome.ok) return { output: outcome.output, calls };
+    expect(outcome.error.message, `call ${n + 1}`).toMatch(/^the date range holds more [a-z-]+ data than one call reads$/);
+    expect(outcome.error).toMatchObject({ code: "invalid_input", hint: "use a shorter date range" });
+  }
+  throw new Error(`${name} did not succeed in ${calls.length} calls: ${JSON.stringify(calls)}`);
+}
+
+// The request plans of weekly_report and metric_series, counted as HTTP
+// requests to Google on a cold cache. One MCP HTTP request may send 45.
+describe("the Google requests of the two report tools on a cold cache", () => {
+  it("weekly_report with six weeks of data", async () => {
+    daysOfData(41);
+    sessions();
+    meals();
+    const stub = await linkedStore();
+    const first = await ok(stub, "weekly_report");
+    // No kcal target: the log check of the week's two logged days reads total calories too.
+    expect(takeExternal(), "cold, no targets").toEqual({
+      total: 12,
+      // recovery of the 28 days before the week and the week: sleep in 2 pages, HRV, resting heart rate
+      sleep: 2,
+      "heart-rate-variability": 1,
+      "daily-resting-heart-rate": 1,
+      // steps and zone minutes, and the band's steps for the days without a zone-minutes row
+      "rollup steps": 1,
+      "rollup active-zone-minutes": 1,
+      steps: 1,
+      // 90 days of weight and body fat
+      weight: 1,
+      "body-fat": 1,
+      // the week's food log and sessions
+      "nutrition-log": 1,
+      exercise: 1,
+      // total calories of the week's logged days
+      "rollup total-calories": 1,
+    });
+    const second = await ok(stub, "weekly_report");
+    // The settled days come from the cache: one sleep page less, and no steps list.
+    expect(takeExternal(), "the cache it filled").toEqual({
+      total: 10,
+      sleep: 1,
+      "heart-rate-variability": 1,
+      "daily-resting-heart-rate": 1,
+      "rollup steps": 1,
+      "rollup active-zone-minutes": 1,
+      weight: 1,
+      "body-fat": 1,
+      "nutrition-log": 1,
+      exercise: 1,
+      "rollup total-calories": 1,
+    });
+    expect(second.data).toEqual(first.data);
+    // With a kcal target in force the total-calories rollup is not read.
+    const withTarget = await linkedStore();
+    await ok(withTarget, "targets_set", { effective_from: "2026-10-01", kcal: 2000, protein_g: 150, weekly_sessions: 4 });
+    await ok(withTarget, "weekly_report");
+    const targeted = takeExternal();
+    expect(targeted.total, "cold, with a kcal target").toBe(11);
+    expect(targeted).not.toHaveProperty("rollup total-calories");
+    // A closed week reads the same data types over a range that ends on its Sunday.
+    await ok(await linkedStore(), "weekly_report", { week_end: day(-7) });
+    expect(takeExternal().total, "cold, the week before").toBe(11);
+  });
+
+  // A day without band data has no zone-minutes value, so no call can cache
+  // it: every call reads it again. These years are harder than the one above.
+  it.each<[string, (i: number) => boolean, Record<string, [number[], number]>]>([
+    // Each later call reads the off-wrist days again: their zone-minutes
+    // rollups and step lists, and for total_calories their 14-day windows.
+    // kcal_in reads total calories only for the days with the band.
+    ["a day off the wrist in every week", (i) => i % 7 === 6, { total_calories: [[45], 43], azm: [[18], 17], kcal_in: [[45, 18], 18] }],
+    // total_calories takes the whole budget on every call. kcal_in has no
+    // day with the band, so it reads no total calories: the food log 1, the
+    // zone-minutes rollup 5 and the steps lists 13.
+    ["no band data at all", () => true, { total_calories: [[45], 45], azm: [[18], 18], kcal_in: [[19], 19] }],
+  ])("metric_series over 366 days with %s", async (_name, offWrist, expected) => {
+    daysOfData(365, offWrist);
+    foodDays(365);
+    const measured: Record<string, [number[], number]> = {};
+    for (const metric of Object.keys(expected)) {
+      const stub = await linkedStore();
+      const args = { metric, from: day(-365), to: TODAY, granularity: "week" };
+      const cold = await untilOk(stub, "metric_series", args);
+      const warm = await untilOk(stub, "metric_series", args);
+      expect(warm.calls, metric).toHaveLength(1);
+      expect(warm.output.data, metric).toEqual(cold.output.data);
+      measured[metric] = [cold.calls.map((counts) => counts.total), warm.calls[0]?.total ?? 0];
+    }
+    expect(measured).toEqual(expected);
+  });
+
+  // 366 days by week: 53 points. The data has one night with 97 HRV samples,
+  // one resting value and three rollup rows per day; every fifth day has no
+  // zone-minutes row but step records of the band. `calls` lists the Google
+  // requests of each MCP request until the tool succeeds, and `again` the
+  // requests of one more call on the cache they filled.
+  it.each<[string, number[], number]>([
+    // one weight list
+    ["weight", [1], 1],
+    // one resting heart rate list
+    ["resting_hr", [1], 1],
+    // sleep 18 pages (6 windows of 63 nights), HRV 6
+    ["hrv", [24], 2],
+    ["sleep_asleep_min", [24], 2],
+    // one steps rollup per 90 days
+    ["steps", [5], 1],
+    // zone-minutes rollup 5, the band's steps for the days without a row 13
+    ["azm", [18], 1],
+    // total-calories rollup 27 (14 days each), zone minutes 5, the band's steps 13: the whole budget
+    ["total_calories", [45], 2],
+    // No kcal target: the food log 1, then the 45 of total_calories do not fit.
+    // The first call ends with the budget error and leaves its windows cached.
+    ["kcal_in", [45, 3], 3],
+    ["protein_g", [45, 3], 3],
+  ])("metric_series %s over 366 days", async (metric, calls, again) => {
+    daysOfData(365);
+    foodDays(365);
+    const stub = await linkedStore();
+    const args = { metric, from: day(-365), to: TODAY, granularity: "week" };
+    const cold = await untilOk(stub, "metric_series", args);
+    expect(cold.output.data.points).toHaveLength(53);
+    expect(cold.calls.map((counts) => counts.total), JSON.stringify(cold.calls)).toEqual(calls);
+    const warm = await untilOk(stub, "metric_series", args);
+    expect(warm.calls.map((counts) => counts.total), JSON.stringify(warm.calls)).toEqual([again]);
+    expect(warm.output.data).toEqual(cold.output.data);
+  });
+});
+
 // One HTTP request can carry several tool calls: the transport takes a
 // JSON-RPC batch. The limit of 50 subrequests is for the whole HTTP request.
 describe("one HTTP request with several tool calls", () => {
@@ -599,28 +910,33 @@ describe("one HTTP request with several tool calls", () => {
     everything();
     // An expired access token and a cold cache: the worst start.
     const stub = await linkedStore({ accessTokenExpiresAt: 0 });
-    const [briefing, workout, nutrition, status] = await batch(stub, [...CALLS, ["google_account_status", {}]]);
+    const [briefing, workout, nutrition, weekly, series, status] = await batch(stub, [...CALLS, ["google_account_status", {}]]);
     expect(briefing).toMatchObject({ ok: true, output: { data: { readiness: { level: "yellow" } } } });
     expect(workout).toMatchObject({ ok: true, output: { data: { date: "2026-10-14" } } });
     expect(nutrition).toMatchObject({ ok: true, output: { data: { items_logged: 4 } } });
+    expect(weekly).toMatchObject({ ok: true, output: { data: { week_start: "2026-10-12", through: TODAY } } });
+    expect(series).toMatchObject({ ok: true, output: { data: { metric: "steps", unit: "steps" } } });
     expect(status).toMatchObject({ ok: true, output: { linked: true, token: "ok" } });
-    // Every external fetch of the HTTP request: one token renewal for the four
-    // calls, and the Google Health requests of the three tools (8 + 8 + 4),
-    // which take turns.
+    // Every external fetch of the HTTP request: one token renewal for the six
+    // calls, and the Google Health requests of the five tools, which take
+    // turns: a later tool finds in the cache what an earlier one fetched.
+    // 8 + 8 + 4 for the three day tools, 12 for the weekly report and 1 for the series.
     const counts = takeExternal();
     expect(counts).toEqual({
-      total: 21,
+      total: 34,
       token: 1,
-      sleep: 4,
-      "heart-rate-variability": 2,
-      "daily-resting-heart-rate": 2,
-      "rollup steps": 1,
-      "rollup active-zone-minutes": 2,
-      "rollup total-calories": 1,
-      exercise: 3,
+      sleep: 6,
+      "heart-rate-variability": 3,
+      "daily-resting-heart-rate": 3,
+      "rollup steps": 3,
+      "rollup active-zone-minutes": 3,
+      "rollup total-calories": 2,
+      steps: 1,
+      exercise: 4,
       "heart-rate": 2,
-      "nutrition-log": 1,
-      weight: 2,
+      "nutrition-log": 2,
+      weight: 3,
+      "body-fat": 1,
     });
     expect(counts.total).toBeLessThanOrEqual(MAX_SUBREQUESTS);
     expect(new Set(auths)).toEqual(new Set([`Bearer ${RENEWED_TOKEN}`]));

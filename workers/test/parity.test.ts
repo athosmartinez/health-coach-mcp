@@ -62,7 +62,7 @@ describe("parity with the Go server's tools/list", () => {
   });
 
   it("has the coach-moment tools of this Worker in the fixture and in the Worker", () => {
-    expect(COACH_TOOL_NAMES).toEqual(["morning_briefing", "workout_review", "nutrition_day"]);
+    expect(COACH_TOOL_NAMES).toEqual(["morning_briefing", "workout_review", "nutrition_day", "weekly_report", "metric_series"]);
     for (const name of COACH_TOOL_NAMES) {
       expect(goTools.has(name), `${name} in the Go fixture`).toBe(true);
       expect(workerTools.has(name), `${name} in the Worker`).toBe(true);
@@ -83,11 +83,13 @@ describe("parity with the Go server's tools/list", () => {
     expect(canonical(worker)).toBe(canonical(go));
   });
 
-  it("knows which Go tools the Worker does not serve yet", () => {
+  it("serves every tool of the Go server, and one of its own", () => {
     // server_info exists on both sides but differs on purpose: the Worker adds
     // `transport` to its output and annotations to the tool.
     const missing = [...goTools.keys()].filter((name) => !workerTools.has(name)).sort();
-    expect(missing).toEqual(["metric_series", "weekly_report"]);
+    expect(missing).toEqual([]);
     expect([...workerTools.keys()].filter((name) => !goTools.has(name))).toEqual(["google_account_status"]);
+    expect(goTools.size).toBe(17);
+    expect(workerTools.size).toBe(18);
   });
 });

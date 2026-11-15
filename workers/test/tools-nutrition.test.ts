@@ -3,27 +3,13 @@
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LocalDate } from "../src/coach/date";
-import { type ActivityDay, NUTRIENTS, type NutritionDay } from "../src/healthdata";
+import { type ActivityDay, NUTRIENTS } from "../src/healthdata";
 import { MAX_FOOD_ITEMS, NUTRITION_DAY, NUTRITION_NOTICE, STALE_WEIGHT_DAYS, checkFood, kcalGap, totalsOf, weightAge } from "../src/tools/nutrition";
-import { COACH_TODAY, FakeHealth, type FoodSpec, activityDay, coachSession, fakeTargets, food, foodDay, target } from "./coach-helpers";
+import { COACH_TODAY, FakeHealth, type FoodSpec, activityDay, coachSession, fakeTargets, food, foodDay, fullDay, target } from "./coach-helpers";
 
 // All values below are synthetic.
 
 const CLOSED_DAY: LocalDate = "2026-10-14";
-
-/**
- * The four meals, kcal 2200 and protein 130 in every item, and fiber in one
- * item only.
- */
-function fullDay(day: LocalDate): NutritionDay {
-  return foodDay(
-    day,
-    food(8, "BREAKFAST", { kcal: 500, protein_g: 30, carb_g: 60, fat_g: 15 }),
-    food(12, "LUNCH", { kcal: 800, protein_g: 50, carb_g: 90, fat_g: 25, fiber_g: 10 }),
-    food(16, "SNACK", { kcal: 200, protein_g: 10, carb_g: 20, fat_g: 8 }),
-    food(20, "DINNER", { kcal: 700, protein_g: 40, carb_g: 70, fat_g: 20 }),
-  );
-}
 
 function nutritionHealth(): FakeHealth {
   const h = new FakeHealth();

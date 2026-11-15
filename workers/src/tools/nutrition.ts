@@ -3,7 +3,7 @@
 import type { LocalDate } from "../coach/date";
 import { ToolError } from "../coach/errors";
 import { compareText } from "../coach/text";
-import { type FoodItem, NUTRIENTS, type Nutrient, type Nutrition, last } from "../healthdata";
+import { type Activity, type FoodItem, NUTRIENTS, type Nutrient, type Nutrition, last } from "../healthdata";
 import { FLAG_LIKELY_INCOMPLETE_NUTRITION, FLAG_PARTIAL_DAY, type Logging, checkLogging, normalizeMealType } from "../metrics/quality";
 import type { Target } from "../store/memory";
 import {
@@ -472,6 +472,43 @@ export function checkFood(
     intakeGap,
     dayGap: dayReason(partial, logging.likely_incomplete),
   };
+}
+
+/**
+ * The band's total calories on each of `days`, for the days it was worn: what
+ * checkFood takes as `burned` over a range (weekly_report, metric_series). A
+ * day without the band has none: its total is mostly a resting estimate.
+ *
+ * The read has two steps, each over the days that need it: whether the band
+ * was worn (`worn`, when the caller already read it), then total calories of
+ * the worn days. A day without band data is never cached, and in this order it
+ * costs no total-calories request (one per 14 days) on any call.
+ */
+export async function burnOf(deps: CoachDeps, days: readonly LocalDate[], worn?: Activity): Promise<Burn> {
+  const burn: Burn = { kcal: new Map(), skipped: 0 };
+  const wanted = [...days].sort(compareText);
+  const [first, latest] = [wanted[0], wanted.at(-1)];
+  if (first === undefined || latest === undefined) return burn;
+  const band = worn ?? (await deps.health.activity(first, latest, { values: ["worn"] }));
+  if (!worn) burn.skipped += band.skipped;
+  const wornDays = wanted.filter((day) => band.days.get(day)?.worn);
+  const [firstWorn, latestWorn] = [wornDays[0], wornDays.at(-1)];
+  if (firstWorn === undefined || latestWorn === undefined) return burn;
+  const totals = await deps.health.activity(firstWorn, latestWorn, { values: ["total_calories"] });
+  burn.skipped += totals.skipped;
+  for (const day of wornDays) {
+    const kcal = totals.days.get(day)?.totalKcal;
+    if (kcal !== null && kcal !== undefined) burn.kcal.set(day, kcal);
+  }
+  return burn;
+}
+
+/** What burnOf read. */
+export interface Burn {
+  /** The total calories of each worn day that has a total. */
+  kcal: Map<LocalDate, number>;
+  /** Rollup rows of its own reads that could not be read. */
+  skipped: number;
 }
 
 /** The days from the weigh-in to the day. */

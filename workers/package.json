@@ -8,6 +8,7 @@
     "start": "wrangler dev",
     "typecheck": "wrangler types --include-runtime false && tsc --noEmit && tsc --noEmit -p test",
     "test": "vitest run",
+    "check:go-fixture": "node scripts/go-tools-list.mjs --check",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types --include-runtime false"
   },

@@ -286,7 +286,10 @@ export class GoogleHealthClient {
 
   /**
    * Deletes the nutrition-log data point with this ID. "gone": Google has no
-   * such point (HTTP 404), which is the state a delete asks for. The caller
+   * such point, which is the state a delete asks for. Only an HTTP 404 whose
+   * body is Google's JSON error with the status NOT_FOUND is "gone"; any other
+   * 404 is a refused delete, since it does not prove that the point is not
+   * there. The caller
    * decides which points may be deleted: Google's documentation does not prove
    * that it refuses the delete of a point another app wrote.
    */
@@ -382,8 +385,8 @@ export class GoogleHealthClient {
    * (429, a quota 403, a rejected token). A network error, a timeout, a 408, a
    * 5xx or an answer over the size cap leave its outcome unknown: the call
    * ends there, and its error says that the entry may exist. A delete names
-   * the point to remove, so it keeps the rules of a read; its 404 comes back
-   * to the caller as an answer.
+   * the point to remove, so it keeps the rules of a read; a 404 that Google's
+   * API answers (NOT_FOUND) comes back to the caller as an answer.
    */
   protected async request(method: string, path: string, query?: string, body?: string): Promise<Reply> {
     const allowed = requestTarget(method, path, query);
@@ -453,8 +456,11 @@ export class GoogleHealthClient {
               : [`Google Health denied the write of ${dataType} data`, WRITE_SCOPE_HINT];
           throw new ToolError("scope_missing", message, hint, { cause: statusError(status, reply.text) });
         }
-        // The point is not there: the state a delete asks for.
-        if (kind === "delete" && status === 404) return reply;
+        // The point is not there: the state a delete asks for. Only Google's
+        // own JSON error with the status NOT_FOUND says so. Any other 404 (the
+        // page of a front end for a path or a body that is wrong) says nothing
+        // about the point: it is a refused delete, below.
+        if (kind === "delete" && status === 404 && statusError(status, reply.text).status === NOT_FOUND) return reply;
         // A rate limit is an answer that Google did not take the request.
         const refusedForNow = status === 429 || limited;
         const noAnswer = status === 408 || status >= 500;
@@ -761,6 +767,9 @@ function tokenError(code: string): ToolError {
 }
 
 const STATUS_ENUM = /^[A-Z][A-Z_]{0,63}$/;
+
+/** Google's status enum of an HTTP 404 that the API itself answers. */
+const NOT_FOUND = "NOT_FOUND";
 
 /**
  * Keeps the error.status enum of an error body, and only when it is

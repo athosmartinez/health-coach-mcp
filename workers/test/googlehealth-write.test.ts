@@ -740,13 +740,36 @@ describe("deleteNutritionLog", () => {
     expect(tokens.asked).toBe(0);
   });
 
-  it("takes a 404 as a point that is already gone, without a retry", async () => {
+  it("takes Google's own 404, with the status NOT_FOUND, as a point that is already gone, without a retry", async () => {
     const requests = fakeApi(() => apiError(404, "NOT_FOUND"));
     const { client, waits } = testClient();
     expect(await client.deleteNutritionLog("syn-point-9f3a")).toBe("gone");
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
     expect(logged()).toBe("[]");
+  });
+
+  // A 404 that is not Google's JSON error says nothing about the point: a
+  // front end answers it for a path or a body that is wrong. Taken as "gone",
+  // the server would forget an entry that Google still holds.
+  it.each([
+    ["the HTML page of a front end", () => new Response(`<html><title>Error 404 (Not Found)</title>${BODY_MARK} NOT_FOUND</html>`, { status: 404, headers: { "content-type": "text/html" } }), ""],
+    ["an empty body", () => new Response(null, { status: 404 }), ""],
+    ["a JSON error without a status", () => json(404, { error: { code: 404, message: BODY_MARK } }), ""],
+    ["a JSON error whose status is not an enum text", () => json(404, { error: { code: 404, status: "not found", message: BODY_MARK } }), ""],
+    ["a JSON error with another status", () => apiError(404, "UNIMPLEMENTED"), "UNIMPLEMENTED"],
+    ["a JSON body that only names NOT_FOUND in a text", () => json(404, { message: "NOT_FOUND", status: "NOT_FOUND" }), ""],
+    ["a JSON text NOT_FOUND", () => json(404, "NOT_FOUND"), ""],
+  ] as [string, () => Response, string][])("takes a 404 with %s as a refused delete, not as a point that is gone", async (_name, reply, grpc) => {
+    const requests = fakeApi(reply);
+    const { client, waits } = testClient();
+    const error = await failure(client.deleteNutritionLog("syn-point-9f3a"));
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: "Google Health refused the delete", hint: "the entry was not deleted" });
+    // An answer, so no retry.
+    expect(requests).toHaveLength(1);
+    expect(waits).toEqual([]);
+    expect(warnings()).toEqual([["google health request rejected", { data_type: "nutrition-log", http_status: 404, google_status: grpc }]]);
+    expectNoSecret(error);
   });
 
   it("is sent again after a 429, a 5xx and a network error: a delete of a name is idempotent", async () => {

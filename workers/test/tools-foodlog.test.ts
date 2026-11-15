@@ -763,7 +763,7 @@ describe("the write tools through /mcp of the object", () => {
     expect(g.takeExternal()).toEqual({ total: 0 });
   });
 
-  it("delete takes an HTTP 404 as an entry that is already gone", async () => {
+  it("delete takes Google's own 404 (NOT_FOUND) as an entry that is already gone", async () => {
     const stub = await linkedStore();
     const added = await objectTool(stub, "nutrition_log_add", FOOD);
     if (!added.ok) throw new Error("the add failed");
@@ -771,6 +771,39 @@ describe("the write tools through /mcp of the object", () => {
     g.healthReply = googleError(404, "NOT_FOUND");
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({ ok: true, output: { entry_id: createdName(1), deleted: true } });
     expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    // The row is gone: a second delete finds no entry of this server, and sends nothing.
+    expect(await storedEntries(stub)).toEqual([]);
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toMatchObject({ ok: false, error: { code: "no_data" } });
+    expect(g.takeExternal()).toEqual({ total: 0 });
+  });
+
+  it.each([
+    ["the HTML page of a front end", () => new Response(`<html>Error 404 ${BODY_MARK}</html>`, { status: 404, headers: { "content-type": "text/html" } })],
+    ["a JSON error without Google's status", () => Response.json({ error: { code: 404, message: BODY_MARK } }, { status: 404 })],
+  ] as [string, () => Response][])("delete keeps the entry as its own after a 404 that is %s", async (_name, reply) => {
+    const stub = await linkedStore();
+    const added = await objectTool(stub, "nutrition_log_add", FOOD);
+    if (!added.ok) throw new Error("the add failed");
+    g.takeExternal();
+    g.clearLogs();
+    g.healthReply = reply;
+    // Not "deleted": this 404 does not prove that Google has no such entry.
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({
+      ok: false,
+      error: { code: "invalid_input", message: "Google Health refused the delete", hint: "the entry was not deleted" },
+    });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    // The entry is still in Google Health, and its row stays.
+    expect(g.google.createdPoints()).toHaveLength(1);
+    expect(await storedEntries(stub)).toMatchObject([{ name: createdName(1) }]);
+    expect(g.logLines("warn")).toEqual([["google health request rejected", { data_type: "nutrition-log", http_status: 404, google_status: "" }]]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete", "invalid_input")]);
+    expectNoSecret(g.logged());
+
+    // So a second delete still reaches Google, and now deletes the entry.
+    g.healthReply = undefined;
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({ ok: true, output: { entry_id: createdName(1), deleted: true } });
+    expect(g.google.createdPoints()).toEqual([]);
     expect(await storedEntries(stub)).toEqual([]);
   });
 

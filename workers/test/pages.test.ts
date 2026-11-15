@@ -45,7 +45,8 @@ describe("public pages", () => {
     expect(body).toContain("Google API Services User Data Policy");
     expect(body).toContain("https://developers.google.com/terms/api-services-user-data-policy");
     expect(body).toContain("Third-party access");
-    expect(body).toContain("athosandrade04@gmail.com");
+    expect(body).toContain("open an issue on this repository");
+    expect(body).not.toMatch(/mailto:/i);
     expect(body).not.toMatch(/<script/i);
   });
 

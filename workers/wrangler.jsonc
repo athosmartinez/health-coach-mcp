@@ -30,11 +30,14 @@
   },
   // workers-oauth-provider keeps clients, grants and hashed MCP tokens here.
   // The Google refresh token never goes to KV: it lives in CoachStore.
-  // Create the namespace before the first deploy and add its "id".
+  // The id is a placeholder, not a real namespace. Each deployer creates
+  // their own (`npx wrangler kv namespace create OAUTH_KV`) and sets its id.
+  // See workers/README.md (Setup). The zeros are only so local tests and
+  // `wrangler types` have a value.
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "c9995c5be68a4b70b9a84def3458a3ab"
+      "id": "00000000000000000000000000000000"
     }
   ],
   "migrations": [

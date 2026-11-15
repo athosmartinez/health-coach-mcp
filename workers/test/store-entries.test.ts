@@ -123,10 +123,27 @@ describe("the entries this server created", () => {
         "syn-entry-1": NAME,
         "syn-b": underMe,
       });
-      // The other form of the same id is not a second entry, and hasEntry still wants the stored name.
+      // Two different point ids. hasEntry still wants each stored name, not another user path.
       expect(hasEntry(db, "users/me/dataTypes/nutrition-log/dataPoints/syn-entry-1")).toBe(false);
       expect(hasEntry(db, NAME)).toBe(true);
       expect(entryNamesBetween(db, "2026-10-14", "2026-10-14").size).toBe(0);
+    }));
+
+  it("keeps the lesser name when two rows share a point id, and a delete of the users/me form leaves the other", () =>
+    withDb((db) => {
+      const id = "syn-shared";
+      const numeric = `users/1122334455/dataTypes/nutrition-log/dataPoints/${id}`;
+      const underMe = `users/me/dataTypes/nutrition-log/dataPoints/${id}`;
+      recordEntry(db, underMe, "2026-10-13");
+      recordEntry(db, numeric, "2026-10-13");
+      // '1' sorts before 'm', so the numeric name wins whichever row was written first.
+      expect(numeric < underMe).toBe(true);
+      expect(entryNamesBetween(db, "2026-10-13", "2026-10-13").get(id)).toBe(numeric);
+      expect(hasEntry(db, underMe)).toBe(true);
+      forgetEntry(db, underMe);
+      expect(hasEntry(db, underMe)).toBe(false);
+      expect(hasEntry(db, numeric)).toBe(true);
+      expect(entryNamesBetween(db, "2026-10-13", "2026-10-13").get(id)).toBe(numeric);
     }));
 
   it("lists only the ids of the account that is linked now", () =>

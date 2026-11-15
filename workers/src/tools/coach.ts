@@ -42,16 +42,11 @@ export type Notes = (filter: NoteFilter) => NoteResults;
 export interface FoodEntries {
   /**
    * Whether this server created an entry with exactly this name for the
-   * account that is linked now. The check nutrition_log_delete uses.
+   * account that is linked now. The check nutrition_log_delete uses. It sees
+   * the account linked when it is called, which may no longer be the account
+   * the food read started with.
    */
   has(name: string): boolean;
-  /**
-   * The stored name of each entry this server created for the linked account
-   * on the local days [from, to], keyed by data point ID. A list may name
-   * the user in another form than the create did; the stored name is the one
-   * `has` matches.
-   */
-  namesBetween(from: LocalDate, to: LocalDate): ReadonlyMap<string, string>;
 }
 
 /** What the coach-moment tools need. */
@@ -66,8 +61,8 @@ export interface CoachDeps {
   /** May be absent: weekly_report then lists no decisions. */
   notes?: Notes;
   /**
-   * May be absent: nutrition_day then leaves entry_id null. The lookup is
-   * the local store, not a Google Health request.
+   * May be absent: nutrition_day then leaves entry_id null. `has` is a local
+   * lookup, not a Google Health request.
    */
   entries?: FoodEntries;
   now: () => Date;

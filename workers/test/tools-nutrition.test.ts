@@ -4,8 +4,10 @@ import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } fr
 
 import type { LocalDate } from "../src/coach/date";
 import { type ActivityDay, NUTRIENTS } from "../src/healthdata";
+import { entryNamesBetween, hasEntry, recordEntry } from "../src/store/entries";
 import { MAX_FOOD_ITEMS, NUTRITION_DAY, NUTRITION_NOTICE, STALE_WEIGHT_DAYS, checkFood, kcalGap, totalsOf, weightAge } from "../src/tools/nutrition";
 import { COACH_TODAY, FakeHealth, type FoodSpec, activityDay, coachSession, fakeTargets, food, foodDay, fullDay, target } from "./coach-helpers";
+import { linkAccount, withDb } from "./memory-helpers";
 
 // All values below are synthetic.
 
@@ -502,65 +504,65 @@ describe("entry_id on each item", () => {
   const listed = (id: string) => `users/me/dataTypes/nutrition-log/dataPoints/${id}`;
   const answered = (id: string) => `users/1122334455/dataTypes/nutrition-log/dataPoints/${id}`;
 
-  /** A store that knows `stored` for the linked account, unless `known` is false. */
-  function entriesFor(stored: string | undefined, known = true) {
-    const asked: [string, string][] = [];
-    const byPoint = new Map<string, string>();
-    if (stored !== undefined) byPoint.set(stored.split("/").at(-1) ?? "", stored);
-    return {
-      asked,
-      entries: {
-        has: (name: string) => known && name === stored,
-        namesBetween: (from: string, to: string) => {
-          asked.push([from, to]);
-          return byPoint;
-        },
-      },
-    };
+  /** The food read's name map: `stored` under its data point id, when there is one. */
+  function withNames(stored: string | undefined, ...specs: FoodSpec[]): FakeHealth {
+    const h = withFood(...specs);
+    if (stored !== undefined) h.ownNames = new Map([[stored.split("/").at(-1) ?? "", stored]]);
+    return h;
   }
+
+  const knows = (stored: string) => ({ has: (name: string) => name === stored });
 
   const idsOf = (data: Record<string, any>): (string | null)[] =>
     data.per_meal.flatMap((meal: { items: { entry_id: string | null }[] }) => meal.items.map((item) => item.entry_id));
 
   it("returns the name the create stored when the list names the user as me", async () => {
     const stored = answered("syn-0");
-    const { entries, asked } = entriesFor(stored);
-    const out = await coachSession(withFood(food(12, "LUNCH", { kcal: 400 })), { entries }).ok("nutrition_day", { date: CLOSED_DAY });
+    const out = await coachSession(withNames(stored, food(12, "LUNCH", { kcal: 400 })), { entries: knows(stored) }).ok("nutrition_day", { date: CLOSED_DAY });
     // foodDay names the item under users/me. The id is the stored form, the one delete accepts.
     expect(idsOf(out.data)).toEqual([stored]);
     expect(stored).not.toBe(listed("syn-0"));
-    expect(asked).toEqual([["2026-10-13", "2026-10-15"]]);
   });
 
   it("returns the name the create stored when the list names the user by an id", async () => {
-    const h = withFood(food(12, "LUNCH", { kcal: 400 }));
+    const stored = listed("syn-0");
+    const h = withNames(stored, food(12, "LUNCH", { kcal: 400 }));
     const item = h.nutritionDays.get(CLOSED_DAY)?.items[0];
     if (!item) throw new Error("no item");
     item.id = answered("syn-0");
-    const stored = listed("syn-0");
-    const out = await coachSession(h, { entries: entriesFor(stored).entries }).ok("nutrition_day", { date: CLOSED_DAY });
+    const out = await coachSession(h, { entries: knows(stored) }).ok("nutrition_day", { date: CLOSED_DAY });
     expect(idsOf(out.data)).toEqual([stored]);
   });
 
   it("returns the list name when that name is the one the create stored", async () => {
     const stored = listed("syn-0");
-    const out = await coachSession(withFood(food(12, "LUNCH", { kcal: 400 })), { entries: entriesFor(stored).entries }).ok("nutrition_day", { date: CLOSED_DAY });
+    const out = await coachSession(withNames(stored, food(12, "LUNCH", { kcal: 400 })), { entries: knows(stored) }).ok("nutrition_day", { date: CLOSED_DAY });
     expect(idsOf(out.data)).toEqual([stored]);
   });
 
   it("leaves entry_id null on an item from another app", async () => {
-    const { entries } = entriesFor(answered("syn-0"));
-    const out = await coachSession(withFood(food(8, "BREAKFAST", { kcal: 100 }), food(12, "LUNCH", { kcal: 400 })), { entries }).ok("nutrition_day", { date: CLOSED_DAY });
-    // syn-0 is this server's breakfast. syn-1 was logged somewhere else.
-    expect(idsOf(out.data)).toEqual([answered("syn-0"), null]);
-  });
-
-  it("leaves entry_id null for an entry of an account that is no longer linked", async () => {
-    const out = await coachSession(withFood(food(12, "LUNCH", { kcal: 400 })), { entries: entriesFor(answered("syn-0"), false).entries }).ok("nutrition_day", {
+    const stored = answered("syn-0");
+    const out = await coachSession(withNames(stored, food(8, "BREAKFAST", { kcal: 100 }), food(12, "LUNCH", { kcal: 400 })), { entries: knows(stored) }).ok("nutrition_day", {
       date: CLOSED_DAY,
     });
-    expect(idsOf(out.data)).toEqual([null]);
+    // syn-0 is this server's breakfast. syn-1 was logged somewhere else.
+    expect(idsOf(out.data)).toEqual([stored, null]);
   });
+
+  it("leaves entry_id null for an entry of an account that is no longer linked", () =>
+    withDb(async (db, sql) => {
+      const stored = answered("syn-0");
+      recordEntry(db, stored, CLOSED_DAY);
+      // The map the food read takes before its request, while this account is linked.
+      const own = entryNamesBetween(db, "2026-10-13", "2026-10-15");
+      expect(own.get("syn-0")).toBe(stored);
+      linkAccount(sql, "200000000000000000002");
+      const h = withFood(food(12, "LUNCH", { kcal: 400 }));
+      h.ownNames = own;
+      const out = await coachSession(h, { entries: { has: (name) => hasEntry(db, name) } }).ok("nutrition_day", { date: CLOSED_DAY });
+      expect(idsOf(out.data)).toEqual([null]);
+      expect(hasEntry(db, stored)).toBe(false);
+    }));
 
   it("requires entry_id, a string or null, and rejects a result without it", async () => {
     const item = NUTRITION_DAY.tool.outputSchema.properties?.data?.properties?.per_meal?.items?.properties?.items?.items;

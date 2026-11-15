@@ -1205,15 +1205,15 @@ describe("the write tools through /mcp of the object", () => {
     g.google.add("nutrition-log", foodRec(at(TODAY, 12, 30), { meal: "LUNCH", kcal: 400, platform: "GOOGLE_WEB_API", name: listed }));
     const review = await objectTool(stub, "nutrition_day", { date: TODAY });
     if (!review.ok) throw new Error(JSON.stringify(review.error));
-    // The id is the stored name, not the name the list used. Delete matches that stored
-    // name exactly; the create-shaped id is deleted in the test above, against a users/me list name.
-    expect(review.output.data.per_meal[0].items[0].entry_id).toBe(stored);
-    expect(review.output.data.per_meal[0].items[0].entry_id).not.toBe(listed);
+    const entryId = review.output.data.per_meal[0].items[0].entry_id as string;
+    // The id is the stored name, not the name the list used.
+    expect(entryId).toBe(stored);
+    expect(entryId).not.toBe(listed);
     g.takeExternal();
-    // The listed form is not the stored name, so nothing is sent for it.
-    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: listed })).toMatchObject({ ok: false, error: { code: "no_data" } });
-    expect(g.takeExternal()).toEqual({ total: 0 });
-    expect(await storedEntries(stub)).toMatchObject([{ name: stored }]);
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual({ ok: true, output: { entry_id: stored, deleted: true } });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    expect(g.google.writes.at(-1)).toEqual({ kind: "delete", body: { names: [stored] } });
+    expect(await storedEntries(stub)).toEqual([]);
   });
 
   it("the calls of one request take turns on one budget: every create is one unit", async () => {

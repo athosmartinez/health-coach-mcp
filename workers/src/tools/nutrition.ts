@@ -247,11 +247,10 @@ async function nutritionDay(deps: CoachDeps, args: Record<string, unknown>): Pro
   const sources = new SourceSet();
   const partial = day >= todayOf(deps);
   const items = logged.items;
-  // The same day of margin as the food read: a changed zone can move a day by
-  // one, and an entry the read counts as this server's own is in the window.
-  // One indexed read of the local table. It is not a Google Health request.
-  const own = deps.entries?.namesBetween(plusDays(day, -1), plusDays(day, 1));
-  const meals = mealsOf(deps, items, sources, own);
+  // Names were read with the food log, before its Google request. Do not read
+  // the table again here: a relink during activity or body would pair this
+  // item with the new account's name when the point ids collide.
+  const meals = mealsOf(deps, items, sources, food.ownNames);
   const itemsOmitted = meals.reduce((sum, meal) => sum + meal.items_omitted, 0);
 
   const burned = notWorn ? null : (act.days.get(day)?.totalKcal ?? null);
@@ -370,16 +369,19 @@ function entryOf(deps: CoachDeps, item: FoodItem, own: ReadonlyMap<string, strin
 /**
  * The entry_id of one item: the name this server stored for it, or null.
  *
- * A create answers `users/<user id>/…` and a list may name the user as `me`
- * or by an id (Google's pages do not settle which form a list uses). The two
- * are the same point when their data point IDs are equal. The text returned
- * is the stored name, so `entries.has` matches it and nutrition_log_delete
- * accepts it. An item this server did not create for the linked account,
- * including one created for an account that is no longer linked, is null.
+ * `own` is the map the food read took before its Google request, for the
+ * account that was linked then. A create answers `users/<user id>/…` and a
+ * list may name the user as `me` or by an id (Google's pages do not settle
+ * which form a list uses). The two are the same point when their data point
+ * IDs are equal, and the text returned is the stored name.
+ *
+ * `has` runs now, for the account that is linked now. After a relink it
+ * rejects the name from `own`, so the field is null and nothing is sent to
+ * Google for it. A name that is only in the new account's table is not
+ * consulted: the point ids can collide.
  */
 function entryIdOf(itemId: string, entries: FoodEntries | undefined, own: ReadonlyMap<string, string> | undefined): string | null {
   if (!entries) return null;
-  if (entries.has(itemId)) return itemId;
   const id = pointId(itemId);
   const stored = id === undefined ? undefined : own?.get(id);
   return stored !== undefined && entries.has(stored) ? stored : null;

@@ -467,7 +467,7 @@ Logs:
 
 ### Not verified on the Free plan
 
-No deploy has run this code. These points come from the docs or from local tests:
+This code is deployed on Cloudflare Workers (Free plan) and in daily use. The points below have not been measured on that deploy yet; they come from the docs or from local tests:
 
 - **Object CPU.** The Durable Objects limits table says 30 seconds of CPU per request. The same page says that objects have the Workers per-invocation CPU limits. If the object has only 10 ms, a cold call over a year cannot work: `metric_series hrv` over 366 days parses about 36,000 HRV samples.
 - **Whether an object invocation has its own subrequest budget.** The design assumes that it has not: 50 for the whole request.

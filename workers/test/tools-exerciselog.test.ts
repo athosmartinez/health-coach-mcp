@@ -1240,6 +1240,43 @@ describe("the exercise log tools through /mcp of the object", () => {
     expectNoSecret(g.logged());
   });
 
+  it("does not repeat the activity name, the notes, the kcal value or the entry id that a refusal of Google repeats", async () => {
+    const stub = await linkedStore();
+    const refusal = (message: string) => () =>
+      Response.json(
+        { error: { code: 400, status: "INVALID_ARGUMENT", message, details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "SYNTHETIC_FIELD_REJECTED", domain: "health.googleapis.com" }] } },
+        { status: 400 },
+      );
+    const rejected = (message: string) => [
+      "google health request rejected",
+      { data_type: "exercise", http_status: 400, google_status: "INVALID_ARGUMENT", google_reason: "SYNTHETIC_FIELD_REJECTED", google_message: message },
+    ];
+    // Google repeats the three values of the call, one of them in another letter case.
+    g.healthReply = refusal('display_name "CAPOEIRA ANGOLA", notes "Roda de sexta" and calories_kcal 431.5 are not accepted for OTHER');
+    const kept = 'display_name " ", notes " " and calories_kcal are not accepted for OTHER';
+    expect(await objectTool(stub, "exercise_log_add", WORKOUT)).toEqual({
+      ok: false,
+      error: { code: "invalid_input", message: `Google Health refused the entry: SYNTHETIC_FIELD_REJECTED: ${kept}`, hint: "the entry was not created; check the date, the time and the values" },
+    });
+    expect(g.logLines("warn")).toEqual([rejected(kept)]);
+    expect(g.logged().toLowerCase()).not.toContain("capoeira");
+    expectNoSecret(g.logged());
+
+    // A delete whose refusal repeats the id of the data point.
+    g.healthReply = undefined;
+    const added = await ok(stub, "exercise_log_add", WORKOUT);
+    g.clearLogs();
+    g.healthReply = refusal("data point syn-created-1 cannot be deleted");
+    expect(await objectTool(stub, "exercise_log_delete", { entry_id: added.entry_id })).toEqual({
+      ok: false,
+      error: { code: "invalid_input", message: "Google Health refused the delete: SYNTHETIC_FIELD_REJECTED: data point cannot be deleted", hint: "the entry was not deleted" },
+    });
+    expect(g.logLines("warn")).toEqual([rejected("data point cannot be deleted")]);
+    // The row stays: the delete did not happen.
+    expect(await storedSessions(stub)).toMatchObject([{ name: createdName(1) }]);
+    expectNoSecret(g.logged());
+  });
+
   it.each([
     ["Google answers 503", () => googleError(503, "UNAVAILABLE")(), "upstream_unavailable", ["tool_call"]],
     ["Google refuses the entry", () => googleError(400, "INVALID_ARGUMENT")(), "invalid_input", ["tool_call", "google health request rejected"]],

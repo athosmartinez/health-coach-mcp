@@ -23,7 +23,8 @@
 // read never keeps the response body. A write refusal also keeps Google's
 // error.message, cut to about 200 characters, and the reason of any ErrorInfo,
 // so the model can explain the refusal. Tokens, email addresses, user
-// identifiers and the request body are never kept; responses are read through
+// identifiers and the request body are never kept, and neither is a text of
+// an exercise write that Google's message repeats; responses are read through
 // a size limit; a page cap or a repeated page token is
 // an error instead of a truncated result; a request budget shared by the calls
 // of one MCP request; each record reduced by the caller as its page is read;
@@ -44,6 +45,7 @@ import {
   CREATE_PATH as EXERCISE_CREATE_PATH,
   DELETE_PATH as EXERCISE_DELETE_PATH,
   type NewExerciseSession,
+  callerTexts as exerciseCallerTexts,
   createBody as exerciseCreateBody,
   deleteBody as exerciseDeleteBody,
   pointId as exercisePointId,
@@ -334,7 +336,10 @@ export class GoogleHealthClient {
    * answer, so the two can belong to different accounts after a sign-in.
    */
   async createExercise(session: NewExerciseSession, account: string | undefined): Promise<string> {
-    return this.create("exercise", EXERCISE_CREATE_PATH, exerciseCreateBody(session), exercisePointId, { account });
+    const body = exerciseCreateBody(session);
+    // A session carries free text. What Google repeats of it in a refusal is
+    // taken out of the message before the message reaches an error or a log.
+    return this.create("exercise", EXERCISE_CREATE_PATH, body, exercisePointId, { account }, exerciseCallerTexts(body));
   }
 
   /**
@@ -347,7 +352,8 @@ export class GoogleHealthClient {
    * account must never be deleted with the token of another.
    */
   async deleteExercise(id: string, account: string): Promise<"deleted" | "gone"> {
-    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id), { account });
+    // The ID is an entry id: a refusal that repeats it must not carry it on.
+    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id), { account }, [id]);
   }
 
   /**
@@ -361,8 +367,9 @@ export class GoogleHealthClient {
     body: unknown,
     idOf: (name: string) => string | undefined,
     bound?: AccountBound,
+    echoes?: readonly string[],
   ): Promise<string> {
-    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound);
+    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound, echoes);
     const answer = readCreateAnswer(reply.text, idOf);
     if (answer.ok) return answer.name;
     logFault(dataType, "create", answer.fault, answer.code);
@@ -370,8 +377,14 @@ export class GoogleHealthClient {
   }
 
   /** Sends one delete and reads its Operation. */
-  private async remove(dataType: WriteDataType, path: string, body: unknown, bound?: AccountBound): Promise<"deleted" | "gone"> {
-    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound);
+  private async remove(
+    dataType: WriteDataType,
+    path: string,
+    body: unknown,
+    bound?: AccountBound,
+    echoes?: readonly string[],
+  ): Promise<"deleted" | "gone"> {
+    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound, echoes);
     if (reply.status === 404) return "gone";
     const answer = readDeleteAnswer(reply.text);
     if (answer.ok) return "deleted";
@@ -469,8 +482,18 @@ export class GoogleHealthClient {
    * to send with the account of the bound, also after a renewal: a renewal
    * can answer the token of an account that signed in meanwhile. A request
    * without a bound is not compared.
+   *
+   * `echoes` are the texts of the request that the caller wrote. A refusal of
+   * a write repeats Google's error.message without them.
    */
-  protected async request(method: string, path: string, query?: string, body?: string, bound?: AccountBound): Promise<Reply> {
+  protected async request(
+    method: string,
+    path: string,
+    query?: string,
+    body?: string,
+    bound?: AccountBound,
+    echoes: readonly string[] = [],
+  ): Promise<Reply> {
     const allowed = requestTarget(method, path, query);
     if (allowed === undefined) throw new Error(`googlehealth: the client refuses ${method} ${path}`);
     // The data type of the request: every log line, message and hint below names this one.
@@ -571,8 +594,9 @@ export class GoogleHealthClient {
           // A changed filter field, request shape or API version lands here.
           // A read logs the status and Google's enum only. A write also logs
           // the short message and the ErrorInfo reason, so the refusal can be
-          // explained; the rest of the body is never logged.
-          const detail = kind === "read" ? undefined : googleWriteFault(reply.text);
+          // explained; the rest of the body is never logged, and neither is a
+          // text of the request that the message repeats.
+          const detail = kind === "read" ? undefined : googleWriteFault(reply.text, echoes);
           console.warn("google health request rejected", {
             data_type: dataType,
             http_status: status,
@@ -1008,14 +1032,52 @@ function redactWriteText(text: string): string {
     .trim();
 }
 
+/** A shorter text identifies nothing, and its removal would empty the message. */
+const MIN_ECHO_CHARS = 3;
+
+const REGEXP_SYNTAX = /[\\^$.*+?()[\]{}|]/g;
+
+/**
+ * `text` without every occurrence of a text of `echoes`, compared without
+ * regard to letter case. Each removed stretch becomes one space.
+ *
+ * Every occurrence is marked on the text as Google sent it, and the marked
+ * stretches are cut together: so a text that is part of another one (a name
+ * inside the notes), or that overlaps it, leaves no rest behind. The removal
+ * runs before the redaction of tokens and identifiers, which would cut a
+ * repeated text into parts that match nothing.
+ */
+function withoutEchoes(text: string, echoes: readonly string[]): string {
+  const cut = new Array<boolean>(text.length).fill(false);
+  let found = false;
+  for (const echo of echoes) {
+    if ([...echo].length < MIN_ECHO_CHARS) continue;
+    // A lookahead matches at every start, also where two occurrences overlap.
+    const occurrence = new RegExp(`(?=(${echo.replace(REGEXP_SYNTAX, "\\$&")}))`, "giu");
+    for (const match of text.matchAll(occurrence)) {
+      cut.fill(true, match.index, match.index + (match[1]?.length ?? 0));
+      found = true;
+    }
+  }
+  if (!found) return text;
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    if (!cut[i]) out += text[i];
+    else if (!cut[i - 1]) out += " ";
+  }
+  return out;
+}
+
 /**
  * The reason and short message of a write that Google refused. Only
  * error.message and the reason of an ErrorInfo in error.details are read.
  * The message is cut to about 200 characters. Anything that is a token, an
  * email address or a user identifier is left out, and so is the rest of the
- * body: a request is never logged or returned.
+ * body: a request is never logged or returned. `echoes` are the texts of the
+ * request that the caller wrote (a name, notes, a value, an entry id): the
+ * message is repeated without them. The reason is a constant, and stays.
  */
-function googleWriteFault(body: string): WriteRefusal {
+function googleWriteFault(body: string, echoes: readonly string[] = []): WriteRefusal {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -1024,7 +1086,7 @@ function googleWriteFault(body: string): WriteRefusal {
   }
   if (!isRecord(parsed) || !isRecord(parsed.error)) return NO_WRITE_FAULT;
   const error = parsed.error;
-  const message = typeof error.message === "string" ? truncate(redactWriteText(error.message), WRITE_ERROR_TEXT) : "";
+  const message = typeof error.message === "string" ? truncate(redactWriteText(withoutEchoes(error.message, echoes)), WRITE_ERROR_TEXT) : "";
   const details = Array.isArray(error.details) ? error.details : [];
   const reasons: string[] = [];
   let used = 0;

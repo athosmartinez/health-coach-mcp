@@ -169,6 +169,29 @@ export function createBody(session: NewExerciseSession): ExerciseBody {
   return { dataSource: { recordingMethod: "MANUAL", platform: "GOOGLE_WEB_API" }, exercise };
 }
 
+/** The exercise type whose display name Google keeps: the name is then the caller's own text. */
+const OTHER = "OTHER";
+
+/**
+ * The texts of a create body that the caller wrote, as the body carries them:
+ * the display name of an activity that is not in Google's enum, the notes,
+ * and the calories as their JSON number text. Google's answer to a refused
+ * create can repeat them, and none may reach an error or a log line.
+ *
+ * The display name of any other type is not one of them: the server makes it
+ * from the type (`Running` for RUNNING), so it says nothing that the type
+ * does not say, and removing it would remove the type from Google's message.
+ * The times and the type are not caller text either.
+ */
+export function callerTexts(body: ExerciseBody): string[] {
+  const { exerciseType, displayName, metricsSummary, notes } = body.exercise;
+  const texts: string[] = [];
+  if (exerciseType === OTHER) texts.push(displayName);
+  if (notes !== undefined) texts.push(notes);
+  if (metricsSummary.caloriesKcal !== undefined) texts.push(JSON.stringify(metricsSummary.caloriesKcal));
+  return texts;
+}
+
 /**
  * The body of the delete request for one data point ID. The name is written
  * with `users/me`, the form of the request path: the reference says that

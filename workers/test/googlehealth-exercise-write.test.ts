@@ -744,6 +744,95 @@ describe("createExercise", () => {
   });
 });
 
+// Google's error.message can repeat a value of the request. A session carries
+// free text (the name of an activity that is not in the list, the notes), and
+// no name, note, value or entry id may reach an error or a log line.
+describe("a refusal of Google that repeats what the request sent", () => {
+  const REASON = "SYNTHETIC_FIELD_REJECTED";
+  const refusal = (message: string) => () =>
+    json(400, { error: { code: 400, status: "INVALID_ARGUMENT", message, details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: REASON, domain: "health.googleapis.com" }] } });
+
+  /** The message of the one reject log line. */
+  function rejectLine(): string {
+    expect(warnings()).toHaveLength(1);
+    const [text, fields] = warnings()[0] as [string, { google_reason?: string; google_message?: string }];
+    expect(text).toBe("google health request rejected");
+    expect(fields.google_reason).toBe(REASON);
+    return fields.google_message ?? "";
+  }
+
+  it("a create: the activity name, the notes and the kcal value are taken out, in any letter case, and the rest stays", async () => {
+    const requests = fakeApi(
+      refusal('Invalid value at exercise.display_name: "CAPOEIRA ANGOLA". Notes "roda de SEXTA" and calories_kcal 431.5 were not accepted for OTHER at 2026-10-16T10:10:00Z.'),
+    );
+    const error = await failure(testClient().client.createExercise(SESSION, ACCOUNT));
+    // The reason, the field names, the type and the time of the session stay.
+    const kept = 'Invalid value at exercise.display_name: " ". Notes " " and calories_kcal were not accepted for OTHER at 2026-10-16T10:10:00Z.';
+    expect(rejectLine()).toBe(kept);
+    expect(toWire(error)).toEqual({
+      code: "invalid_input",
+      message: `Google Health refused the entry: ${REASON}: ${kept}`,
+      hint: "the entry was not created; check the date, the time and the values",
+    });
+    expect(requests).toHaveLength(1);
+    const shown = `${texts(error)} ${logged()}`.toLowerCase();
+    for (const sent of ["capoeira", "angola", "roda", "sexta", "431.5"]) expect(shown, sent).not.toContain(sent);
+    expectNoSecret(error);
+  });
+
+  it("a create: a name that is part of the notes, and a text that Google repeats twice, leave no rest", async () => {
+    fakeApi(refusal("notes [Roda de sexta, na roda] name [Roda] again [RODA DE SEXTA, NA RODA] rejected"));
+    const error = await failure(testClient().client.createExercise({ ...SESSION, displayName: "Roda", notes: "Roda de sexta, na roda" }, ACCOUNT));
+    expect(rejectLine()).toBe("notes [ ] name [ ] again [ ] rejected");
+    expect(texts(error).toLowerCase()).not.toContain("roda");
+    expectNoSecret(error);
+  });
+
+  it("a create: a text of the request is taken out before the redaction can cut it into parts", async () => {
+    // The notes hold what the redaction removes on its own: without the order, the words around it would stay.
+    const notes = "Aula com owner@example.com na sexta";
+    fakeApi(refusal(`notes "${notes}" rejected`));
+    const error = await failure(testClient().client.createExercise({ ...SESSION, notes }, ACCOUNT));
+    expect(rejectLine()).toBe('notes " " rejected');
+    for (const part of ["Aula", "example.com", "sexta"]) expect(`${texts(error)} ${logged()}`, part).not.toContain(part);
+  });
+
+  it("a create: the name the server made for a listed type is not taken out, so the type stays in the message", async () => {
+    const message = "exercise_type RUNNING is not accepted here";
+    fakeApi(refusal(message));
+    const error = await failure(testClient().client.createExercise({ ...SESSION, exerciseType: "RUNNING", displayName: "Running", kcal: undefined, notes: undefined }, ACCOUNT));
+    expect(rejectLine()).toBe(message);
+    expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${message}`);
+  });
+
+  it("a create: a text shorter than 3 characters is not taken out", async () => {
+    // A kcal of 50 and a name of two letters: both are in the time of the session and in common words.
+    const message = "calories_kcal 50 at 2026-10-16T10:50:00Z is too low";
+    fakeApi(refusal(message));
+    await failure(testClient().client.createExercise({ ...SESSION, displayName: "is", kcal: 50, notes: undefined }, ACCOUNT));
+    expect(rejectLine()).toBe(message);
+  });
+
+  // Ids that the redaction of tokens and of account ids does not catch on its own: no digit, and fewer than 10 digits.
+  it.each(["syn_point_k", "4410772"])("a delete: the data point id %s is taken out, in any letter case", async (id) => {
+    const requests = fakeApi(refusal(`Data point users/me/dataTypes/exercise/dataPoints/${id} (${id.toUpperCase()}) cannot be deleted.`));
+    const error = await failure(testClient().client.deleteExercise(id, ACCOUNT));
+    const kept = "Data point /dataTypes/exercise/dataPoints/ ( ) cannot be deleted.";
+    expect(rejectLine()).toBe(kept);
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: `Google Health refused the delete: ${REASON}: ${kept}`, hint: "the entry was not deleted" });
+    expect(requests).toHaveLength(1);
+    expect(`${texts(error)} ${logged()}`.toLowerCase()).not.toContain(id.toLowerCase());
+  });
+
+  it("the food log writes keep their message as it was", async () => {
+    const message = "Synthetic food with energy 100 was not accepted";
+    fakeApi(refusal(message));
+    const error = await failure(testClient().client.createNutritionLog(FOOD));
+    expect(rejectLine()).toBe(message);
+    expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${message}`);
+  });
+});
+
 describe("deleteExercise", () => {
   it("sends one POST to batchDelete of the exercise data type with the name of the point under users/me", async () => {
     const requests = fakeApi(() => deleted());

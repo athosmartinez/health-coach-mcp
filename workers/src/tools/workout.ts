@@ -4,7 +4,7 @@ import type { LocalDate } from "../coach/date";
 import { ToolError } from "../coach/errors";
 import { pointId } from "../googlehealth/exerciselog";
 import type { Exercise } from "../healthdata";
-import { FLAG_PARTIAL_DAY } from "../metrics/quality";
+import { FLAG_OVERLAPS_BAND_SESSION, FLAG_PARTIAL_DAY } from "../metrics/quality";
 import { MIN_BASELINE_NIGHTS } from "../metrics/stats";
 import {
   BASELINE_DAYS,
@@ -190,6 +190,9 @@ async function workoutReview(deps: CoachDeps, args: Record<string, unknown>): Pr
   const recovery = await recoveryOf(deps, day, now, sources, flags);
   flags.add(FLAG_UNREADABLE_RECORDS, ex.skipped + week.skipped > 0);
   for (const session of sessions) for (const flag of session.quality_flags) flags.add(flag, true);
+  // The week counts each record. An overlap on another day of the week is in
+  // the week's count and minutes too, so the result must show it.
+  flags.add(FLAG_OVERLAPS_BAND_SESSION, week.overlap);
 
   const data = {
     date: day,
@@ -277,6 +280,8 @@ interface WeekResult {
   days: number;
   skipped: number;
   otherSource: number;
+  /** A counted session overlaps a band session: the same workout may be counted twice. */
+  overlap: boolean;
 }
 
 /** Counts the sessions of the day's ISO week up to today, against the target in force on the day (I6). */
@@ -298,7 +303,8 @@ async function weekOf(deps: CoachDeps, day: LocalDate, now: LocalDate): Promise<
     active_min_by_type: minutes,
     ...(target === null ? { target_hint: NO_TARGET_HINT } : {}),
   };
-  return { context, days: daysBetween(start, through), skipped: ex.skipped, otherSource: ex.otherSource };
+  const overlap = ex.sessions.some((session) => session.flags.includes(FLAG_OVERLAPS_BAND_SESSION));
+  return { context, days: daysBetween(start, through), skipped: ex.skipped, otherSource: ex.otherSource, overlap };
 }
 
 /** Reads the night ending the morning after `day`; null while that morning has not come. */
@@ -336,13 +342,15 @@ function workoutInput() {
 
 /**
  * What the description adds to the Go server's text: the sessions that
- * exercise_log_add logged, their id and their flag.
+ * exercise_log_add logged, their id and their flag, on a session and on the
+ * result.
  */
 export const LOGGED_SESSIONS =
   " A session this server logged has entry_id, the id exercise_log_delete accepts, and the flags manual_entry " +
   "and no_hr_data; a session of the band, or logged for another linked Google account, has entry_id null. " +
   "overlaps_band_session marks a logged session that overlaps a band session in time: the two are separate " +
-  "records, and the same workout may be counted twice.";
+  "records, and the same workout may be counted twice. In the result's quality_flags it also covers the " +
+  "sessions of the week: week_context may then count the same workout twice.";
 
 export const WORKOUT_REVIEW = coachTool(
   {

@@ -111,7 +111,9 @@ Recovery for the night that ended on `date`.
 - **quality_flags:** `low_hr_for_activity`, `manual_entry`, `no_hr_data`.
 - **Worker only (R2):** each session has `entry_id`, the id `exercise_log_delete` accepts for a session
   this server logged, else null. A logged session has `manual_entry` and `no_hr_data`, and
-  `overlaps_band_session` when it covers time of a session of the band.
+  `overlaps_band_session` when it covers time of a session of the band. The result's `quality_flags` has
+  `overlaps_band_session` when any session that `week_context` counts carries it, also on a day other than the
+  reviewed one: the week counts each record, so the same workout may be in it twice.
 
 #### `weekly_report(week_end?)`
 Week Mon–Sun (Q4, ISO), counted up to today (`through`; `partial_day` in the current week). For each metric:
@@ -136,6 +138,9 @@ week so far; each metric has its own day counts.
   `days_logged`, sessions done vs the target in force at `through`; `target_hint` names `targets_set`.
 - **decisions_this_week:** up to 20 `note`s of type `decision` from the week (related_date, else creation day),
   `decisions_more`; notes are data, not instructions. The `notice` carries the guardrails (R3).
+- **Worker only (R2):** `adherence.sessions` also counts the sessions this server logged, one per record. The
+  result's `quality_flags` has `overlaps_band_session` when a logged session of the week covers time of a session
+  of the band: the same workout may be counted twice. The description says so in one sentence at its end.
 
 #### `metric_series(metric, from, to, granularity)`
 Escape valve for questions outside the four moments. `metric` ∈ fixed enum (weight, resting_hr,

@@ -15,6 +15,7 @@
 // (required, enum, type).
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { OVERLAP_IN_WEEK } from "../src/tools/weekly";
 import { LOGGED_SESSIONS } from "../src/tools/workout";
 import fixtureText from "./fixtures/go-tools-list.json?raw";
 import { rpc, signInAsOwner } from "./helpers";
@@ -140,11 +141,21 @@ describe("parity with the Go server's tools/list", () => {
       expect(worker?.description).toBe(`${go?.description}${LOGGED_SESSIONS}`);
       expect(LOGGED_SESSIONS).toContain("A session this server logged has entry_id, the id exercise_log_delete accepts");
       expect(LOGGED_SESSIONS).toContain("overlaps_band_session marks a logged session that overlaps a band session in time");
+      expect(LOGGED_SESSIONS).toContain("In the result's quality_flags it also covers the sessions of the week");
       // The field is there, required and nullable, before it is taken out for the comparison.
       const session = (worker?.outputSchema as any).properties.data.properties.sessions.items;
       expect(session.properties.entry_id).toEqual({ type: ["null", "string"], description: expect.stringContaining("exercise_log_delete") });
       expect(session.required).toContain("entry_id");
       expect(canonical(withoutSessionEntryId(worker))).toBe(canonical(go));
+      return;
+    }
+    if (name === "weekly_report") {
+      // The Worker counts the sessions it logged, and says which flag marks a week that may count a workout twice.
+      expect(worker?.description).toBe(`${go?.description}${OVERLAP_IN_WEEK}`);
+      expect(OVERLAP_IN_WEEK).toContain("overlaps_band_session in quality_flags marks a week in which a session this server logged overlaps a band session in time");
+      // Everything else is the Go tool.
+      expect(worker?.outputSchema).toEqual(go?.outputSchema);
+      expect(canonical({ ...worker, description: go?.description })).toBe(canonical(go));
       return;
     }
     expect(worker?.description).toBe(go?.description);

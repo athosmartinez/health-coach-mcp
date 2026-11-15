@@ -1384,6 +1384,8 @@ describe("the reads of a session this server logged", () => {
     expect(sessions[3]).toMatchObject({ quality_flags: [], entry_id: null });
     // The week counts each record: the band's four sessions and the two logged ones.
     expect(review.data.week_context).toMatchObject({ sessions: 6, active_min_by_type: { RUNNING: 70, JIU_JITSU: 120, OTHER: 45, WALKING: 30 } });
+    // The overlap is on the result too, once: the class is in the week's count and minutes twice.
+    expect((review.quality_flags as string[]).filter((flag) => flag === "overlaps_band_session")).toHaveLength(1);
     for (const flag of ["other_source_sessions_excluded", "low_hr_for_activity", "manual_entry", "no_hr_data", "overlaps_band_session"]) expect(review.quality_flags, flag).toContain(flag);
     expect(review.sources).toEqual(expect.arrayContaining(["GOOGLE_WEB_API", "Synthetic Band"]));
     // The heart rate is listed for the band's two sessions only, and the read writes nothing.
@@ -1401,6 +1403,8 @@ describe("the reads of a session this server logged", () => {
     const week = await ok(stub, "weekly_report");
     // The band's four sessions of the week (a run, the class and a run, a walk) and the two logged ones.
     expect(week.data.adherence.sessions).toBe(6);
+    // Two of the six may be the same class: the logged one overlaps the band's.
+    expect(week.quality_flags).toContain("overlaps_band_session");
     expect(week.quality_flags).toContain("other_source_sessions_excluded");
     expect(week.sources).toContain("GOOGLE_WEB_API");
     // The briefing of the 15th reports the load of the 14th.
@@ -1412,10 +1416,44 @@ describe("the reads of a session this server logged", () => {
       { type: "RUNNING", minutes: 30, avg_hr_bpm: 150, quality_flags: [] },
     ]);
     expect(briefing.quality_flags).toContain("other_source_sessions_excluded");
+    // Every flag of a listed session is a flag of the briefing.
+    for (const flag of ["low_hr_for_activity", "manual_entry", "no_hr_data", "overlaps_band_session"]) expect(briefing.quality_flags, flag).toContain(flag);
     expect(JSON.stringify(briefing)).not.toContain("Capoeira");
     expect(JSON.stringify(week)).not.toContain("Capoeira");
     // No read logs a name, a value or the notes of the session.
     expectNoSecret(g.logged());
+  });
+
+  it("workout_review and weekly_report show an overlap of the week on the result, also when the reviewed day has none", async () => {
+    const { stub, twice } = await logged();
+    // The 15th has the band's walk only. The overlap is on the 14th, in the same ISO week.
+    const other = await ok(stub, "workout_review", { date: day(-1) });
+    const sessions = other.data.sessions as Record<string, any>[];
+    expect(sessions.map((one) => [one.type, one.quality_flags])).toEqual([["WALKING", []]]);
+    // The week holds the class twice, as two records: the count and the minutes are per record.
+    expect(other.data.week_context).toMatchObject({ sessions: 6, active_min_by_type: { RUNNING: 70, JIU_JITSU: 120, OTHER: 45, WALKING: 30 } });
+    expect(other.quality_flags).toContain("overlaps_band_session");
+    // The flags of a session of another day are not on the result: only the overlap changes what the week counts.
+    for (const flag of ["manual_entry", "no_hr_data", "low_hr_for_activity"]) expect(other.quality_flags, flag).not.toContain(flag);
+    // By exercise_id of the band's walk: the same week, the same flag.
+    const byId = await ok(stub, "workout_review", { exercise_id: sessions[0]?.exercise_id });
+    expect(byId.data.sessions).toHaveLength(1);
+    expect(byId.quality_flags).toContain("overlaps_band_session");
+    expect((await ok(stub, "weekly_report")).quality_flags).toContain("overlaps_band_session");
+
+    // Without the overlapping session, the week still has a logged session (the roda), and it overlaps nothing.
+    await ok(stub, "exercise_log_delete", { entry_id: twice.entry_id });
+    const after = await ok(stub, "workout_review", { date: day(-1) });
+    expect(after.data.week_context).toMatchObject({ sessions: 5, active_min_by_type: { RUNNING: 70, JIU_JITSU: 60, OTHER: 45, WALKING: 30 } });
+    expect(after.quality_flags).not.toContain("overlaps_band_session");
+    const week = await ok(stub, "weekly_report");
+    expect(week.data.adherence.sessions).toBe(5);
+    expect(week.quality_flags).not.toContain("overlaps_band_session");
+    expect(week.sources).toContain("GOOGLE_WEB_API");
+    // The day of the roda: a logged session, listed, without the flag.
+    const rodaDay = await ok(stub, "workout_review", { date: JIU_JITSU_DAY });
+    expect((rodaDay.data.sessions as { type: string }[]).map((one) => one.type)).toEqual(["JIU_JITSU", "OTHER", "RUNNING"]);
+    expect(rodaDay.quality_flags).not.toContain("overlaps_band_session");
   });
 
   it("deletes a session by the id workout_review lists, in a later call", async () => {

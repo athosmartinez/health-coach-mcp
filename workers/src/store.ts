@@ -117,6 +117,18 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (date, metric)
   );
   CREATE INDEX daily_metrics_by_metric ON daily_metrics (metric, date)`,
+  // 5: the food entries this server created in Google Health (the Go server
+  // writes nothing there, so its store has no such table). A row proves that
+  // an entry is this server's own: only such an entry is deleted. It holds no
+  // food name and no nutrient value. `name` is the data point name as the
+  // create answered it; `day` is the local day of the entry, and the index
+  // serves the lookup of the entries of a range of days.
+  `CREATE TABLE nutrition_entries (
+    name TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX nutrition_entries_by_day ON nutrition_entries (day)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

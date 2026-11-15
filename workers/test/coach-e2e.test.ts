@@ -852,6 +852,142 @@ describe("the Google requests of the two report tools on a cold cache", () => {
   });
 });
 
+// The object does not order two MCP HTTP requests: while one waits for Google,
+// it serves the other. Each request has its own turn queue, request budget and
+// token answer. This test holds every answer of the fake API until the test
+// releases it, one request at a time, so both requests are in flight together
+// and every Google request is counted for the MCP request that sent it.
+describe("two MCP HTTP requests at the same time", () => {
+  type Who = "first" | "second";
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  interface Overlap {
+    /** The Google requests of each MCP request when the two calls run in sequence. */
+    sequential: Record<Who, number>;
+    /** The Google requests that each MCP request sent while both were in flight. */
+    sent: Record<Who, string[]>;
+    /** Which MCP request sent each Google request, in order. */
+    order: Who[];
+    /** The turns in which both MCP requests had a Google request waiting. */
+    together: number;
+  }
+
+  /**
+   * Serves the two calls in sequence in one store, then at the same time in
+   * another, and checks what must hold for any pair: the same answers, the
+   * same cache rows, each request within its own budget, and clean logs.
+   */
+  async function overlap(calls: Record<Who, ToolCall>): Promise<Overlap> {
+    daysOfData(g.google, 365);
+    sessions(g.google);
+    meals(g.google);
+    const cacheRows = (stub: DurableObjectStub<CoachStore>) =>
+      runInDurableObject(stub, (_instance, state) =>
+        state.storage.sql.exec("SELECT date, metric, value, n_samples, source, zone, algo_version FROM daily_metrics ORDER BY date, metric").toArray(),
+      );
+
+    // In sequence, in a store of its own: the second call finds the cache of the first.
+    const inSequence = await linkedStore();
+    const wantFirst = await objectTool(inSequence, ...calls.first);
+    const sequentialFirst = g.takeExternal().total ?? 0;
+    const wantSecond = await objectTool(inSequence, ...calls.second);
+    const sequentialSecond = g.takeExternal().total ?? 0;
+    expect([wantFirst.ok, wantSecond.ok]).toEqual([true, true]);
+    const wantRows = await cacheRows(inSequence);
+    expect(wantRows.length).toBeGreaterThan(300);
+
+    // At the same time, in a new store. A Google request waits until the test
+    // lets its MCP request go on; the other MCP request stays where it is.
+    const sent: Record<Who, string[]> = { first: [], second: [] };
+    const go: Record<Who, boolean> = { first: false, second: false };
+    const settled: Record<Who, boolean> = { first: false, second: false };
+    const order: Who[] = [];
+    let running: Who = "first";
+    const answer = vi.mocked(globalThis.fetch).getMockImplementation() as typeof fetch;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      if (g.google.serves(new Request(input, init))) {
+        // Only the MCP request that the test let go can send a request now.
+        const me = running;
+        sent[me].push(`${init?.method} ${String(input)} ${typeof init?.body === "string" ? init.body : ""}`);
+        order.push(me);
+        while (!go[me]) await tick();
+        go[me] = false;
+      }
+      return answer(input, init);
+    });
+    const stub = await linkedStore();
+    const start = (who: Who) => {
+      running = who;
+      return objectTool(stub, ...calls[who]).finally(() => {
+        settled[who] = true;
+      });
+    };
+    /** Waits until the MCP request has its next Google request waiting, or has answered. */
+    const waiting = async (who: Who, before: number) => {
+      while (sent[who].length === before && !settled[who]) await tick();
+    };
+
+    const first = start("first");
+    await waiting("first", 0);
+    const second = start("second");
+    await waiting("second", 0);
+    // Both MCP requests are in flight: each has its first Google request waiting.
+    expect([sent.first.length, sent.second.length, settled.first, settled.second]).toEqual([1, 1, false, false]);
+    let together = 0;
+    for (let turn = 0; !(settled.first && settled.second); turn++) {
+      const who: Who = turn % 2 === 0 ? "first" : "second";
+      if (settled[who]) continue;
+      if (!settled.first && !settled.second) together++;
+      const before = sent[who].length;
+      running = who;
+      go[who] = true;
+      await waiting(who, before);
+    }
+
+    // The same answers as in sequence.
+    expect(await first).toEqual(wantFirst);
+    expect(await second).toEqual(wantSecond);
+    // Each request within its own budget of 45, and every Google request counted for one of them.
+    expect(sent.first.length).toBeLessThanOrEqual(HEALTH_REQUESTS);
+    expect(sent.second.length).toBeLessThanOrEqual(HEALTH_REQUESTS);
+    expect(g.takeExternal().total).toBe(sent.first.length + sent.second.length);
+    // They ran in turns of one Google request each.
+    expect(order.slice(0, 8)).toEqual(["first", "second", "first", "second", "first", "second", "first", "second"]);
+    // The cache ends with the same rows.
+    expect(await cacheRows(stub)).toEqual(wantRows);
+    expect(g.logLines("warn")).toEqual([]);
+    expect(g.logLines("error")).toEqual([]);
+    for (const secret of SECRETS) expect(g.logged()).not.toContain(secret);
+    return { sequential: { first: sequentialFirst, second: sequentialSecond }, sent, order, together };
+  }
+
+  it("each have their own budget: a call that takes all 45 requests does not starve the other", async () => {
+    // The whole budget of a request, and a report that reads many of the same days.
+    const { sequential, sent, together } = await overlap({
+      first: ["metric_series", { metric: "total_calories", from: day(-365), to: TODAY, granularity: "week" }],
+      second: ["weekly_report", {}],
+    });
+    expect(sequential.first).toBe(HEALTH_REQUESTS);
+    expect(sent.first).toHaveLength(HEALTH_REQUESTS);
+    // One budget for both would have left the report without a unit.
+    expect(sent.first.length + sent.second.length).toBeGreaterThan(HEALTH_REQUESTS);
+    // Both were in flight for the whole report.
+    expect(together).toBeGreaterThanOrEqual(2 * sent.second.length - 2);
+    expect(sent.second).toHaveLength(12);
+  });
+
+  it("can fetch the same windows twice: the same call in both requests sends every Google request twice", async () => {
+    const call: ToolCall = ["metric_series", { metric: "azm", from: day(-365), to: TODAY, granularity: "week" }];
+    const { sequential, sent, order } = await overlap({ first: call, second: call });
+    // In sequence the second request needs one request: the days that are not settled yet.
+    expect(sequential).toEqual({ first: 18, second: 1 });
+    // At the same time each one plans on the cold cache and fetches all of it.
+    expect(sent.first).toHaveLength(18);
+    expect(sent.second).toEqual(sent.first);
+    expect(order).toEqual(Array.from({ length: 36 }, (_unused, n) => (n % 2 === 0 ? "first" : "second")));
+  });
+});
+
 // One HTTP request can carry several tool calls: the transport takes a
 // JSON-RPC batch. The limit of 50 subrequests is for the whole HTTP request.
 describe("one HTTP request with several tool calls", () => {

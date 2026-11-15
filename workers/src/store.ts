@@ -11,7 +11,7 @@ import { RequestTokens } from "./googlehealth/tokens";
 import { HealthData, dbCache } from "./healthdata";
 import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
-import { forgetEntry, hasEntry, linkedAccount, recordEntry } from "./store/entries";
+import { entryNamesBetween, forgetEntry, hasEntry, linkedAccount, recordEntry } from "./store/entries";
 import { targetInForce } from "./store/memory";
 import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
@@ -264,6 +264,12 @@ export class CoachStore extends DurableObject<Env> {
           health: new HealthData(clientIn(zone), dbCache(db), zone, db.now),
           targets: (day) => targetInForce(db, day),
           notes: (filter) => searchNotes(db, filter),
+          // The same has() nutrition_log_delete uses. namesBetween is the
+          // local table, one indexed read, and no request to Google.
+          entries: {
+            has: (name) => hasEntry(db, name),
+            namesBetween: (from, to) => entryNamesBetween(db, from, to),
+          },
           now: db.now,
           zone,
         };

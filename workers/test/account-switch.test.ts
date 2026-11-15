@@ -254,7 +254,25 @@ describe("the food entries this server created, when a Google account is linked"
 
     // The first account again: the entry counts again, and can be deleted.
     await stub.linkGoogleAccount(link());
-    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({ ok: true, output: { data: { items_logged: 1 } } });
+    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: entryId }] }] } } });
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toMatchObject({ ok: true });
+  });
+
+  it("lists the linked account's entry_id, and null once that account is no longer linked", async () => {
+    const stub = await linkedStore();
+    const entryId = await entryOfTheFirstAccount(stub);
+    const today = { date: day(0) };
+    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({
+      ok: true,
+      output: { data: { per_meal: [{ items: [{ entry_id: entryId }] }] } },
+    });
+
+    await stub.linkGoogleAccount(other());
+    // The same record, read as food the log keeps. It is still the previous account's entry.
+    const point = g.google.createdPoints()[0];
+    if (point?.dataSource) point.dataSource.platform = "FITBIT";
+    const next = await objectTool(stub, "nutrition_day", today);
+    expect(next).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: null }] }] } } });
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual(NO_ENTRY);
   });
 });

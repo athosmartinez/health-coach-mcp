@@ -397,6 +397,8 @@ export function fakeNotes(results: NoteResults = { notes: [], more: false }, fil
 export interface CoachSessionOptions {
   targets?: Targets;
   notes?: Notes;
+  /** The food entries this server created. Absent: every item has entry_id null. */
+  entries?: CoachDeps["entries"];
   now?: Date;
   zone?: Zone;
 }
@@ -420,6 +422,7 @@ export function coachSession(health: Source, options: CoachSessionOptions = {}):
     health,
     targets: options.targets,
     notes: options.notes,
+    entries: options.entries,
     now: () => options.now ?? COACH_NOW,
     zone: options.zone ?? SAO_PAULO,
   };

@@ -201,6 +201,7 @@ describe("the coach tools over /mcp, inside the object", () => {
         time: "2026-10-14T12:00:00-03:00",
         nutrients: { kcal: 800, protein_g: 50, carb_g: 90, fat_g: 25, fiber_g: 10, sugar_g: null, sodium_mg: null },
         rejected_nutrients: [],
+        entry_id: null,
       },
     ]);
     // The weigh-in of the 13th (80.3 kg) is the last one on or before the day.

@@ -28,7 +28,7 @@ import {
 } from "../src/tools/foodlog";
 import { invoke } from "../src/tools/register";
 import { RENEWED_TOKEN, STORED_TOKEN, TODAY, batch, day, googleMock, link, linkedStore } from "./e2e-helpers";
-import { DiskError, FAKE_CLIENT_ID, FAKE_USER_ID, NOW } from "./healthdata-helpers";
+import { DiskError, FAKE_CLIENT_ID, FAKE_USER_ID, NOW, at, foodRec } from "./healthdata-helpers";
 import { OWNER_SUB } from "./helpers";
 import { ALL_TOOL_NAMES, SAO_PAULO, SCHEMA_HINT, freshStore, objectRpc, objectTool } from "./memory-helpers";
 
@@ -1107,7 +1107,7 @@ describe("the write tools through /mcp of the object", () => {
     const stub = freshStore();
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: `${createdName(1)}/x` })).toEqual({
       ok: false,
-      error: { code: "invalid_input", message: "entry_id is not the id of a food log entry", hint: "use the entry_id that nutrition_log_add returned" },
+      error: { code: "invalid_input", message: "entry_id is not the id of a food log entry", hint: "use the entry_id that nutrition_log_add returned or that nutrition_day lists" },
     });
     expect(g.external).toEqual([]);
     expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete", "invalid_input")]);
@@ -1160,6 +1160,60 @@ describe("the write tools through /mcp of the object", () => {
     expect(g.logLines("error")).toEqual([["tool_internal_error", { tool: "nutrition_log_add", error_types: expect.stringMatching(/^ToolError > \w*Error$/) }]]);
     expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add", "internal_error")]);
     expectNoSecret(g.logged());
+  });
+
+  it("deletes an entry by the id nutrition_day lists, in a later call", async () => {
+    const stub = await linkedStore();
+    // The add's result is not kept: a later chat has only what nutrition_day returns.
+    expect((await objectTool(stub, "nutrition_log_add", { ...FOOD, time: "08:15" })).ok).toBe(true);
+    g.takeExternal();
+    // An item the band logged, on the same day.
+    g.google.add("nutrition-log", foodRec(at(TODAY, 19, 0), { meal: "DINNER", kcal: 100, name: "users/me/dataTypes/nutrition-log/dataPoints/syn-other-app" }));
+    const review = await objectTool(stub, "nutrition_day", { date: TODAY });
+    if (!review.ok) throw new Error(JSON.stringify(review.error));
+    const items = review.output.data.per_meal.flatMap((meal: { items: { entry_id: string | null }[] }) => meal.items);
+    // The list names the created point under users/me. The id is the name the create answered.
+    expect(g.google.createdPoints().map((point) => point.name)).toEqual(["users/me/dataTypes/nutrition-log/dataPoints/syn-created-1"]);
+    expect(items.map((item: { entry_id: string | null }) => item.entry_id)).toEqual([createdName(1), null]);
+    const entryId = items[0]?.entry_id as string;
+    // The read is the food log's own requests: no create and no delete.
+    const read = g.takeExternal();
+    expect(read["create nutrition-log"] ?? 0).toBe(0);
+    expect(read["delete nutrition-log"] ?? 0).toBe(0);
+    expect(read["nutrition-log"]).toBe(1);
+
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual({ ok: true, output: { entry_id: entryId, deleted: true } });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    expect(g.google.writes.at(-1)).toEqual({ kind: "delete", body: { names: ["users/me/dataTypes/nutrition-log/dataPoints/syn-created-1"] } });
+    expect(g.google.createdPoints()).toEqual([]);
+    expect(await storedEntries(stub)).toEqual([]);
+    // The band's item is still there, and still not deletable.
+    const after = await objectTool(stub, "nutrition_day", { date: TODAY });
+    if (!after.ok) throw new Error(JSON.stringify(after.error));
+    expect(after.output.data.per_meal.flatMap((meal: { items: { entry_id: string | null }[] }) => meal.items.map((item) => item.entry_id))).toEqual([null]);
+  });
+
+  it("returns the stored name when the list and the create use opposite forms of the user", async () => {
+    const stub = await linkedStore();
+    // The table holds the name under users/me. The list names the user by an id. Google's
+    // pages do not settle which form a list uses, so both directions have to match.
+    const stored = "users/me/dataTypes/nutrition-log/dataPoints/syn-reverse";
+    const listed = `users/${FAKE_USER_ID}/dataTypes/nutrition-log/dataPoints/syn-reverse`;
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO nutrition_entries (sub, name, day, created_at) VALUES (?, ?, ?, ?)", OWNER_SUB, stored, TODAY, "2026-10-16T13:00:00.000000000Z");
+    });
+    g.google.add("nutrition-log", foodRec(at(TODAY, 12, 30), { meal: "LUNCH", kcal: 400, platform: "GOOGLE_WEB_API", name: listed }));
+    const review = await objectTool(stub, "nutrition_day", { date: TODAY });
+    if (!review.ok) throw new Error(JSON.stringify(review.error));
+    // The id is the stored name, not the name the list used. Delete matches that stored
+    // name exactly; the create-shaped id is deleted in the test above, against a users/me list name.
+    expect(review.output.data.per_meal[0].items[0].entry_id).toBe(stored);
+    expect(review.output.data.per_meal[0].items[0].entry_id).not.toBe(listed);
+    g.takeExternal();
+    // The listed form is not the stored name, so nothing is sent for it.
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: listed })).toMatchObject({ ok: false, error: { code: "no_data" } });
+    expect(g.takeExternal()).toEqual({ total: 0 });
+    expect(await storedEntries(stub)).toMatchObject([{ name: stored }]);
   });
 
   it("the calls of one request take turns on one budget: every create is one unit", async () => {

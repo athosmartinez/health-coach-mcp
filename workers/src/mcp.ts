@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "./google";
 import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
+import { registerCoach } from "./tools/moments";
 import { type ToolOutcome, defineTool, register } from "./tools/register";
 import { inputSchema, s } from "./tools/schema";
 import { SERVER_NAME, TRANSPORT, VERSION } from "./version";
@@ -18,6 +19,12 @@ export const MCP_PATH = "/mcp";
 export interface ServerDeps {
   /** Runs the body of a coach memory tool on the store. */
   memory(name: string, args: Record<string, unknown>): ToolOutcome;
+  /**
+   * Runs the body of a coach-moment tool. It reads Google Health on the
+   * request budget of this MCP HTTP request, which every call here shares.
+   */
+  coach(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
+  /** Shares the access token answer of this MCP HTTP request with the coach tools. */
   googleAccountStatus(): Promise<GoogleAccountStatus>;
 }
 
@@ -85,6 +92,7 @@ export function createServer(deps: ServerDeps): McpServer {
   });
 
   registerMemory(server, deps.memory);
+  registerCoach(server, deps.coach);
 
   return server;
 }

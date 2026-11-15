@@ -17,7 +17,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import fixtureText from "./fixtures/go-tools-list.json?raw";
 import { rpc, signInAsOwner } from "./helpers";
-import { MEMORY_TOOL_NAMES } from "./memory-helpers";
+import { COACH_TOOL_NAMES, MEMORY_TOOL_NAMES } from "./memory-helpers";
 
 interface ListedTool {
   name: string;
@@ -61,7 +61,15 @@ describe("parity with the Go server's tools/list", () => {
     }
   });
 
-  it.each(MEMORY_TOOL_NAMES)("%s has the same name, description, annotations and schemas", (name) => {
+  it("has the coach-moment tools of this Worker in the fixture and in the Worker", () => {
+    expect(COACH_TOOL_NAMES).toEqual(["morning_briefing", "workout_review", "nutrition_day"]);
+    for (const name of COACH_TOOL_NAMES) {
+      expect(goTools.has(name), `${name} in the Go fixture`).toBe(true);
+      expect(workerTools.has(name), `${name} in the Worker`).toBe(true);
+    }
+  });
+
+  it.each([...MEMORY_TOOL_NAMES, ...COACH_TOOL_NAMES])("%s has the same name, description, annotations and schemas", (name) => {
     const go = goTools.get(name);
     const worker = workerTools.get(name);
     // The same fields are listed: nothing extra, nothing missing.
@@ -79,7 +87,7 @@ describe("parity with the Go server's tools/list", () => {
     // server_info exists on both sides but differs on purpose: the Worker adds
     // `transport` to its output and annotations to the tool.
     const missing = [...goTools.keys()].filter((name) => !workerTools.has(name)).sort();
-    expect(missing).toEqual(["metric_series", "morning_briefing", "nutrition_day", "weekly_report", "workout_review"]);
+    expect(missing).toEqual(["metric_series", "weekly_report"]);
     expect([...workerTools.keys()].filter((name) => !goTools.has(name))).toEqual(["google_account_status"]);
   });
 });

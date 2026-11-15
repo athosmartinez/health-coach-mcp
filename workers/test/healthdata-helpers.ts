@@ -348,17 +348,24 @@ export class FakeGoogle {
   }
 
   install(): void {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-      const match = PATH.exec(url.pathname);
-      if (url.origin !== API || !match) throw new Error(`unexpected fetch in test: ${request.method} ${url.origin}${url.pathname}`);
-      const dataType = match[1] as string;
-      const rollup = match[2] !== undefined;
-      this.sent.push(rollup ? `rollup ${dataType}` : dataType);
-      if (this.fail) return this.fail();
-      return rollup ? this.rollup(dataType, (await request.json()) as Json) : this.list(dataType, url.searchParams);
-    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => this.respond(new Request(input, init)));
+  }
+
+  /** Whether the request goes to the Google Health API. */
+  serves(request: Request): boolean {
+    return new URL(request.url).origin === API;
+  }
+
+  /** Answers one request to the API; any other URL fails the test. */
+  async respond(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const match = PATH.exec(url.pathname);
+    if (url.origin !== API || !match) throw new Error(`unexpected fetch in test: ${request.method} ${url.origin}${url.pathname}`);
+    const dataType = match[1] as string;
+    const rollup = match[2] !== undefined;
+    this.sent.push(rollup ? `rollup ${dataType}` : dataType);
+    if (this.fail) return this.fail();
+    return rollup ? this.rollup(dataType, (await request.json()) as Json) : this.list(dataType, url.searchParams);
   }
 
   private page(key: string, items: Json[], size: number, token: string | null): Response {

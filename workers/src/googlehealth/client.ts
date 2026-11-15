@@ -751,6 +751,15 @@ function logFault(operation: WriteKind, fault: AnswerFault, code: number | undef
 const RENEWAL_HINT = `${OAUTH_CLIENT_HINT} ${RECONNECT_HINT}`;
 
 /**
+ * The tool error of a call that finds no linked Google account. The token
+ * source answers it, and so does a tool that must stop before it asks for a
+ * token: one text for both, so the person reads the same step to take.
+ */
+export function notLinkedError(): ToolError {
+  return new ToolError("auth_expired", "not signed in to Google Health", RECONNECT_HINT);
+}
+
+/**
  * The tool error of a token source that gave no token. A missing or revoked
  * link is auth_expired, and so is a token request that Google refuses (a wrong
  * OAuth client): the person can fix both, and no renewal works until then. The
@@ -759,7 +768,7 @@ const RENEWAL_HINT = `${OAUTH_CLIENT_HINT} ${RECONNECT_HINT}`;
 function tokenError(code: string): ToolError {
   switch (code) {
     case "not_linked":
-      return new ToolError("auth_expired", "not signed in to Google Health", RECONNECT_HINT);
+      return notLinkedError();
     case "auth_expired":
       return new ToolError("auth_expired", "the Google sign-in expired or was revoked", RECONNECT_HINT);
     case "upstream_unavailable":

@@ -18,7 +18,7 @@ import { RECONNECT_HINT } from "../src/google";
 import { MAY_EXIST_HINT } from "../src/googlehealth/client";
 import { CoachStore, coachStore } from "../src/store";
 import { FOOD_LOG_NOTICE } from "../src/tools/foodlog";
-import { FOOD_NAME, TODAY, day, everything, googleMock, skipRetryWaits } from "./e2e-helpers";
+import { FOOD_NAME, TODAY, day, everything, googleMock, link, skipRetryWaits } from "./e2e-helpers";
 import { FAKE_CLIENT_ID, FAKE_USER_ID } from "./healthdata-helpers";
 import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, rpc, signInAsOwner } from "./helpers";
 import { ALL_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
@@ -275,15 +275,37 @@ describe("one error of each kind that a write can give, as the client reads it",
     await runInDurableObject(coachStore(env), (_instance, state) => {
       state.storage.sql.exec("DELETE FROM google_account");
     });
-    expect(await fails("nutrition_log_add", FOOD)).toEqual({ code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT });
-    // An entry belongs to the Google account it was created for. With no
-    // account linked, no entry is this server's own: the delete stops there.
-    expect(await fails("nutrition_log_delete", { entry_id: added.entry_id })).toMatchObject({ code: "no_data", message: "this server created no entry with that id" });
+    const notSignedIn = { code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT };
+    expect(await fails("nutrition_log_add", FOOD)).toEqual(notSignedIn);
+    // The entry exists, and it is the entry of the account that must sign in
+    // again: the delete names that step, and does not say "no such entry".
+    expect(await fails("nutrition_log_delete", { entry_id: added.entry_id })).toEqual(notSignedIn);
+    // An id that this server never created has the same answer: it says nothing about which entries exist.
+    expect(await fails("nutrition_log_delete", { entry_id: createdName(77) })).toEqual(notSignedIn);
+    // The shape of the id is checked first.
+    expect(await fails("nutrition_log_delete", { entry_id: `${createdName(1)}/x` })).toMatchObject({ code: "invalid_input", message: "entry_id is not the id of a food log entry" });
     // Nothing is asked of Google, not even a token.
     expect(g.external).toEqual([]);
     // The row stays, for when its account is linked again.
     expect(await storedEntries()).toMatchObject([{ name: createdName(1) }]);
-    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add", "auth_expired"), toolCall("nutrition_log_delete", "no_data")]);
+    expect(g.logLines("log")).toEqual([
+      toolCall("nutrition_log_add", "auth_expired"),
+      toolCall("nutrition_log_delete", "auth_expired"),
+      toolCall("nutrition_log_delete", "auth_expired"),
+      toolCall("nutrition_log_delete", "invalid_input"),
+    ]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
+
+    // The same account signs in again: the same delete now happens.
+    await coachStore(env).linkGoogleAccount(link());
+    g.clearLogs();
+    expect(await ok("nutrition_log_delete", { entry_id: added.entry_id })).toEqual({ entry_id: added.entry_id, deleted: true });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    expect(await storedEntries()).toEqual([]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete")]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
   });
 
   it("answers upstream_unavailable for a 503 on an add, once: the entry may exist, and it is not sent again", async () => {

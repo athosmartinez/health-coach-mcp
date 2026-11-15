@@ -27,7 +27,7 @@ import {
   runWriteTool,
 } from "../src/tools/foodlog";
 import { invoke } from "../src/tools/register";
-import { RENEWED_TOKEN, STORED_TOKEN, TODAY, batch, day, googleMock, linkedStore } from "./e2e-helpers";
+import { RENEWED_TOKEN, STORED_TOKEN, TODAY, batch, day, googleMock, link, linkedStore } from "./e2e-helpers";
 import { DiskError, FAKE_CLIENT_ID, FAKE_USER_ID, NOW } from "./healthdata-helpers";
 import { OWNER_SUB } from "./helpers";
 import { ALL_TOOL_NAMES, SAO_PAULO, SCHEMA_HINT, freshStore, objectRpc, objectTool } from "./memory-helpers";
@@ -821,6 +821,30 @@ describe("nutrition_log_delete", () => {
     expect(s.removed).toEqual(["syn-entry-1"]);
     expect(s.rows.size).toBe(0);
   });
+
+  it.each([
+    ["its own entry", entryName(1)],
+    ["an entry this server did not create", entryName(2)],
+  ])("answers auth_expired for %s when no Google account is linked, before the ownership check", async (_name, entryId) => {
+    const { s } = await withEntry();
+    // The link is gone: the row of the entry stays, and matches no account.
+    s.linked.account = undefined;
+    expect(await s.fails("nutrition_log_delete", { entry_id: entryId })).toEqual({ code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT });
+    // The store is not asked for the entry, and nothing is asked of Google.
+    expect(s.steps).toEqual([]);
+    expect(s.removed).toEqual([]);
+    expect([...s.rows.keys()]).toEqual([entryName(1)]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete", "auth_expired")]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
+  });
+
+  it("checks the shape of the id first when no Google account is linked", async () => {
+    const { s } = await withEntry();
+    s.linked.account = undefined;
+    expect(await s.fails("nutrition_log_delete", { entry_id: `${entryName(1)}/extra` })).toMatchObject({ code: "invalid_input", message: "entry_id is not the id of a food log entry" });
+    expect(s.steps).toEqual([]);
+  });
 });
 
 // The arguments of a write are its payload. The text of the schema validator
@@ -1066,15 +1090,55 @@ describe("the write tools through /mcp of the object", () => {
 
   it("answers auth_expired without a request when no Google account is linked", async () => {
     const stub = freshStore();
+    // The delete names an id that this server never created: the answer is the same for every id.
     for (const [name, args] of [
       ["nutrition_log_add", FOOD],
       ["nutrition_log_delete", { entry_id: createdName(1) }],
     ] as const) {
-      const outcome = await objectTool(stub, name, args);
-      // The delete stops earlier: the store holds no such entry.
-      expect(outcome).toMatchObject(name === "nutrition_log_add" ? { ok: false, error: { code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT } } : { ok: false, error: { code: "no_data" } });
+      expect(await objectTool(stub, name, args), name).toEqual({ ok: false, error: { code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT } });
     }
     expect(g.external).toEqual([]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add", "auth_expired"), toolCall("nutrition_log_delete", "auth_expired")]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
+  });
+
+  it("checks the shape of the id before the link: a malformed id is invalid_input without a linked account", async () => {
+    const stub = freshStore();
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: `${createdName(1)}/x` })).toEqual({
+      ok: false,
+      error: { code: "invalid_input", message: "entry_id is not the id of a food log entry", hint: "use the entry_id that nutrition_log_add returned" },
+    });
+    expect(g.external).toEqual([]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete", "invalid_input")]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
+  });
+
+  it("answers auth_expired for the delete of its own entry after the link is removed, and deletes it when the account is linked again", async () => {
+    const stub = await linkedStore();
+    const added = await objectTool(stub, "nutrition_log_add", FOOD);
+    if (!added.ok) throw new Error("the add failed");
+    g.takeExternal();
+    g.clearLogs();
+    // What a refused token renewal does to the link.
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("DELETE FROM google_account");
+    });
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({
+      ok: false,
+      error: { code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT },
+    });
+    expect(g.external).toEqual([]);
+    expect(await storedEntries(stub)).toMatchObject([{ sub: OWNER_SUB, name: createdName(1) }]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_delete", "auth_expired")]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
+
+    await stub.linkGoogleAccount(link());
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toEqual({ ok: true, output: { entry_id: createdName(1), deleted: true } });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    expect(await storedEntries(stub)).toEqual([]);
   });
 
   it("says that the entry exists when the store cannot record it, and logs only the tool and the error types", async () => {

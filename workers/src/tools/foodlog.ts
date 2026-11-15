@@ -13,6 +13,7 @@ import type { McpServer, ToolAnnotations } from "@modelcontextprotocol/server";
 import { type LocalDate, type Zone, addDays, dateOf, instantOf, today } from "../coach/date";
 import { INTERNAL_ERROR, ToolError } from "../coach/errors";
 import { trimSpace } from "../coach/text";
+import { notLinkedError } from "../googlehealth/client";
 import { MAX_NAME_LENGTH, type NewFoodEntry, pointId } from "../googlehealth/nutritionlog";
 import { MAX_ITEM_GRAMS, MAX_ITEM_KCAL, MAX_LABEL_RUNES, clean } from "../healthdata";
 import { invalid } from "../store/db";
@@ -319,6 +320,12 @@ const NUTRITION_LOG_DELETE = writeTool(
     if (id === undefined) {
       throw new ToolError("invalid_input", "entry_id is not the id of a food log entry", "use the entry_id that nutrition_log_add returned");
     }
+    // Without a linked account the store matches no entry, also not one that
+    // this server created: "no entry with that id" would be false for it, and
+    // would hide the step that makes the delete work. So the answer is the
+    // one of a token request without a link, for every id, and no request is
+    // sent. It says nothing about which entries exist.
+    if (deps.entries.owner() === undefined) throw notLinkedError();
     // Only an entry of this server is deleted, and the check comes before any
     // request: Google's documentation does not prove that it would refuse the
     // delete of an entry another app wrote. An entry that was created for

@@ -91,7 +91,8 @@ describe("the entries this server created", () => {
   it("leaves out a row whose name no longer reads as a data point name", () =>
     withDb((db, sql) => {
       recordEntry(db, NAME, "2026-10-13");
-      sql.exec("INSERT INTO nutrition_entries (name, day, created_at) VALUES ('not a name', '2026-10-13', 'x')");
+      recordEntry(db, OTHER, "2026-10-13");
+      sql.exec("UPDATE nutrition_entries SET name = 'not a name' WHERE name = ?", OTHER);
       expect([...entryIdsBetween(db, "2026-10-13", "2026-10-13")]).toEqual(["syn-entry-1"]);
     }));
 

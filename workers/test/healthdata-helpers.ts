@@ -282,6 +282,48 @@ export const FAKE_CLIENT_ID = "synthetic-client.apps.example";
 
 const TYPE_URL = "type.googleapis.com/google.devicesandservices.health.v4";
 
+// The formats and values of the DataPoint reference
+// (https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints),
+// for the check of an exercise create.
+
+/**
+ * A Timestamp: "Uses RFC 3339 … Offsets other than "Z" are also accepted", with
+ * up to nine fractional digits. A date alone, or a time without "Z" or an
+ * offset, is not one.
+ */
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+
+/** A timestamp of the documented form that is also a real instant (not month 13). */
+const isTimestamp = (text: string) => TIMESTAMP.test(text) && !Number.isNaN(Date.parse(text));
+
+/**
+ * A Duration: "A duration in seconds with up to nine fractional digits, ending
+ * with 's'". A UTC offset can be negative (west of UTC).
+ */
+const UTC_OFFSET = /^-?\d+(\.\d{1,9})?s$/;
+
+/** The duration of an exercise without its pauses: a length of time, so never negative. */
+const ACTIVE_DURATION = /^\d+(\.\d{1,9})?s$/;
+
+/** The values of DataSource.RecordingMethod. */
+export const RECORDING_METHODS: readonly string[] = ["RECORDING_METHOD_UNSPECIFIED", "MANUAL", "PASSIVELY_MEASURED", "DERIVED", "ACTIVELY_MEASURED", "UNKNOWN"];
+
+/** The fields of Exercise, in the order of its JSON representation. */
+export const EXERCISE_FIELDS: readonly string[] = [
+  "interval",
+  "exerciseType",
+  "splits",
+  "exerciseEvents",
+  "splitSummaries",
+  "metricsSummary",
+  "exerciseMetadata",
+  "displayName",
+  "activeDuration",
+  "notes",
+  "updateTime",
+  "createTime",
+];
+
 /** The display name the fake API writes for an exercise type other than OTHER, as Google writes one of its own. */
 export const generatedName = (exerciseType: string) => `Generated ${exerciseType.toLowerCase().replaceAll("_", " ")}`;
 const FILTER = /^([a-z_]+)\.([a-z_.]+) >= "([^"]+)" AND \1\.\2 < "([^"]+)"$/;
@@ -451,26 +493,46 @@ export class FakeGoogle {
   /**
    * Creates one exercise point and answers the finished Operation of the
    * documented example ("Write a workout session"). The body is checked
-   * against the reference: the four fields of the interval, an end after the
-   * start, an exerciseType of the documented enum, a displayName and a
-   * metricsSummary. As the reference says, the display name of the body is
+   * against the reference: the four fields of the interval, each time an RFC
+   * 3339 timestamp and each offset a duration, an end after the start, an
+   * exerciseType of the documented enum, a displayName and a metricsSummary.
+   * Of the optional fields: calories that are a number, an activeDuration
+   * that is a duration and not negative, notes that are a string, a
+   * recordingMethod of the documented enum, and no field that Exercise does
+   * not have. As the reference says, the display name of the body is
    * kept only for the type OTHER: for any other type the point gets a name
    * the server made.
    */
   private createExercise(body: Json): Response {
     const exercise = body?.exercise;
     const interval = exercise?.interval;
-    const isTime = (time: unknown) => typeof time === "string" && !Number.isNaN(Date.parse(time));
-    const isOffset = (value: unknown) => typeof value === "string" && /^-?\d+(\.\d+)?s$/.test(value);
+    const isText = (value: unknown) => typeof value === "string";
     if (typeof exercise !== "object" || exercise === null) return this.invalid("exercise is required", "SYNTHETIC_EXERCISE_MISSING");
-    if (!isTime(interval?.startTime) || !isTime(interval?.endTime) || !isOffset(interval?.startUtcOffset) || !isOffset(interval?.endUtcOffset)) {
+    if (![interval?.startTime, interval?.startUtcOffset, interval?.endTime, interval?.endUtcOffset].every(isText)) {
       return this.invalid("interval needs start_time, start_utc_offset, end_time and end_utc_offset", "SYNTHETIC_INTERVAL_INCOMPLETE");
+    }
+    if (!isTimestamp(interval.startTime) || !isTimestamp(interval.endTime)) {
+      return this.invalid("interval.start_time and interval.end_time must be RFC 3339 timestamps", "SYNTHETIC_TIMESTAMP_INVALID");
+    }
+    if (!UTC_OFFSET.test(interval.startUtcOffset) || !UTC_OFFSET.test(interval.endUtcOffset)) {
+      return this.invalid("a UTC offset must be a duration in seconds with up to nine fractional digits, ending with 's'", "SYNTHETIC_UTC_OFFSET_INVALID");
     }
     if (!(Date.parse(interval.endTime) > Date.parse(interval.startTime))) return this.invalid("interval.end_time must be after interval.start_time", "SYNTHETIC_INTERVAL_EMPTY");
     if (!DOCUMENTED_EXERCISE_TYPES.includes(exercise.exerciseType)) return this.invalid("exercise_type is not a valid ExerciseType", "SYNTHETIC_EXERCISE_TYPE_UNKNOWN");
     if (typeof exercise.displayName !== "string" || exercise.displayName === "") return this.invalid("display_name is required", "SYNTHETIC_DISPLAY_NAME_MISSING");
     const summary = exercise.metricsSummary;
     if (typeof summary !== "object" || summary === null || Array.isArray(summary)) return this.invalid("metrics_summary is required", "SYNTHETIC_METRICS_SUMMARY_MISSING");
+    // The optional fields: each one is checked only when the body has it.
+    if (summary.caloriesKcal !== undefined && (typeof summary.caloriesKcal !== "number" || !Number.isFinite(summary.caloriesKcal))) {
+      return this.invalid("metrics_summary.calories_kcal must be a number", "SYNTHETIC_CALORIES_INVALID");
+    }
+    if (exercise.activeDuration !== undefined && !(isText(exercise.activeDuration) && ACTIVE_DURATION.test(exercise.activeDuration))) {
+      return this.invalid("active_duration must be a duration in seconds that is not negative, with up to nine fractional digits, ending with 's'", "SYNTHETIC_ACTIVE_DURATION_INVALID");
+    }
+    if (exercise.notes !== undefined && !isText(exercise.notes)) return this.invalid("notes must be a string", "SYNTHETIC_NOTES_INVALID");
+    if (Object.keys(exercise).some((key) => !EXERCISE_FIELDS.includes(key))) return this.invalid("exercise has a field that Exercise does not have", "SYNTHETIC_EXERCISE_FIELD_UNKNOWN");
+    const method = body.dataSource?.recordingMethod;
+    if (method !== undefined && !RECORDING_METHODS.includes(method)) return this.invalid("data_source.recording_method is not a valid RecordingMethod", "SYNTHETIC_RECORDING_METHOD_UNKNOWN");
 
     const id = `syn-created-${++this.createdCount}`;
     const dataSource = { recordingMethod: body.dataSource?.recordingMethod ?? "UNKNOWN", application: { googleWebClientId: FAKE_CLIENT_ID }, platform: "GOOGLE_WEB_API" };

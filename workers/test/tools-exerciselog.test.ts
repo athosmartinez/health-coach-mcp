@@ -30,7 +30,7 @@ import {
 import { MAX_DAYS_BACK, MAX_NAME_CHARS } from "../src/tools/foodlog";
 import { invoke } from "../src/tools/register";
 import { RENEWED_TOKEN, STORED_TOKEN, TODAY, day, everything, googleMock, link, linkedStore } from "./e2e-helpers";
-import { DOCUMENTED_EXERCISE_TYPES, DiskError, FAKE_CLIENT_ID, FAKE_USER_ID, NOW, at, exerciseRec, generatedName } from "./healthdata-helpers";
+import { DOCUMENTED_EXERCISE_TYPES, DiskError, EXERCISE_FIELDS, FAKE_CLIENT_ID, FAKE_USER_ID, NOW, RECORDING_METHODS, at, exerciseRec, generatedName } from "./healthdata-helpers";
 import { OWNER_SUB } from "./helpers";
 import { ALL_TOOL_NAMES, SAO_PAULO, SCHEMA_HINT, freshStore, objectRpc, objectTool } from "./memory-helpers";
 
@@ -1060,6 +1060,30 @@ describe("the fake Google Health API of the tests", () => {
     ["an empty display name", (body: Record<string, any>) => (body.exercise.displayName = ""), "SYNTHETIC_DISPLAY_NAME_MISSING"],
     ["no metrics summary", (body: Record<string, any>) => delete body.exercise.metricsSummary, "SYNTHETIC_METRICS_SUMMARY_MISSING"],
     ["a null metrics summary", (body: Record<string, any>) => (body.exercise.metricsSummary = null), "SYNTHETIC_METRICS_SUMMARY_MISSING"],
+    // A Timestamp is RFC 3339: a date, a time, and "Z" or an offset, with at most nine fraction digits.
+    ["a start time that is a date alone", (body: Record<string, any>) => (body.exercise.interval.startTime = "2026-10-16"), "SYNTHETIC_TIMESTAMP_INVALID"],
+    ["an end time without Z or an offset", (body: Record<string, any>) => (body.exercise.interval.endTime = "2026-10-16T11:25:00"), "SYNTHETIC_TIMESTAMP_INVALID"],
+    ["a start time with a space for the T", (body: Record<string, any>) => (body.exercise.interval.startTime = "2026-10-16 10:10:00Z"), "SYNTHETIC_TIMESTAMP_INVALID"],
+    ["a start time with ten fraction digits", (body: Record<string, any>) => (body.exercise.interval.startTime = "2026-10-16T10:10:00.0123456789Z"), "SYNTHETIC_TIMESTAMP_INVALID"],
+    ["an end time in month 13", (body: Record<string, any>) => (body.exercise.interval.endTime = "2026-13-16T11:25:00Z"), "SYNTHETIC_TIMESTAMP_INVALID"],
+    ["an end time that is not a time", (body: Record<string, any>) => (body.exercise.interval.endTime = "tomorrow"), "SYNTHETIC_TIMESTAMP_INVALID"],
+    // A Duration is seconds with at most nine fraction digits and an "s".
+    ["a start offset with ten decimals", (body: Record<string, any>) => (body.exercise.interval.startUtcOffset = "-10800.0123456789s"), "SYNTHETIC_UTC_OFFSET_INVALID"],
+    ["an end offset without the unit", (body: Record<string, any>) => (body.exercise.interval.endUtcOffset = "-10800"), "SYNTHETIC_UTC_OFFSET_INVALID"],
+    ["an end offset in hours", (body: Record<string, any>) => (body.exercise.interval.endUtcOffset = "-03:00"), "SYNTHETIC_UTC_OFFSET_INVALID"],
+    ["an active duration in words", (body: Record<string, any>) => (body.exercise.activeDuration = "one hour"), "SYNTHETIC_ACTIVE_DURATION_INVALID"],
+    ["an active duration without the unit", (body: Record<string, any>) => (body.exercise.activeDuration = "75"), "SYNTHETIC_ACTIVE_DURATION_INVALID"],
+    ["a negative active duration", (body: Record<string, any>) => (body.exercise.activeDuration = "-5s"), "SYNTHETIC_ACTIVE_DURATION_INVALID"],
+    ["an active duration with ten decimals", (body: Record<string, any>) => (body.exercise.activeDuration = "4500.0123456789s"), "SYNTHETIC_ACTIVE_DURATION_INVALID"],
+    ["an active duration that is a number", (body: Record<string, any>) => (body.exercise.activeDuration = 4500), "SYNTHETIC_ACTIVE_DURATION_INVALID"],
+    ["a recording method that is not in the enum", (body: Record<string, any>) => (body.dataSource.recordingMethod = "TYPED_IN"), "SYNTHETIC_RECORDING_METHOD_UNKNOWN"],
+    ["a recording method in lower case", (body: Record<string, any>) => (body.dataSource.recordingMethod = "manual"), "SYNTHETIC_RECORDING_METHOD_UNKNOWN"],
+    ["calories that are a text", (body: Record<string, any>) => (body.exercise.metricsSummary.caloriesKcal = "431.5"), "SYNTHETIC_CALORIES_INVALID"],
+    ["calories that are null", (body: Record<string, any>) => (body.exercise.metricsSummary.caloriesKcal = null), "SYNTHETIC_CALORIES_INVALID"],
+    ["notes that are a number", (body: Record<string, any>) => (body.exercise.notes = 7711), "SYNTHETIC_NOTES_INVALID"],
+    ["notes that are a list", (body: Record<string, any>) => (body.exercise.notes = ["Synthetic note"]), "SYNTHETIC_NOTES_INVALID"],
+    ["a field that Exercise does not have", (body: Record<string, any>) => (body.exercise.averageHeartRate = 120), "SYNTHETIC_EXERCISE_FIELD_UNKNOWN"],
+    ["a field of the interval written in exercise", (body: Record<string, any>) => (body.exercise.startTime = "2026-10-16T10:10:00Z"), "SYNTHETIC_EXERCISE_FIELD_UNKNOWN"],
   ] as [string, (body: Record<string, any>) => unknown, string][])("refuses an exercise create with %s: HTTP 400, INVALID_ARGUMENT and an ErrorInfo", async (_name, damage, reason) => {
     const body = valid();
     damage(body);
@@ -1068,6 +1092,36 @@ describe("the fake Google Health API of the tests", () => {
     expect(answer.error).toMatchObject({ status: "INVALID_ARGUMENT", message: expect.any(String), details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason }] });
     // Nothing was created.
     expect(g.google.createdPoints("exercise")).toEqual([]);
+  });
+
+  // The checks must not refuse what the reference allows: a fake that is too strict hides a body that works.
+  it("takes every documented form of a time, a duration and a recording method, and every field of Exercise", async () => {
+    const forms: [string, (body: Record<string, any>) => unknown][] = [
+      ["a time with an offset", (body) => (body.exercise.interval.startTime = "2026-10-16T07:10:00-03:00")],
+      ["a time with three fraction digits", (body) => (body.exercise.interval.startTime = "2026-10-16T10:10:00.045Z")],
+      ["a time with nine fraction digits", (body) => (body.exercise.interval.endTime = "2026-10-16T11:25:00.045123456Z")],
+      ["the offset of the reference's example", (body) => (body.exercise.interval.startUtcOffset = "3.5s")],
+      ["a negative offset with nine decimals", (body) => (body.exercise.interval.endUtcOffset = "-10800.123456789s")],
+      ["an offset of zero", (body) => (body.exercise.interval.endUtcOffset = "0s")],
+      ["an active duration with a fraction", (body) => (body.exercise.activeDuration = "4500.5s")],
+      ["no active duration", (body) => delete body.exercise.activeDuration],
+      ["no recording method", (body) => delete body.dataSource.recordingMethod],
+      ["no data source", (body) => delete body.dataSource],
+      ["calories and notes", (body) => Object.assign(body.exercise, { metricsSummary: { caloriesKcal: 431.5 }, notes: "Synthetic note" })],
+      ...RECORDING_METHODS.map((method): [string, (body: Record<string, any>) => unknown] => [method, (body) => (body.dataSource.recordingMethod = method)]),
+    ];
+    for (const [name, change] of forms) {
+      const body = valid();
+      change(body);
+      expect((await create(body)).status, name).toBe(200);
+    }
+    expect(RECORDING_METHODS).toEqual(["RECORDING_METHOD_UNSPECIFIED", "MANUAL", "PASSIVELY_MEASURED", "DERIVED", "ACTIVELY_MEASURED", "UNKNOWN"]);
+    // Every field of the reference's Exercise is a field the fake knows, and the body of the tool has no other.
+    expect(EXERCISE_FIELDS).toEqual(["interval", "exerciseType", "splits", "exerciseEvents", "splitSummaries", "metricsSummary", "exerciseMetadata", "displayName", "activeDuration", "notes", "updateTime", "createTime"]);
+    const all = valid();
+    Object.assign(all.exercise, { splits: [], exerciseEvents: [], splitSummaries: [], exerciseMetadata: {}, notes: "Synthetic note", updateTime: "2026-10-16T11:30:00Z", createTime: "2026-10-16T11:30:00Z" });
+    expect(Object.keys(all.exercise).sort()).toEqual([...EXERCISE_FIELDS].sort());
+    expect((await create(all)).status).toBe(200);
   });
 
   it("keeps the display name of the body for OTHER only, as the reference says", async () => {

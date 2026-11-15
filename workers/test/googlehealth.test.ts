@@ -616,20 +616,32 @@ describe("retries", () => {
   });
 
   it("does not retry another client error", async () => {
-    const requests = fakeApi(() => apiError(400, "INVALID_ARGUMENT", "INVALID_DATA_POINT_FILTER near 2026-10-01"));
+    const requests = fakeApi(() =>
+      json(400, {
+        error: {
+          code: 400,
+          status: "INVALID_ARGUMENT",
+          message: "INVALID_DATA_POINT_FILTER near 2026-10-01 for owner@example.com",
+          details: [
+            { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "FILTER_HAS_NEAR", domain: "health.googleapis.com" },
+            { note: "synthetic body 7711" },
+          ],
+        },
+      }),
+    );
     const { client, waits } = testClient();
     const error = await failure(client.list("steps", "2026-10-01", "2026-10-01", id));
     expect(statusOf(error)).toMatchObject({ httpStatus: 400, status: "INVALID_ARGUMENT" });
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
-    // An internal error without the body.
+    // An internal error without the body. A read does not repeat the message or the ErrorInfo reason.
     expect(toWire(error).code).toBe("internal_error");
-    expect(texts(error)).not.toContain("near");
+    const shown = `${texts(error)} ${logged()}`;
+    for (const secret of ["near", "FILTER_HAS_NEAR", "owner@example.com", "7711"]) expect(shown, secret).not.toContain(secret);
     // It is logged with its HTTP status and Google's enum, never the body.
     expect(warnings()).toEqual([
       ["google health request rejected", { data_type: "steps", http_status: 400, google_status: "INVALID_ARGUMENT" }],
     ]);
-    expect(logged()).not.toContain("near");
   });
 
   it("retries a request that did not complete", async () => {

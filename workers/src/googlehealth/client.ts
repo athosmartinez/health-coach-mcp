@@ -18,9 +18,12 @@
 // two writes of the food log only, behind a method and path allowlist; a
 // create that is never sent again when its outcome is unknown; waits with
 // jitter and a cap on Retry-After; one token renewal shared by 401 and the
-// stale-token 403; errors
-// carry the HTTP status and Google's status enum, never the response body;
-// responses read through a size limit; a page cap or a repeated page token is
+// stale-token 403; errors carry the HTTP status and Google's status enum. A
+// read never keeps the response body. A write refusal also keeps Google's
+// error.message, cut to about 200 characters, and the reason of any ErrorInfo,
+// so the model can explain the refusal. Tokens, email addresses, user
+// identifiers and the request body are never kept; responses are read through
+// a size limit; a page cap or a repeated page token is
 // an error instead of a truncated result; a request budget shared by the calls
 // of one MCP request; each record reduced by the caller as its page is read;
 // and a port from Go to TypeScript.
@@ -31,6 +34,7 @@
 
 import type { LocalDate, Zone } from "../coach/date";
 import { ToolError, errorTypes } from "../coach/errors";
+import { truncate } from "../coach/text";
 import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../google";
 import type { RequestBudget } from "./budget";
 import { type DataType, type TypeInfo, filter, lookup, rollupChunks, windowFilter } from "./datatypes";
@@ -474,15 +478,19 @@ export class GoogleHealthClient {
           if (serverWait > MAX_RETRY_AFTER_MS) throw last;
         } else {
           const cause = statusError(status, reply.text);
-          // A changed filter field, request shape or API version lands here;
-          // the status and Google's enum are the only signal (the body is
-          // never logged).
+          // A changed filter field, request shape or API version lands here.
+          // A read logs the status and Google's enum only. A write also logs
+          // the short message and the ErrorInfo reason, so the refusal can be
+          // explained; the rest of the body is never logged.
+          const detail = kind === "read" ? undefined : googleWriteFault(reply.text);
           console.warn("google health request rejected", {
             data_type: dataType,
             http_status: status,
             google_status: cause.status,
+            ...(detail?.reason ? { google_reason: detail.reason } : {}),
+            ...(detail?.message ? { google_message: detail.message } : {}),
           });
-          if (kind !== "read" && status >= 400 && status < 500) throw refused(kind, cause);
+          if (kind !== "read" && status >= 400 && status < 500) throw refused(kind, cause, detail ?? NO_WRITE_FAULT);
           throw new Error(`googlehealth: ${dataType} request rejected`, { cause });
         }
       }
@@ -716,13 +724,15 @@ const NOT_SENT: Readonly<Record<WriteKind, string>> = {
 
 /**
  * A write that Google answered with a 4xx other than a rejected token, a
- * denial or a rate limit: it took nothing. The message holds no part of the
- * answer; the log line of the rejection holds the HTTP status.
+ * denial or a rate limit: it took nothing. The message repeats Google's
+ * ErrorInfo reason and short error.message when the body has them, so the
+ * model can say why. It does not repeat the request body, a token, an email
+ * address or a user identifier. The same two fields are on the reject log.
  */
-function refused(kind: WriteKind, cause: StatusError): ToolError {
-  return kind === "create"
-    ? new ToolError("invalid_input", "Google Health refused the entry", "the entry was not created; check the date, the time and the values", { cause })
-    : new ToolError("invalid_input", "Google Health refused the delete", "the entry was not deleted", { cause });
+function refused(kind: WriteKind, cause: StatusError, detail: WriteRefusal): ToolError {
+  const base = kind === "create" ? "Google Health refused the entry" : "Google Health refused the delete";
+  const hint = kind === "create" ? "the entry was not created; check the date, the time and the values" : "the entry was not deleted";
+  return new ToolError("invalid_input", refusalText(base, detail), hint, { cause });
 }
 
 const CREATE_FAULTS: Readonly<Record<AnswerFault, string>> = {
@@ -785,7 +795,9 @@ const NOT_FOUND = "NOT_FOUND";
 
 /**
  * Keeps the error.status enum of an error body, and only when it is
- * enum-shaped, so free text from the body never reaches an error.
+ * enum-shaped, so free text from the body never reaches an error. A write
+ * refusal's message and ErrorInfo reason are read separately, by
+ * googleWriteFault, and only for that refusal.
  */
 function statusError(httpStatus: number, body: string): StatusError {
   let status = "";
@@ -797,6 +809,95 @@ function statusError(httpStatus: number, body: string): StatusError {
     // Not JSON: the HTTP status is all there is.
   }
   return new StatusError(httpStatus, status);
+}
+
+/**
+ * What a write refusal may repeat from Google's error. Both are empty when
+ * the body has nothing safe to repeat. A read never builds one.
+ */
+interface WriteRefusal {
+  /** ErrorInfo reasons, in order, without duplicates. */
+  reason: string;
+  /** error.message, with secrets removed and cut to about 200 characters. */
+  message: string;
+}
+
+const NO_WRITE_FAULT: WriteRefusal = { reason: "", message: "" };
+
+/** About 200 characters: the cut for a write's error.message, in UTF-8 bytes. */
+const WRITE_ERROR_TEXT = 200;
+
+/** Google's ErrorInfo.reason: a short constant, not free text. */
+const REASON_ENUM = /^[A-Z][A-Z0-9_]{0,62}$/;
+
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const USER_IN_PATH = /users\/[A-Za-z0-9_.~-]+/gi;
+const BEARER = /Bearer\s+\S+/gi;
+const YA29 = /ya29\.[A-Za-z0-9._~+/-]+=*/g;
+/** A Google account id. Shorter numbers (a status, a count, a year) stay. */
+const ACCOUNT_ID = /\d{10,}/g;
+/**
+ * A hyphenated or dotted token: it starts with a letter and contains a digit.
+ * A timestamp starts with a digit, so the time of the refusal stays.
+ */
+const TOKENISH = /\b(?=[A-Za-z])(?=[A-Za-z0-9._-]*\d)[A-Za-z][A-Za-z0-9._-]{9,}\b/g;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Drops tokens, email addresses and user identifiers from text a write may repeat. */
+function redactWriteText(text: string): string {
+  return text
+    .replace(EMAIL, " ")
+    .replace(BEARER, " ")
+    .replace(YA29, " ")
+    .replace(USER_IN_PATH, " ")
+    .replace(ACCOUNT_ID, " ")
+    .replace(TOKENISH, " ")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * The reason and short message of a write that Google refused. Only
+ * error.message and the reason of an ErrorInfo in error.details are read.
+ * The message is cut to about 200 characters. Anything that is a token, an
+ * email address or a user identifier is left out, and so is the rest of the
+ * body: a request is never logged or returned.
+ */
+function googleWriteFault(body: string): WriteRefusal {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return NO_WRITE_FAULT;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.error)) return NO_WRITE_FAULT;
+  const error = parsed.error;
+  const message = typeof error.message === "string" ? truncate(redactWriteText(error.message), WRITE_ERROR_TEXT) : "";
+  const details = Array.isArray(error.details) ? error.details : [];
+  const reasons: string[] = [];
+  let used = 0;
+  for (const detail of details) {
+    if (!isRecord(detail)) continue;
+    const type = detail["@type"];
+    if (typeof type !== "string" || !type.endsWith("google.rpc.ErrorInfo")) continue;
+    const reason = detail.reason;
+    if (typeof reason !== "string" || !REASON_ENUM.test(reason) || reasons.includes(reason)) continue;
+    const next = used + (reasons.length === 0 ? 0 : 2) + reason.length;
+    if (next > WRITE_ERROR_TEXT) break;
+    reasons.push(reason);
+    used = next;
+  }
+  return { reason: reasons.join(", "), message };
+}
+
+/** The tool-error text of a refusal: the fixed sentence, then Google's reason and message. */
+function refusalText(base: string, detail: WriteRefusal): string {
+  const extra = [detail.reason, detail.message].filter((part) => part !== "");
+  return extra.length === 0 ? base : `${base}: ${extra.join(": ")}`;
 }
 
 /** A 403 that is a rate limit (RESOURCE_EXHAUSTED), not a denial. */

@@ -190,7 +190,7 @@ POST https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoint
 scope: https://www.googleapis.com/auth/googlehealth.nutrition.writeonly (granted at sign-in)
 
 {"nutritionLog":{
-  "interval":{"startTime":"2026-10-16T11:15:00Z","startUtcOffset":"-10800s","endTime":"2026-10-16T11:15:00Z","endUtcOffset":"-10800s"},
+  "interval":{"startTime":"2026-10-16T11:15:00Z","startUtcOffset":"-10800s","endTime":"2026-10-16T11:15:01Z","endUtcOffset":"-10800s"},
   "foodDisplayName":"…","mealType":"LUNCH",
   "energy":{"kcal":431.5},
   "totalCarbohydrate":{"grams":51.25},
@@ -256,20 +256,20 @@ The food reads keep only the items of the Fitbit platform, as the Go server does
 | An input out of its rule | `invalid_input` | names the field and the bound |
 | No Google account linked, or a 401 after the one renewal | `auth_expired` | `not signed in to Google Health`, or `Google Health rejected the sign-in`; the reconnect hint |
 | HTTP 403 that is not a quota answer | `scope_missing` | `Google Health denied the write of nutrition-log data`; the hint names the reconnect step and `googlehealth.nutrition.writeonly` |
-| Another 4xx, and a 404 of a delete that is not Google's `NOT_FOUND` | `invalid_input` | `Google Health refused the entry` (hint `the entry was not created; check the date, the time and the values`), or `Google Health refused the delete` (hint `the entry was not deleted`); the log line `google health request rejected` has the HTTP status and Google's status enum |
+| Another 4xx, and a 404 of a delete that is not Google's `NOT_FOUND` | `invalid_input` | `Google Health refused the entry` or `Google Health refused the delete`, then Google's ErrorInfo `reason` and `error.message` when the body has them. The message is cut to about 200 characters, and a token, an email address or a user identifier in it is left out. Hint: `the entry was not created; check the date, the time and the values`, or `the entry was not deleted`. The log line `google health request rejected` has the HTTP status, Google's status enum, and, for a write, the same reason and message. A read logs only the status and the enum |
 | 429 or a quota 403 on every attempt | `upstream_unavailable` | `Google Health API is unavailable`; hint: the entry was not created (or, for a delete, to call it again) |
 | An add whose outcome is unknown | `upstream_unavailable` | hint: the entry may exist |
 | A delete of an entry that is not this server's own | `no_data` | `this server created no entry with that id` |
 | The store write fails after Google took the entry | `internal_error` | the text above |
 
-No error message holds a food name, a number of the entry or a part of Google's answer. No log line holds the payload: the lines of a call are `tool_call`, the client's own lines (a data type, an HTTP status, a retry count, a reason) and, for an internal error, the type chain.
+No error message holds a food name or a number of the entry. A write that Google refuses may repeat Google's short `error.message` and the `reason` of an ErrorInfo, and nothing else of the answer: not the request body, a token, an email address or a user identifier. A read never repeats the body. No log line holds the payload: the lines of a call are `tool_call`, the client's own lines (a data type, an HTTP status, a retry count, a reason, and for a refused write the short message) and, for an internal error, the type chain.
 
 ### What the documentation does not settle
 
 Where the pages disagree or say nothing, the server takes the reading that cannot write a wrong entry or delete a wrong one. A real call must still confirm each point.
 
 1. **The UTC offsets.** The reference marks `startUtcOffset` and `endUtcOffset` as required (`SessionTimeInterval`). The example request of the guide leaves them out, and its answer then shows `"0s"`. The server sends both, as the seconds of the coach's zone at the instant of the entry (`"-10800s"` in São Paulo). Without them Google would read the local time of the entry as UTC: an evening meal would land on the next civil day. The only format example of the reference is positive (`"3.5s"`); a negative value is not shown.
-2. **The length of the interval.** No page says whether `endTime` may equal `startTime`. The example of the guide lasts 30 minutes. The server sends an interval without length: a food entry is one instant, the tool has no duration to send, and an end after the start would lie after "now" for an entry logged at the present time. If Google refuses it, the tool answers `Google Health refused the entry` and nothing is written.
+2. **The length of the interval.** An interval whose start equals its end is empty, and Google rejects the write (`INVALID_ARGUMENT`). The nutrition guide's meal lasts 30 minutes and its water example lasts 1 second. The server sends that shorter window: `endTime` is `startTime` plus one second, and `endUtcOffset` is the same value as `startUtcOffset`. The entry still belongs to the local day of its start. The food reads take the day from `startTime`, so an entry at 23:59:59 stays on that day when its end is 00:00:00.
 3. **`serving`.** The example of the guide sends `serving.amount` alone. The reference marks `foodMeasurementUnit` as required inside `serving`, and `serving` itself as optional. The server sends no `serving`.
 4. **`foodDisplayName`** has no Required or Optional mark in the reference. The guide says to set it for a food without a food ID. The server always sends it.
 5. **`mealType`.** The field text of the reference names four values, and its enum holds ten. The tool takes the four that `nutrition_day` orders its meals by.

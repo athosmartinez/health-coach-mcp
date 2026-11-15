@@ -88,10 +88,16 @@ function quantity(name: string, value: number): number {
 /**
  * The body of the create request (`{"nutritionLog": …}`).
  *
- * The interval has no length: a food entry is one instant, and the tool has no
- * duration to send. The reference marks both UTC offsets as required, so both
- * are sent, with the same value. Without them Google reads the local time of
- * the entry as UTC, and an evening meal lands on the next civil day.
+ * The interval is one second. Google treats a start that equals the end as an
+ * empty interval and rejects the write. The guides write a positive window (a
+ * meal is 30 minutes, water is 1 second); this sends that shorter window, one
+ * second after the start, with the same UTC offset. The entry still belongs
+ * to the local day of the start: the food reads take the day from startTime,
+ * so an entry at 23:59:59 stays on that day.
+ *
+ * The reference marks both UTC offsets as required, so both are sent, with
+ * the same value. Without them Google reads the local time of the entry as
+ * UTC, and an evening meal lands on the next civil day.
  *
  * Throws for a value outside what the API documents: a caller bug, since the
  * tool checks its input against narrower bounds first.
@@ -103,10 +109,13 @@ export function createBody(entry: NewFoodEntry): { nutritionLog: NutritionLogBod
     throw new Error("googlehealth: the entry has no valid UTC offset");
   }
   if (entry.name === "") throw new Error("googlehealth: the entry has no name");
-  const time = `${new Date(ms).toISOString().slice(0, 19)}Z`;
+  // Whole seconds. The end is the next second, with the same UTC offset
+  // rather than the offset of the end instant.
+  const startMs = Math.floor(ms / 1000) * 1000;
+  const stamp = (instant: number) => `${new Date(instant).toISOString().slice(0, 19)}Z`;
   const offset = `${unsigned(entry.utcOffsetSeconds)}s`;
   const log: NutritionLogBody = {
-    interval: { startTime: time, startUtcOffset: offset, endTime: time, endUtcOffset: offset },
+    interval: { startTime: stamp(startMs), startUtcOffset: offset, endTime: stamp(startMs + 1000), endUtcOffset: offset },
     foodDisplayName: entry.name,
     mealType: entry.mealType,
     energy: { kcal: quantity("kcal", entry.kcal) },

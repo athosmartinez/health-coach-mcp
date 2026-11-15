@@ -14,22 +14,38 @@
 //
 // Adapted from google-health-cli pkg/client/client.go (Do, isStaleScopeError,
 // parseRetryAfter) and cmd/data.go (list and rollup pagination), through this
-// repository's internal/googlehealth/client.go. Changes: read operations only,
-// behind a method and path allowlist; waits with jitter and a cap on
-// Retry-After; one token renewal shared by 401 and the stale-token 403; errors
+// repository's internal/googlehealth/client.go. Changes: read operations and
+// two writes of the food log only, behind a method and path allowlist; a
+// create that is never sent again when its outcome is unknown; waits with
+// jitter and a cap on Retry-After; one token renewal shared by 401 and the
+// stale-token 403; errors
 // carry the HTTP status and Google's status enum, never the response body;
 // responses read through a size limit; a page cap or a repeated page token is
 // an error instead of a truncated result; a request budget shared by the calls
 // of one MCP request; each record reduced by the caller as its page is read;
 // and a port from Go to TypeScript.
 
-// A read-only client for the Google Health API v4.
+// A client for the Google Health API v4. It reads data points, and it writes
+// the food log: it creates one nutrition-log data point, and it deletes
+// nutrition-log data points by name. No other write can leave it.
 
 import type { LocalDate, Zone } from "../coach/date";
 import { ToolError, errorTypes } from "../coach/errors";
 import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../google";
 import type { RequestBudget } from "./budget";
 import { type DataType, type TypeInfo, filter, lookup, rollupChunks, windowFilter } from "./datatypes";
+import {
+  type AnswerFault,
+  CREATE_PATH,
+  DELETE_PATH,
+  MAX_WRITE_RESPONSE_BYTES,
+  type NewFoodEntry,
+  WRITE_DATA_TYPE,
+  createBody,
+  deleteBody,
+  readCreateAnswer,
+  readDeleteAnswer,
+} from "./nutritionlog";
 import { PageSyntaxError, type PageScan, scanPage } from "./page";
 
 /** The Google Health API v4 endpoint. */
@@ -174,7 +190,7 @@ interface Reply {
   bytes: number;
 }
 
-/** Reads data points. One instance serves the calls of one MCP request, one after the other. */
+/** Reads data points and writes the food log. One instance serves the calls of one MCP request, one after the other. */
 export class GoogleHealthClient {
   private readonly base: string;
   private readonly tokens: TokenSource;
@@ -249,6 +265,38 @@ export class GoogleHealthClient {
       );
     }
     return out;
+  }
+
+  /**
+   * Creates one nutrition-log data point and returns the name Google gave it.
+   *
+   * A create is not idempotent. It is sent again only after an answer that
+   * proves Google did not accept it (HTTP 429, a quota 403, or the one token
+   * renewal). When the outcome is unknown, the error says that the entry may
+   * exist. A name is returned only when Google's answer holds one: none is
+   * ever made up.
+   */
+  async createNutritionLog(entry: NewFoodEntry): Promise<string> {
+    const reply = await this.request("POST", CREATE_PATH, undefined, JSON.stringify(createBody(entry)));
+    const answer = readCreateAnswer(reply.text);
+    if (answer.ok) return answer.name;
+    logFault("create", answer.fault, answer.code);
+    throw outcomeUnknown(CREATE_FAULTS[answer.fault]);
+  }
+
+  /**
+   * Deletes the nutrition-log data point with this ID. "gone": Google has no
+   * such point (HTTP 404), which is the state a delete asks for. The caller
+   * decides which points may be deleted: Google's documentation does not prove
+   * that it refuses the delete of a point another app wrote.
+   */
+  async deleteNutritionLog(id: string): Promise<"deleted" | "gone"> {
+    const reply = await this.request("POST", DELETE_PATH, undefined, JSON.stringify(deleteBody(id)));
+    if (reply.status === 404) return "gone";
+    const answer = readDeleteAnswer(reply.text);
+    if (answer.ok) return "deleted";
+    logFault("delete", answer.fault, answer.code);
+    throw new ToolError("upstream_unavailable", DELETE_FAULTS[answer.fault], RETRY_HINTS.delete);
   }
 
   private async pages<T>(dataType: DataType, info: TypeInfo, suffix: string, expression: string, reduce: Reduce<T>): Promise<T[]> {
@@ -327,32 +375,53 @@ export class GoogleHealthClient {
    * (RESOURCE_EXHAUSTED) and network errors with backoff, and renews the token
    * once on a 401 or a stale-token 403. Every attempt takes a unit of the
    * request budget before it is sent.
+   *
+   * The allowlist gives the kind of the request, and the kind gives the retry
+   * rules, so a create can never run under the rules of a read. A create is
+   * sent again only after an answer that proves Google did not accept it
+   * (429, a quota 403, a rejected token). A network error, a timeout, a 408, a
+   * 5xx or an answer over the size cap leave its outcome unknown: the call
+   * ends there, and its error says that the entry may exist. A delete names
+   * the point to remove, so it keeps the rules of a read; its 404 comes back
+   * to the caller as an answer.
    */
   protected async request(method: string, path: string, query?: string, body?: string): Promise<Reply> {
-    const dataType = readTarget(method, path);
-    if (dataType === undefined) throw new Error(`googlehealth: read-only client refuses ${method} ${path}`);
+    const allowed = requestTarget(method, path, query);
+    if (allowed === undefined) throw new Error(`googlehealth: the client refuses ${method} ${path}`);
+    const { dataType, kind } = allowed;
     const target = query === undefined ? `${this.base}${path}` : `${this.base}${path}?${query}`;
+    const limit = kind === "read" ? this.maxResponseBytes : Math.min(this.maxResponseBytes, MAX_WRITE_RESPONSE_BYTES);
+    const unavailable = (message: string, cause?: unknown) => unavailableFor(kind, message, cause);
     let refreshed = false;
     // Set by every failure that can be retried.
     let last: ToolError | undefined;
     for (let failures = 0; ; ) {
       // Out of budget: a request that kept failing is unavailable, as when the
       // attempts run out; a page or a chunk that was never tried means the
-      // range holds more than one call reads.
-      if (this.budget.remaining === 0) throw last ?? this.outOfBudget(dataType);
+      // range holds more than one call reads; a write that was never tried
+      // was not sent, and its error says so.
+      if (this.budget.remaining === 0) throw last ?? this.outOfBudget(dataType, kind);
       const token = await this.accessToken();
-      if (!this.budget.take()) throw last ?? this.outOfBudget(dataType);
+      if (!this.budget.take()) throw last ?? this.outOfBudget(dataType, kind);
 
       let reply: Reply;
       let status = 0;
       let serverWait = 0; // server-requested, from Retry-After
       try {
-        reply = await this.send(method, target, token, body);
+        reply = await this.send(method, target, token, body, limit);
         status = reply.status;
       } catch (error) {
-        if (error instanceof ResponseTooLargeError) throw tooMuch(dataType, error);
+        if (error instanceof ResponseTooLargeError) {
+          if (kind === "read") throw tooMuch(dataType, error);
+          // Google answered, and the answer cannot be read. A create may have
+          // happened; a delete can be asked again.
+          if (kind === "create") throw outcomeUnknown(CREATE_FAULTS.unreadable, error);
+          throw unavailable(DELETE_FAULTS.unreadable, error);
+        }
         const cause = error instanceof NetworkError ? error : new NetworkError(errorTypes(error));
         console.warn("google health request did not complete", { data_type: dataType, cause: cause.causeTypes });
+        // The request may have reached Google before the connection failed.
+        if (kind === "create") throw outcomeUnknown("Google Health API could not be reached", cause);
         last = unavailable("Google Health API could not be reached", cause);
         reply = { status: 0, retryAfter: null, text: "", bytes: 0 };
       }
@@ -378,23 +447,36 @@ export class GoogleHealthClient {
           });
         }
         if (status === 403 && !limited) {
-          throw new ToolError("scope_missing", `Google Health denied access to ${dataType} data`, SCOPE_HINT, {
-            cause: statusError(status, reply.text),
-          });
+          const [message, hint] =
+            kind === "read"
+              ? [`Google Health denied access to ${dataType} data`, SCOPE_HINT]
+              : [`Google Health denied the write of ${dataType} data`, WRITE_SCOPE_HINT];
+          throw new ToolError("scope_missing", message, hint, { cause: statusError(status, reply.text) });
         }
-        if (status === 429 || status === 408 || status >= 500 || limited) {
+        // The point is not there: the state a delete asks for.
+        if (kind === "delete" && status === 404) return reply;
+        // A rate limit is an answer that Google did not take the request.
+        const refusedForNow = status === 429 || limited;
+        const noAnswer = status === 408 || status >= 500;
+        if (kind === "create" && noAnswer) {
+          // Google may have stored the entry before it failed to answer.
+          throw outcomeUnknown("Google Health API is unavailable", statusError(status, reply.text));
+        }
+        if (refusedForNow || noAnswer) {
           last = unavailable("Google Health API is unavailable", statusError(status, reply.text));
           serverWait = retryAfter(reply.retryAfter, this.now());
           if (serverWait > MAX_RETRY_AFTER_MS) throw last;
         } else {
           const cause = statusError(status, reply.text);
-          // A changed filter field or API version lands here; the status and
-          // Google's enum are the only signal (the body is never logged).
+          // A changed filter field, request shape or API version lands here;
+          // the status and Google's enum are the only signal (the body is
+          // never logged).
           console.warn("google health request rejected", {
             data_type: dataType,
             http_status: status,
             google_status: cause.status,
           });
+          if (kind !== "read" && status >= 400 && status < 500) throw refused(kind, cause);
           throw new Error(`googlehealth: ${dataType} request rejected`, { cause });
         }
       }
@@ -422,7 +504,9 @@ export class GoogleHealthClient {
    * call started, a shorter range is not the only way: the same call can fit
    * a request of its own, and the hint says so.
    */
-  private outOfBudget(dataType: DataType): ToolError {
+  private outOfBudget(dataType: DataType, kind: Kind): ToolError {
+    // A write has no range to shorten: the units went to the calls before it.
+    if (kind !== "read") return new ToolError("invalid_input", NOT_SENT[kind], WRITE_OWN_REQUEST_HINT);
     return tooMuch(dataType, undefined, this.budget.sharedBefore ? OWN_REQUEST_HINT : SHORTER_RANGE_HINT);
   }
 
@@ -437,7 +521,7 @@ export class GoogleHealthClient {
   }
 
   /** One HTTP attempt. Throws only NetworkError or ResponseTooLargeError. */
-  private async send(method: string, target: string, token: string, body: string | undefined): Promise<Reply> {
+  private async send(method: string, target: string, token: string, body: string | undefined, limit: number): Promise<Reply> {
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "application/json" };
     if (body !== undefined) headers["content-type"] = "application/json";
     try {
@@ -450,7 +534,7 @@ export class GoogleHealthClient {
         redirect: "manual",
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-      const read = await readBody(response, this.maxResponseBytes);
+      const read = await readBody(response, limit);
       return { status: response.status, retryAfter: response.headers.get("retry-after"), ...read };
     } catch (error) {
       if (error instanceof ResponseTooLargeError) throw error;
@@ -505,6 +589,35 @@ export function readTarget(method: string, path: string): DataType | undefined {
   return pattern?.exec(path)?.[1] as DataType | undefined;
 }
 
+/** The writes the client may send: one create and one delete. */
+export type WriteKind = "create" | "delete";
+
+/**
+ * The write guard: the kind of a write the client may send, or undefined.
+ * Exactly two requests pass, both for the nutrition-log data type and both
+ * compared as whole texts: the create of one data point, and the delete of
+ * data points by name. No pattern is used, so no other data type, user or
+ * method suffix can pass.
+ */
+export function writeTarget(method: string, path: string): WriteKind | undefined {
+  if (method !== "POST") return undefined;
+  if (path === CREATE_PATH) return "create";
+  if (path === DELETE_PATH) return "delete";
+  return undefined;
+}
+
+type Kind = "read" | WriteKind;
+
+/** The allowlist of the client: what a request is, or undefined for one that must not leave. */
+function requestTarget(method: string, path: string, query: string | undefined): { dataType: DataType; kind: Kind } | undefined {
+  const read = readTarget(method, path);
+  if (read !== undefined) return { dataType: read, kind: "read" };
+  const write = writeTarget(method, path);
+  // The whole input of a write is its body: a write with a query is not one of the two.
+  if (write === undefined || query !== undefined) return undefined;
+  return { dataType: WRITE_DATA_TYPE, kind: write };
+}
+
 const PAGING_WORDS = ["token", "page", "next", "cursor", "more", "contin", "offset", "after", "trunc", "partial", "remain"];
 
 /**
@@ -544,7 +657,86 @@ function badResponse(dataType: DataType): ToolError {
 }
 
 function unavailable(message: string, cause?: unknown): ToolError {
-  return new ToolError("upstream_unavailable", message, RETRY_HINT, cause === undefined ? undefined : { cause });
+  return unavailableFor("read", message, cause);
+}
+
+// --- the errors of a write ---
+
+const WRITE_SCOPE_HINT =
+  `${RECONNECT_HINT} Allow the permission to add nutrition data (googlehealth.nutrition.writeonly), ` +
+  "and check that the Google Health API is enabled in the Cloud project.";
+
+/**
+ * The hint of a create whose outcome is unknown. An entry that this server
+ * has no ID for is not one of its own: nutrition_day reports it as food from
+ * another source.
+ */
+export const MAY_EXIST_HINT =
+  "the entry may exist: check the day with nutrition_day before a new try " +
+  "(an entry this server has no id for shows there as food from another source)";
+
+/**
+ * The hint of an unavailable answer, by kind of request. A create that ends
+ * with this hint was answered by Google with a refusal (a rate limit, a
+ * rejected token), so the entry does not exist.
+ */
+const RETRY_HINTS: Readonly<Record<Kind, string>> = {
+  read: RETRY_HINT,
+  create: `the entry was not created; ${RETRY_HINT}`,
+  delete: `the entry may still exist; call nutrition_log_delete again in a few minutes (a repeated delete is safe)`,
+};
+
+function unavailableFor(kind: Kind, message: string, cause?: unknown): ToolError {
+  return new ToolError("upstream_unavailable", message, RETRY_HINTS[kind], cause === undefined ? undefined : { cause });
+}
+
+/** A create that may have happened: it must not be sent again before the day is checked. */
+function outcomeUnknown(message: string, cause?: unknown): ToolError {
+  return new ToolError("upstream_unavailable", message, MAY_EXIST_HINT, cause === undefined ? undefined : { cause });
+}
+
+/** The hint of a write that the request budget had no unit for. */
+export const WRITE_OWN_REQUEST_HINT = "send this call in a request of its own";
+
+const NO_UNIT_LEFT = "this MCP request already sent all the Google Health requests one request may send";
+
+const NOT_SENT: Readonly<Record<WriteKind, string>> = {
+  create: `${NO_UNIT_LEFT}: the entry was not sent`,
+  delete: `${NO_UNIT_LEFT}: the delete was not sent`,
+};
+
+/**
+ * A write that Google answered with a 4xx other than a rejected token, a
+ * denial or a rate limit: it took nothing. The message holds no part of the
+ * answer; the log line of the rejection holds the HTTP status.
+ */
+function refused(kind: WriteKind, cause: StatusError): ToolError {
+  return kind === "create"
+    ? new ToolError("invalid_input", "Google Health refused the entry", "the entry was not created; check the date, the time and the values", { cause })
+    : new ToolError("invalid_input", "Google Health refused the delete", "the entry was not deleted", { cause });
+}
+
+const CREATE_FAULTS: Readonly<Record<AnswerFault, string>> = {
+  unreadable: "Google Health returned an unreadable answer for the entry",
+  not_done: "Google Health has not finished creating the entry",
+  operation_error: "Google Health reported an error for the entry",
+  no_name: "Google Health returned no usable id for the entry",
+};
+
+const DELETE_FAULTS: Readonly<Record<Exclude<AnswerFault, "no_name">, string>> = {
+  unreadable: "Google Health returned an unreadable answer for the delete",
+  not_done: "Google Health has not finished the delete",
+  operation_error: "Google Health reported an error for the delete",
+};
+
+/** The log line of a write answer that cannot be used: the reason, never a part of the answer. */
+function logFault(operation: WriteKind, fault: AnswerFault, code: number | undefined): void {
+  console.warn("google health write answer not usable", {
+    data_type: WRITE_DATA_TYPE,
+    operation,
+    reason: fault,
+    ...(code === undefined ? {} : { google_code: code }),
+  });
 }
 
 const RENEWAL_HINT = `${OAUTH_CLIENT_HINT} ${RECONNECT_HINT}`;

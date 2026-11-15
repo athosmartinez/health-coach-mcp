@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { exchangeCode, isAllowedEmail, readIdToken, refreshAccessToken } from "../src/google";
+import { exchangeCode, isAllowedEmail, readIdToken, refreshAccessToken, revokeToken } from "../src/google";
 import { idToken, mockGoogle } from "./helpers";
 
 const CLIENT_ID = "client.apps.googleusercontent.com";
@@ -83,6 +83,77 @@ describe("a token endpoint answer of HTTP 200 without a usable token", () => {
       ok: false,
       code: "internal_error",
       message: "Google token endpoint: invalid_client (HTTP 401)",
+    });
+  });
+});
+
+describe("a token endpoint answer that is a redirect", () => {
+  const client = { clientId: CLIENT_ID, clientSecret: "synthetic-client-secret" };
+  const TARGET = "https://redirect.example/token";
+
+  interface Sent {
+    url: string;
+    redirect: string | undefined;
+    body: string;
+  }
+
+  /** Answers the token endpoint with a redirect to TARGET, and records every fetch: the target must never get one. */
+  function redirecting(status: number, body = ""): Sent[] {
+    const sent: Sent[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      // A form body is read as bytes: the runtime warns about `text()` on it.
+      sent.push({ url: request.url, redirect: init?.redirect, body: new TextDecoder().decode(await request.arrayBuffer()) });
+      return new Response(body, { status, headers: { location: TARGET } });
+    });
+    return sent;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const STATUSES = [301, 302, 303, 307, 308];
+
+  it.each(STATUSES)("is upstream_unavailable for a renewal, and HTTP %i is not followed", async (status) => {
+    const sent = redirecting(status);
+    const result = await refreshAccessToken(client, "rt-synthetic", NOW);
+    // The link is not at fault, and the same request can work later.
+    expect(result).toEqual({ ok: false, code: "upstream_unavailable", message: `Google token endpoint: unknown (HTTP ${status})` });
+    // One request, to Google, that the runtime must not follow: the form holds the client secret and the refresh token.
+    expect(sent.map(({ url, redirect }) => ({ url, redirect }))).toEqual([{ url: "https://oauth2.googleapis.com/token", redirect: "manual" }]);
+    expect(sent[0]?.body).toContain("refresh_token=rt-synthetic");
+    expect(sent[0]?.body).toContain("client_secret=synthetic-client-secret");
+  });
+
+  it.each(STATUSES)("keeps the answer of an unexpected status for the sign-in code exchange, and HTTP %i is not followed", async (status) => {
+    const sent = redirecting(status);
+    const result = await exchangeCode(client, "code-synthetic", "verifier", "http://localhost/callback", NOW);
+    expect(result).toEqual({ ok: false, code: "internal_error", message: `Google token endpoint: unknown (HTTP ${status})` });
+    expect(sent.map(({ url, redirect }) => ({ url, redirect }))).toEqual([{ url: "https://oauth2.googleapis.com/token", redirect: "manual" }]);
+    // Another unexpected status has the same answer.
+    vi.restoreAllMocks();
+    mockGoogle(() => new Response("", { status: 418 }));
+    expect(await exchangeCode(client, "code-synthetic", "verifier", "http://localhost/callback", NOW)).toEqual({
+      ok: false,
+      code: "internal_error",
+      message: "Google token endpoint: unknown (HTTP 418)",
+    });
+  });
+
+  it("is not followed for the revoke request either, which carries a token", async () => {
+    const sent = redirecting(307);
+    await revokeToken("rt-synthetic");
+    expect(sent).toEqual([{ url: "https://oauth2.googleapis.com/revoke", redirect: "manual", body: "token=rt-synthetic" }]);
+  });
+
+  it("is never a refusal of the grant, whatever its body says", async () => {
+    // auth_expired removes the stored link: a redirect must not cause it.
+    redirecting(307, JSON.stringify({ error: "invalid_grant" }));
+    expect(await refreshAccessToken(client, "rt-synthetic", NOW)).toEqual({
+      ok: false,
+      code: "upstream_unavailable",
+      message: "Google token endpoint: invalid_grant (HTTP 307)",
     });
   });
 });

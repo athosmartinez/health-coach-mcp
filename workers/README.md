@@ -151,7 +151,7 @@ What the table shows:
    - The allowed account's Google refresh token is stored in the `CoachStore` Durable Object (SQLite table `google_account`). The MCP grant gets only `{ sub, email }`.
 5. The client exchanges its code at `/token` for an MCP access token and refresh token.
 
-`@cloudflare/workers-oauth-provider` keeps clients, grants and hashed MCP tokens in the `OAUTH_KV` namespace. The Google refresh token is never in KV, logs or tool output. `CoachStore.googleAccessToken()` returns a Google access token, renewed with the stored refresh token when it has less than a minute left. A Google `invalid_grant` removes the link (`auth_expired`); a timeout, 408, 429, 5xx or a malformed answer is `upstream_unavailable`. A coach tool without a linked account answers `auth_expired` with the hint to disconnect and reconnect the connector.
+`@cloudflare/workers-oauth-provider` keeps clients, grants and hashed MCP tokens in the `OAUTH_KV` namespace. The Google refresh token is never in KV, logs or tool output. `CoachStore.googleAccessToken()` returns a Google access token, renewed with the stored refresh token when it has less than a minute left. A Google `invalid_grant` removes the link (`auth_expired`); a timeout, 408, 429, 5xx, a redirect or a malformed answer is `upstream_unavailable`. A request to Google's token or revoke endpoint never follows a redirect: a followed 307 or 308 would send the client secret and the refresh token to the redirect target, and would add subrequests that the budget does not count. A coach tool without a linked account answers `auth_expired` with the hint to disconnect and reconnect the connector.
 
 ## Setup
 

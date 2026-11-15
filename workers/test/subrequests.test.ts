@@ -539,6 +539,20 @@ const CASES: Case[] = [
   { tool: "`nutrition_log_delete`", input: "an entry this server created", empty: true, before: [ADD], calls: [DELETE], health: [1], later: 0, laterResult: "no_data" },
   {
     tool: "`nutrition_log_delete`",
+    input: "an entry this server created that Google no longer has (HTTP 404, `NOT_FOUND`)",
+    empty: true,
+    before: [ADD],
+    // Google's own answer for a point that is gone: an answer, so one request and no retry.
+    arrange: (mock) => {
+      mock.healthReply = () => Response.json({ error: { code: 404, message: BODY_MARK, status: "NOT_FOUND" } }, { status: 404 });
+    },
+    calls: [DELETE],
+    health: [1],
+    later: 0,
+    laterResult: "no_data",
+  },
+  {
+    tool: "`nutrition_log_delete`",
     input: "an entry this server created; the access token is renewed first, and Google rejects the new one once",
     empty: true,
     before: [ADD],

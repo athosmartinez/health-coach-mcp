@@ -75,6 +75,10 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 // That leaves 64 MiB for the code, the store, the tool result and the
 // garbage the collector has not freed yet (the chunks a body arrived in).
 //
+// The peak is that of one MCP HTTP request: its calls run one after the
+// other (the turn queue of CoachStore). Two MCP HTTP requests at the same
+// time are not ordered, and their peaks add up.
+//
 // 16 MiB still holds a full page of the largest type: 10000 heart-rate
 // samples at up to 1.6 kB each.
 

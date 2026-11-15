@@ -248,6 +248,13 @@ export class CoachStore extends DurableObject<Env> {
       // The tool calls of a batch start together. The coach tools take turns,
       // so the Google requests of one MCP request run one after the other, and
       // a later call finds in the cache what an earlier one fetched.
+      //
+      // The queue belongs to this MCP HTTP request. The object does not order
+      // two MCP HTTP requests: while one waits for Google, it serves the
+      // other, which has a budget and a token answer of its own. They can
+      // fetch the same window twice, and their memory adds up. One queue for
+      // the whole object would order them, but a request that stops while it
+      // holds the turn would then block every later request.
       let turn: Promise<unknown> = Promise.resolve();
       const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
         const outcome = turn.then((): ToolOutcome | Promise<ToolOutcome> => {

@@ -24,8 +24,10 @@ import {
   MAX_RESPONSE_BYTES,
   MAX_RETRY_AFTER_MS,
   NetworkError,
+  OWN_REQUEST_HINT,
   type Reduce,
   ResponseTooLargeError,
+  SHORTER_RANGE_HINT,
   StatusError,
   type TokenResult,
   type TokenSource,
@@ -1201,6 +1203,70 @@ describe("request budget", () => {
     expect(budget.used).toBe(3);
     expect(toWire(await failure(listSteps(second))).code).toBe("invalid_input");
     expect(requests).toHaveLength(3);
+  });
+
+  describe("the hint of a call that runs out of budget", () => {
+    const RANGE_ERROR = { code: "invalid_input", message: "the date range holds more steps data than one call reads" };
+    /** Every page names a next one: the call ends when the budget does. */
+    const endless = () => fakeApi((n) => json(200, { dataPoints: points(`r${n}`), nextPageToken: `p${n}` }));
+
+    it("is the Go hint for the first tool call that takes units", async () => {
+      endless();
+      const budget = new RequestBudget(3);
+      // A tool call starts with no unit taken.
+      budget.beginCall();
+      expect(budget.sharedBefore).toBe(false);
+      expect(toWire(await failure(listSteps(testClient({ budget }).client)))).toEqual({ ...RANGE_ERROR, hint: "use a shorter date range" });
+      expect(SHORTER_RANGE_HINT).toBe("use a shorter date range");
+    });
+
+    it("names a request of its own for a tool call that starts after another one took units", async () => {
+      endless();
+      const budget = new RequestBudget(3);
+      const { client } = testClient({ budget });
+      budget.beginCall();
+      await failure(listSteps(client));
+      expect(budget.remaining).toBe(0);
+      // The next tool call of the same MCP request finds the budget taken.
+      budget.beginCall();
+      expect(budget.sharedBefore).toBe(true);
+      expect(toWire(await failure(listSteps(client)))).toEqual({
+        ...RANGE_ERROR,
+        hint: "use a shorter date range, or send this call in a request of its own",
+      });
+      expect(OWN_REQUEST_HINT).toBe("use a shorter date range, or send this call in a request of its own");
+    });
+
+    it("stays the Go hint for the page cap and the byte limits, which a request of its own does not lift", async () => {
+      const requests = endless();
+      const budget = new RequestBudget(10);
+      budget.beginCall();
+      await listSteps(testClient({ budget, maxPages: 1 }).client).catch(() => undefined);
+      budget.beginCall();
+      expect(budget.sharedBefore).toBe(true);
+      // The page cap, with units left.
+      const capped = await failure(listSteps(testClient({ budget, maxPages: 2 }).client));
+      expect(toWire(capped)).toEqual({ ...RANGE_ERROR, hint: "use a shorter date range" });
+      // The byte limit of a response, with units left.
+      const large = await failure(listSteps(testClient({ budget, maxResponseBytes: 10 }).client));
+      expect(toWire(large)).toEqual({ ...RANGE_ERROR, hint: "use a shorter date range" });
+      expect(requests).toHaveLength(4);
+      expect(budget.remaining).toBe(6);
+    });
+
+    it("does not change a request that was tried: it stays unavailable", async () => {
+      const requests = fakeApi(() => apiError(503, "UNAVAILABLE", ""));
+      const budget = new RequestBudget(5);
+      const { client } = testClient({ budget });
+      budget.beginCall();
+      // Four attempts of the first tool call.
+      await failure(listSteps(client));
+      budget.beginCall();
+      expect([budget.sharedBefore, budget.remaining]).toEqual([true, 1]);
+      // The second tool call tries once, with the last unit.
+      expect(toWire(await failure(listSteps(client)))).toMatchObject({ code: "upstream_unavailable", hint: "try again in a few minutes" });
+      expect(requests).toHaveLength(5);
+    });
   });
 
   it("asks for no token when the budget is used up", async () => {

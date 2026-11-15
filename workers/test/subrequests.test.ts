@@ -21,6 +21,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import README from "../README.md?raw";
 import { DATA_TYPES } from "../src/googlehealth/datatypes";
 import { HEALTH_REQUESTS, MAX_SUBREQUESTS } from "../src/googlehealth/budget";
+import { OWN_REQUEST_HINT, SHORTER_RANGE_HINT } from "../src/googlehealth/client";
 import type { CoachStore, GoogleLink } from "../src/store";
 import {
   FOOD_NAME,
@@ -174,10 +175,19 @@ function take(): Counts {
   return { health: total - token, token, kinds };
 }
 
-/** "ok", "budget error" (the client's own error for a call that needs more requests), or the error code. */
-function resultOf(outcome: Outcome, context: string): string {
+/**
+ * "ok", "budget error" (the client's own error for a call that needs more
+ * requests), or the error code. `own` says whether the call may carry the
+ * hint that names a request of its own: only a call of a batch.
+ */
+function resultOf(outcome: Outcome, own: boolean, context: string): string {
   if (outcome.ok) return "ok";
-  if (outcome.error.hint !== "use a shorter date range") return outcome.error.code;
+  if (own && outcome.error.hint === OWN_REQUEST_HINT) {
+    // The same code and message as the budget error of a call alone.
+    expectBudgetError({ ...outcome.error, hint: SHORTER_RANGE_HINT }, context);
+    return "budget error";
+  }
+  if (outcome.error.hint !== SHORTER_RANGE_HINT) return outcome.error.code;
   expectBudgetError(outcome.error, context);
   return "budget error";
 }
@@ -187,6 +197,8 @@ interface Measured {
   requests: Counts[];
   /** The result of each tool call of the first request. */
   first: string[];
+  /** The hint of each tool call of the first request; null for a call that succeeded. */
+  firstHints: (string | null)[];
   /** One more request on the cache the others filled; absent when the case does not succeed. */
   later?: Counts;
 }
@@ -200,19 +212,25 @@ const MAX_REQUESTS = 4;
  * the last one. No request may pass the limits.
  */
 async function measure(target: DurableObjectStub<CoachStore>, calls: readonly ToolCall[]): Promise<Measured> {
-  const one = async (n: number): Promise<{ counts: Counts; results: string[] }> => {
+  const one = async (n: number): Promise<{ counts: Counts; results: string[]; hints: (string | null)[] }> => {
     const [single] = calls;
-    const outcomes = calls.length === 1 && single ? [await objectTool(target, single[0], single[1])] : await batch(target, calls);
+    const alone = calls.length === 1 && single !== undefined;
+    const outcomes = alone ? [await objectTool(target, single[0], single[1])] : await batch(target, calls);
     const counts = take();
     expect(counts.health, `request ${n}: Google Health requests`).toBeLessThanOrEqual(HEALTH_REQUESTS);
     expect(counts.health + counts.token, `request ${n}: external fetches`).toBeLessThanOrEqual(MAX_SUBREQUESTS);
-    return { counts, results: outcomes.map((outcome) => resultOf(outcome, `request ${n}`)) };
+    return {
+      counts,
+      // A call that is alone in its request never names a request of its own.
+      results: outcomes.map((outcome) => resultOf(outcome, !alone, `request ${n}`)),
+      hints: outcomes.map((outcome) => (outcome.ok ? null : (outcome.error.hint ?? ""))),
+    };
   };
-  const out: Measured = { requests: [], first: [] };
+  const out: Measured = { requests: [], first: [], firstHints: [] };
   for (let n = 1; n <= MAX_REQUESTS; n++) {
-    const { counts, results } = await one(n);
+    const { counts, results, hints } = await one(n);
     out.requests.push(counts);
-    if (n === 1) out.first = results;
+    if (n === 1) [out.first, out.firstHints] = [results, hints];
     if (results.every((result) => result === "ok")) {
       const again = await one(n + 1);
       expect(again.results.every((result) => result === "ok"), "the later request").toBe(true);
@@ -291,6 +309,12 @@ interface Case {
   later: number | null;
   /** The waits between retries that the client asks for. Default: none. */
   waits?: number;
+  /**
+   * The hint of each tool call of the first request, null for a call that
+   * succeeded. Default: every budget error has the Go hint, as a call alone
+   * in its request has.
+   */
+  hints?: (string | null)[];
 }
 
 const EXPIRED: Partial<GoogleLink> = { accessTokenExpiresAt: 0 };
@@ -443,6 +467,8 @@ const CASES: Case[] = [
     token: [1, 0, 0, 0],
     // The briefing and the status are answered. The other four calls need more than the budget has left.
     first: `ok, ${BUDGET} ×4, ok`,
+    // The briefing took units before each of them started: each one can fit a request of its own.
+    hints: [null, OWN_REQUEST_HINT, OWN_REQUEST_HINT, OWN_REQUEST_HINT, OWN_REQUEST_HINT, null],
     later: null,
   },
 ];
@@ -540,10 +566,48 @@ describe("the external fetches of one MCP HTTP request", () => {
     const m = await measure(stub, one.calls);
     measured.set(one, m);
     expect(measuredRow(one, m)).toEqual(rowOf(one));
+    expect(m.firstHints).toEqual(one.hints ?? m.first.map((result) => (result === "ok" ? null : result === BUDGET ? SHORTER_RANGE_HINT : expect.any(String))));
 
     // The client waits 1, 2 and 4 seconds (with jitter, each at least half) between the attempts of a request.
     expect(waited).toHaveLength(one.waits ?? 0);
     for (const ms of waited) expect(ms >= 500 && ms <= 4000, `a wait of ${ms} ms`).toBe(true);
+    expectCleanLogs();
+  });
+
+  // The budget error says "use a shorter date range". In a batch that hint
+  // misleads a call that found the budget already taken by the calls before
+  // it: the same call can fit a request of its own.
+  it("names a request of its own in the hint of the budget error only after another call took units", async () => {
+    yearOfData(g.google);
+    const budgetError = (type: string, hint: string) => ({
+      ok: false,
+      error: { code: "invalid_input", message: `the date range holds more ${type} data than one call reads`, hint },
+    });
+
+    // A call alone in its request: the Go hint.
+    const alone = await objectTool(await linkedStore(), ...series("kcal_in"));
+    expect(alone).toEqual(budgetError("total-calories", SHORTER_RANGE_HINT));
+    expect(take().health).toBe(HEALTH_REQUESTS);
+
+    // In a batch: two calls that take no unit, then the first call that takes
+    // units keeps the Go hint. The call after it finds no unit left.
+    const [status, profile, first, starved, later] = await batch(await linkedStore(), [
+      ["google_account_status", {}],
+      ["profile_get", {}],
+      series("kcal_in"),
+      series("weight"),
+      ["google_account_status", {}],
+    ]);
+    expect([status?.ok, profile?.ok, later?.ok]).toEqual([true, true, true]);
+    expect(first).toEqual(budgetError("total-calories", SHORTER_RANGE_HINT));
+    expect(starved).toEqual(budgetError("weight", OWN_REQUEST_HINT));
+    expect(OWN_REQUEST_HINT).toBe("use a shorter date range, or send this call in a request of its own");
+    expect(take().health).toBe(HEALTH_REQUESTS);
+
+    // The starved call, in a request of its own, needs one request.
+    const own = await objectTool(await linkedStore(), ...series("weight"));
+    expect(own.ok).toBe(true);
+    expect(take().health).toBe(1);
     expectCleanLogs();
   });
 

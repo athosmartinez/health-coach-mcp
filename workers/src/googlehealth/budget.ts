@@ -38,6 +38,7 @@ export const HEALTH_REQUESTS = MAX_SUBREQUESTS - TOKEN_REQUESTS - SPARE_SUBREQUE
 export class RequestBudget {
   private sent = 0;
   private renewals = 0;
+  private sentBefore = 0;
 
   /**
    * The error of the token source in this MCP request. Once it fails, later
@@ -67,6 +68,24 @@ export class RequestBudget {
   /** Google Health API requests that can still be sent. */
   get remaining(): number {
     return this.limit - this.sent;
+  }
+
+  /**
+   * Marks the start of a tool call. One MCP HTTP request can carry several
+   * tool calls, which take turns: the units taken so far were taken by the
+   * calls before this one.
+   */
+  beginCall(): void {
+    this.sentBefore = this.sent;
+  }
+
+  /**
+   * Whether earlier tool calls of the same MCP HTTP request took units before
+   * the present call started. Such a call can run out of budget for a range
+   * that fits a request of its own.
+   */
+  get sharedBefore(): boolean {
+    return this.sentBefore > 0;
   }
 
   /** Takes the unit of one HTTP attempt. False when none is left: the request must not be sent. */

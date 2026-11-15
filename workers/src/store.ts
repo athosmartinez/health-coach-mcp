@@ -251,6 +251,8 @@ export class CoachStore extends DurableObject<Env> {
       let turn: Promise<unknown> = Promise.resolve();
       const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
         const outcome = turn.then((): ToolOutcome | Promise<ToolOutcome> => {
+          // From here on, the units already taken are those of earlier calls.
+          budget.beginCall();
           deps ??= coachDeps();
           return deps ? runCoachTool(deps, name, args) : { ok: false, error: INTERNAL_ERROR };
         });

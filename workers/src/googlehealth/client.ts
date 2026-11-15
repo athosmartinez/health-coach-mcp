@@ -335,9 +335,9 @@ export class GoogleHealthClient {
       // Out of budget: a request that kept failing is unavailable, as when the
       // attempts run out; a page or a chunk that was never tried means the
       // range holds more than one call reads.
-      if (this.budget.remaining === 0) throw last ?? tooMuch(dataType);
+      if (this.budget.remaining === 0) throw last ?? this.outOfBudget(dataType);
       const token = await this.accessToken();
-      if (!this.budget.take()) throw last ?? tooMuch(dataType);
+      if (!this.budget.take()) throw last ?? this.outOfBudget(dataType);
 
       let reply: Reply;
       let status = 0;
@@ -410,6 +410,16 @@ export class GoogleHealthClient {
       });
       await this.wait(delay);
     }
+  }
+
+  /**
+   * The error of a page or a chunk that the budget has no unit for. When
+   * earlier tool calls of the same MCP HTTP request took units before this
+   * call started, a shorter range is not the only way: the same call can fit
+   * a request of its own, and the hint says so.
+   */
+  private outOfBudget(dataType: DataType): ToolError {
+    return tooMuch(dataType, undefined, this.budget.sharedBefore ? OWN_REQUEST_HINT : SHORTER_RANGE_HINT);
   }
 
   /** The access token, or the tool error of a token source that cannot give one. */
@@ -506,12 +516,21 @@ const RETRY_HINT = "try again in a few minutes";
 
 const SCOPE_HINT = `${RECONNECT_HINT} Allow every permission, and check that the Google Health API is enabled in the Cloud project.`;
 
+/** The Go client's hint for a range that holds more than one call reads. */
+export const SHORTER_RANGE_HINT = "use a shorter date range";
+
+/**
+ * The hint of a call that ran out of the request budget after earlier tool
+ * calls of the same MCP HTTP request took units of it.
+ */
+export const OWN_REQUEST_HINT = `${SHORTER_RANGE_HINT}, or send this call in a request of its own`;
+
 /** A range whose data exceeds the request, page or byte budget of one call. */
-function tooMuch(dataType: DataType, cause?: unknown): ToolError {
+function tooMuch(dataType: DataType, cause?: unknown, hint: string = SHORTER_RANGE_HINT): ToolError {
   return new ToolError(
     "invalid_input",
     `the date range holds more ${dataType} data than one call reads`,
-    "use a shorter date range",
+    hint,
     cause === undefined ? undefined : { cause },
   );
 }

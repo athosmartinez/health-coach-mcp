@@ -927,10 +927,15 @@ describe("one HTTP request with several tool calls", () => {
     ]);
     expect(first).toMatchObject({ ok: true, output: { data: { sessions_omitted: 5 }, quality_flags: ["sessions_truncated"] } });
     // The second review needs the same 30 requests, and 15 are left: the
-    // error is the budget error of the client, passed on as it is.
+    // error is the budget error of the client. The first review took units
+    // before the second one started, so the hint names a request of its own.
     expect(second).toEqual({
       ok: false,
-      error: { code: "invalid_input", message: "the date range holds more heart-rate data than one call reads", hint: "use a shorter date range" },
+      error: {
+        code: "invalid_input",
+        message: "the date range holds more heart-rate data than one call reads",
+        hint: "use a shorter date range, or send this call in a request of its own",
+      },
     });
     const counts = g.takeExternal();
     expect(counts.total).toBe(HEALTH_REQUESTS);

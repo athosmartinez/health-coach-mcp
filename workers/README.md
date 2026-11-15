@@ -234,8 +234,9 @@ The food reads keep only the items of the Fitbit platform, as the Go server does
 - **The rule.** The nutrition source (`src/healthdata/nutrition.ts`) also keeps an item whose data point ID is in the table of the entries this server created. Every other item of another platform stays "other source", as before.
 - **By ID, not by name.** The ID is the last path part of the name. A create answers `users/<user id>/…`, and a list can name the user in another form.
 - **By day.** The table is asked for the entries of the days of the read, with one day of margin on each side. It is one store read through an index, and no request to Google.
+- **By account.** Only the entries of the Google account that is linked now count. After another account is linked, an entry of the account before is not its own: it reads as food of another source, as every item of another platform does.
 - **Every food read has the rule:** `nutrition_day`, `weekly_report` and the food metrics of `metric_series`. The source label of such an item is `GOOGLE_WEB_API`.
-- **This is a deliberate difference from the Go server**, which writes nothing to Google Health and so has no such rule. It is a commit of its own, the last one of its pull request: `feat(workers): count the entries this server logged in the food reads`. To keep the Go rule, revert that commit. The two tools still add and delete, and an entry of this server then reads as food of another source.
+- **This is a deliberate difference from the Go server**, which writes nothing to Google Health and so has no such rule. It is a commit of its own: `feat(workers): count the entries this server logged in the food reads`. Two later commits change only this rule and its tests: `test(workers): damage a stored entry name without naming the columns` and `fix(workers): count only the linked account's entries in the food reads`. To keep the Go rule, revert the three, the newest first. The two tools still add and delete, and an entry of this server then reads as food of another source.
 
 ### The request budget of a write
 

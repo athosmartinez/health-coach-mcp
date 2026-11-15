@@ -70,13 +70,23 @@ export function forgetEntry(db: Db, name: string): void {
 }
 
 /**
+ * Reads the names of the linked account's entries of a range of days. The
+ * index of the day is named, so the read never walks every entry of the
+ * account through the primary key. Exported for the test of its plan.
+ */
+export const ENTRY_NAMES_BETWEEN = `SELECT name FROM nutrition_entries INDEXED BY nutrition_entries_by_day
+  WHERE day >= ? AND day <= ? AND sub = ${LINKED}`;
+
+/**
  * The data point IDs of the entries this server created on the local days
- * [from, to], read through the index of the day. IDs, not names: a list can
- * name the user in another form than the create did.
+ * [from, to] for the account that is linked now, read through the index of
+ * the day. An entry of another account is not this account's own: its ID is
+ * left out. IDs, not names: a list can name the user in another form than the
+ * create did.
  */
 export function entryIdsBetween(db: Db, from: LocalDate, to: LocalDate): Set<string> {
   const ids = new Set<string>();
-  for (const row of db.all("SELECT name FROM nutrition_entries WHERE day >= ? AND day <= ?", from, to)) {
+  for (const row of db.all(ENTRY_NAMES_BETWEEN, from, to)) {
     const id = pointId(text(row.name));
     if (id !== undefined) ids.add(id);
   }

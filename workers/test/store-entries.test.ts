@@ -2,7 +2,7 @@
 // All values are synthetic.
 import { describe, expect, it } from "vitest";
 
-import { entryIdsBetween, forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
+import { ENTRY_NAMES_BETWEEN, entryIdsBetween, forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
 import { fixedClock, withDb } from "./memory-helpers";
 import { linkAccount } from "./memory-helpers";
 import { linkedAccount } from "../src/store/entries";
@@ -104,13 +104,33 @@ describe("the entries this server created", () => {
       for (let n = 0; n < 300; n++) recordEntry(db, `users/1122334455/dataTypes/nutrition-log/dataPoints/syn-old-${n}`, "2026-09-01");
       recordEntry(db, NAME, "2026-10-13");
       recordEntry(db, OTHER, "2026-10-14");
-      const plan = sql.exec<{ detail: string }>("EXPLAIN QUERY PLAN SELECT name FROM nutrition_entries WHERE day >= ? AND day <= ?", "2026-10-12", "2026-10-14").toArray();
-      expect(plan.map((row) => row.detail).join(" ")).toContain("USING INDEX nutrition_entries_by_day");
-      const read = sql.exec("SELECT name FROM nutrition_entries WHERE day >= ? AND day <= ?", "2026-10-12", "2026-10-14");
+      // The query of entryIdsBetween itself: the days through their index, then the account of each row.
+      const plan = sql.exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${ENTRY_NAMES_BETWEEN}`, "2026-10-12", "2026-10-14").toArray();
+      expect(plan.map((row) => row.detail).join(" ")).toContain("USING INDEX nutrition_entries_by_day (day>? AND day<?)");
+      const read = sql.exec(ENTRY_NAMES_BETWEEN, "2026-10-12", "2026-10-14");
       expect(read.toArray()).toHaveLength(2);
-      // The 300 rows of the other days are not read.
-      expect(read.rowsRead).toBeLessThanOrEqual(6);
+      // The 300 rows of the other days are not read: the read does not walk every entry of the account.
+      expect(read.rowsRead).toBeLessThanOrEqual(8);
       expect(entryIdsBetween(db, "2026-10-12", "2026-10-14").size).toBe(2);
+    }));
+
+  it("lists only the ids of the account that is linked now", () =>
+    withDb((db, sql) => {
+      recordEntry(db, NAME, "2026-10-13");
+      expect([...entryIdsBetween(db, "2026-10-13", "2026-10-13")]).toEqual(["syn-entry-1"]);
+
+      // Another account is linked: the id of the first account is not its own.
+      linkAccount(sql, "200000000000000000002");
+      expect(entryIdsBetween(db, "2026-10-13", "2026-10-13").size).toBe(0);
+      recordEntry(db, OTHER, "2026-10-13");
+      expect([...entryIdsBetween(db, "2026-10-13", "2026-10-13")]).toEqual(["syn-entry-2"]);
+
+      // The first account again: its own id, and not the other one.
+      linkAccount(sql, OWNER_SUB);
+      expect([...entryIdsBetween(db, "2026-10-13", "2026-10-13")]).toEqual(["syn-entry-1"]);
+      // No account linked: no entry is the server's own.
+      sql.exec("DELETE FROM google_account");
+      expect(entryIdsBetween(db, "2026-10-13", "2026-10-13").size).toBe(0);
     }));
 
   it("finds an entry through the primary key, and writes three rows for one", () =>

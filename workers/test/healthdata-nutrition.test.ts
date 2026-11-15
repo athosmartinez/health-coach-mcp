@@ -277,6 +277,25 @@ describe("the food entries this server created", () => {
       expect(n.otherSource).toBe(1);
     }));
 
+  it("does not count an entry that was created for another Google account than the linked one", () =>
+    inStore(async (db) => {
+      threeSources();
+      recordEntry(db, answered("syn-own-1"), D10);
+      const relink = (sub: string) => db.all("UPDATE google_account SET sub = ? WHERE id = 1", sub);
+
+      // Another account is linked: the entry of the account before is food of another source, as in the Go server.
+      relink("200000000000000000002");
+      const other = await newData(db).nutrition(D10, D10);
+      expect(other.days.get(D10)?.items.map((item) => item.meal)).toEqual(["BREAKFAST"]);
+      expect(other.otherSource).toBe(2);
+
+      // The first account is linked again: its entry counts again.
+      relink("100000000000000000001");
+      const again = await newData(db).nutrition(D10, D10);
+      expect(again.days.get(D10)?.items.map((item) => item.meal)).toEqual(["BREAKFAST", "LUNCH"]);
+      expect(again.otherSource).toBe(1);
+    }));
+
   it("still rejects an implausible value of an entry of its own", () =>
     inStore(async (db) => {
       h.google.add("nutrition-log", viaApi(12, "syn-own-1", { kcal: 20_000, carb: 30 }));

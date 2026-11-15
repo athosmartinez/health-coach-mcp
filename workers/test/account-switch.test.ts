@@ -235,4 +235,26 @@ describe("the food entries this server created, when a Google account is linked"
     expect(await owners(stub)).toEqual([]);
     expect(g.logLines("error")).toEqual([["tool_internal_error", { tool: "nutrition_log_add", error_types: "ToolError > Error" }]]);
   });
+
+  // The food reads keep an entry of the API only when it is the linked account's own.
+  it("does not count the entry of the account before as the new account's own in a food read", async () => {
+    const stub = await linkedStore();
+    const entryId = await entryOfTheFirstAccount(stub);
+    const today = { date: day(0) };
+    // For its own account, the entry is the day's food.
+    const own = await objectTool(stub, "nutrition_day", today);
+    expect(own).toMatchObject({ ok: true, output: { data: { items_logged: 1 } } });
+
+    // For another account, the same record is food of another source: the day has no food of its own.
+    await stub.linkGoogleAccount(other());
+    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({
+      ok: false,
+      error: { code: "no_data", message: "no food logged on that day", hint: "food was logged only in another app (such as Apple Health); the coach reads the Fitbit food log" },
+    });
+
+    // The first account again: the entry counts again, and can be deleted.
+    await stub.linkGoogleAccount(link());
+    expect(await objectTool(stub, "nutrition_day", today)).toMatchObject({ ok: true, output: { data: { items_logged: 1 } } });
+    expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toMatchObject({ ok: true });
+  });
 });

@@ -21,7 +21,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import README from "../README.md?raw";
 import { DATA_TYPES } from "../src/googlehealth/datatypes";
 import { HEALTH_REQUESTS, MAX_SUBREQUESTS } from "../src/googlehealth/budget";
-import { OWN_REQUEST_HINT, SHORTER_RANGE_HINT } from "../src/googlehealth/client";
+import { OWN_REQUEST_HINT, SHORTER_RANGE_HINT, WRITE_OWN_REQUEST_HINT } from "../src/googlehealth/client";
+import { pointId } from "../src/googlehealth/nutritionlog";
 import type { CoachStore, GoogleLink } from "../src/store";
 import {
   FOOD_NAME,
@@ -41,6 +42,8 @@ import {
   skipRetryWaits,
 } from "./e2e-helpers";
 import {
+  FAKE_CLIENT_ID,
+  FAKE_USER_ID,
   type FakeGoogle,
   MINUTE,
   at,
@@ -182,6 +185,12 @@ function take(): Counts {
  */
 function resultOf(outcome: Outcome, own: boolean, context: string): string {
   if (outcome.ok) return "ok";
+  // The budget error of a write: it was not sent, and it has no date range to shorten.
+  if (outcome.error.hint === WRITE_OWN_REQUEST_HINT) {
+    expect(outcome.error.code, context).toBe("invalid_input");
+    expect(outcome.error.message, context).toMatch(/^this MCP request already sent all the Google Health requests one request may send: the (entry|delete) was not sent$/);
+    return "budget error";
+  }
   if (own && outcome.error.hint === OWN_REQUEST_HINT) {
     // The same code and message as the budget error of a call alone.
     expectBudgetError({ ...outcome.error, hint: SHORTER_RANGE_HINT }, context);
@@ -209,9 +218,11 @@ const MAX_REQUESTS = 4;
 /**
  * Sends the same MCP HTTP request until every tool call of it succeeds, then
  * once more. A request that ends with an error other than the budget error is
- * the last one. No request may pass the limits.
+ * the last one. No request may pass the limits. `laterResult` is what every
+ * call of the request sent once more answers: "ok", or the error code of a
+ * call that can happen only once (the delete of an entry).
  */
-async function measure(target: DurableObjectStub<CoachStore>, calls: readonly ToolCall[]): Promise<Measured> {
+async function measure(target: DurableObjectStub<CoachStore>, calls: readonly ToolCall[], laterResult = "ok"): Promise<Measured> {
   const one = async (n: number): Promise<{ counts: Counts; results: string[]; hints: (string | null)[] }> => {
     const [single] = calls;
     const alone = calls.length === 1 && single !== undefined;
@@ -233,7 +244,7 @@ async function measure(target: DurableObjectStub<CoachStore>, calls: readonly To
     if (n === 1) [out.first, out.firstHints] = [results, hints];
     if (results.every((result) => result === "ok")) {
       const again = await one(n + 1);
-      expect(again.results.every((result) => result === "ok"), "the later request").toBe(true);
+      expect(again.results, "the later request").toEqual(again.results.map(() => laterResult));
       out.later = again.counts;
       return out;
     }
@@ -257,14 +268,33 @@ function rejectFirstRequest(mock: GoogleMock): void {
   };
 }
 
-/** The log lines a coach tool may write, and their fields. */
+/** Google rejects the access token of the first Google Health request, then answers 429 to every request. */
+function rejectThenLimit(mock: GoogleMock): void {
+  let rejected = false;
+  mock.healthReply = () => {
+    if (rejected) return Response.json({ error: { code: 429, message: BODY_MARK, status: "RESOURCE_EXHAUSTED" } }, { status: 429 });
+    rejected = true;
+    return unauthenticated();
+  };
+}
+
+/** The log lines a tool that reaches Google may write, and their fields. */
 const LOG_FIELDS: Record<string, readonly string[]> = {
   tool_call: ["tool", "duration_ms", "is_error", "code"],
   "google health request failed; retrying": ["data_type", "http_status", "retry", "wait_ms"],
   "google health token rejected; renewing": ["data_type", "http_status"],
 };
 /** The text a log field may hold: a tool name, a data type or an error code. */
-const LOG_TEXT = new Set<string>([...ALL_TOOL_NAMES, ...DATA_TYPES, "invalid_input", "upstream_unavailable"]);
+const LOG_TEXT = new Set<string>([...ALL_TOOL_NAMES, ...DATA_TYPES, "invalid_input", "upstream_unavailable", "no_data"]);
+
+/** The entry of the write cases. Every number has a fraction that no status or count has. */
+const FOOD = { name: "Feijoada completa", meal_type: "LUNCH", kcal: 431.5, protein_g: 23.75, carbs_g: 51.25, fat_g: 17.5 };
+const ADD: ToolCall = ["nutrition_log_add", FOOD];
+/** The name of the n-th entry the fake API creates. */
+const createdName = (n: number) => `users/${FAKE_USER_ID}/dataTypes/nutrition-log/dataPoints/syn-created-${n}`;
+const DELETE: ToolCall = ["nutrition_log_delete", { entry_id: createdName(1) }];
+/** Nothing of a write: no part of the entry, no entry id, no part of Google's answer. */
+const WRITE_SECRETS = ["Feijoada", "431.5", "23.75", "51.25", "17.5", "syn-created", FAKE_USER_ID, FAKE_CLIENT_ID, "Item "];
 
 /** No health value, name, token or response body in a log line: only names, counts and statuses. */
 function expectCleanLogs(): void {
@@ -280,7 +310,7 @@ function expectCleanLogs(): void {
     }
   }
   const text = g.logged();
-  for (const secret of [STORED_TOKEN, RENEWED_TOKEN, GOOGLE_REFRESH_TOKEN, "at-renewed", "at-signin", "fake-refresh", BODY_MARK, FOOD_NAME, "Synthetic Band", "Synthetic Scale"]) {
+  for (const secret of [STORED_TOKEN, RENEWED_TOKEN, GOOGLE_REFRESH_TOKEN, "at-renewed", "at-signin", "fake-refresh", BODY_MARK, FOOD_NAME, "Synthetic Band", "Synthetic Scale", ...WRITE_SECRETS]) {
     expect(text).not.toContain(secret);
   }
 }
@@ -297,7 +327,13 @@ interface Case {
   link?: Partial<GoogleLink>;
   /** A kcal target in force on every day. */
   kcalTarget?: boolean;
-  arrange?: (mock: GoogleMock, stub: DurableObjectStub<CoachStore>) => void;
+  arrange?: (mock: GoogleMock, stub: DurableObjectStub<CoachStore>) => void | Promise<void>;
+  /** A write case reads nothing: the fake API starts without the year of data. */
+  empty?: boolean;
+  /** Tool calls sent before the measurement, each in a request of its own. They are not counted. */
+  before?: ToolCall[];
+  /** What each call answers when the request is sent once more. Default: "ok". */
+  laterResult?: string;
   calls: ToolCall[];
   /** Google Health requests of each MCP HTTP request, until every call of it succeeds. */
   health: number[];
@@ -471,6 +507,82 @@ const CASES: Case[] = [
     hints: [null, OWN_REQUEST_HINT, OWN_REQUEST_HINT, OWN_REQUEST_HINT, OWN_REQUEST_HINT, null],
     later: null,
   },
+  // The two tools that write the food log. A later request of an add is one
+  // more entry; a later request of a delete finds no entry of its own
+  // (no_data) and sends nothing.
+  { tool: "`nutrition_log_add`", input: "one entry", empty: true, calls: [ADD], health: [1], later: 1 },
+  {
+    tool: "`nutrition_log_add`",
+    input: "one entry; the access token is renewed first, and Google rejects the new one once",
+    empty: true,
+    link: EXPIRED,
+    arrange: rejectFirstRequest,
+    calls: [ADD],
+    health: [2],
+    token: [2],
+    later: 1,
+  },
+  {
+    tool: "`nutrition_log_add`",
+    input: "one entry; the token is renewed first, Google rejects the new one once, then answers 429 to every request",
+    empty: true,
+    link: EXPIRED,
+    arrange: rejectThenLimit,
+    calls: [ADD],
+    // The rejected request, then 4 attempts that Google answers with 429.
+    health: [5],
+    token: [2],
+    first: "upstream_unavailable",
+    later: null,
+    waits: 3,
+  },
+  { tool: "`nutrition_log_delete`", input: "an entry this server created", empty: true, before: [ADD], calls: [DELETE], health: [1], later: 0, laterResult: "no_data" },
+  {
+    tool: "`nutrition_log_delete`",
+    input: "an entry this server created; the access token is renewed first, and Google rejects the new one once",
+    empty: true,
+    before: [ADD],
+    // The access token expires after the add, so the delete renews it first.
+    arrange: async (mock, stub) => {
+      await stub.linkGoogleAccount(link(EXPIRED));
+      rejectFirstRequest(mock);
+    },
+    calls: [DELETE],
+    health: [2],
+    token: [2],
+    later: 0,
+    laterResult: "no_data",
+  },
+  {
+    tool: "`nutrition_log_delete`",
+    input: "an entry this server created; the token is renewed first, Google rejects the new one once, then answers 429 to every request",
+    empty: true,
+    before: [ADD],
+    arrange: async (mock, stub) => {
+      await stub.linkGoogleAccount(link(EXPIRED));
+      rejectThenLimit(mock);
+    },
+    calls: [DELETE],
+    // The rejected request, then 4 attempts that Google answers with 429.
+    health: [5],
+    token: [2],
+    first: "upstream_unavailable",
+    later: null,
+    waits: 3,
+  },
+  {
+    tool: "`nutrition_log_add`, 100 calls",
+    input: "one POST with 100 entries; the access token is renewed first",
+    empty: true,
+    link: EXPIRED,
+    calls: Array.from({ length: 100 }, (_unused, n): ToolCall => ["nutrition_log_add", { name: `Item ${n + 1}`, meal_type: "SNACK", kcal: 100.5 + n }]),
+    // Each POST creates 45 entries and reports each one; the other 55 calls are not sent.
+    health: [45, 45, 45, 45],
+    token: [1, 0, 0, 0],
+    first: `ok ×45, ${BUDGET} ×55`,
+    hints: [...Array.from({ length: 45 }, () => null), ...Array.from({ length: 55 }, () => WRITE_OWN_REQUEST_HINT)],
+    later: null,
+  },
 ];
 
 type Row = Required<Pick<Case, "tool" | "input" | "health" | "token" | "first" | "later">>;
@@ -555,15 +667,17 @@ afterAll(() => {
 
 describe("the external fetches of one MCP HTTP request", () => {
   it.each(CASES)("$tool, $input", async (one) => {
-    yearOfData(g.google, one.year);
+    if (!one.empty) yearOfData(g.google, one.year);
     if (one.twoPageSteps) g.google.twoPages.add("steps");
     const stub = await linkedStore(one.link);
     if (one.kcalTarget) expect((await objectTool(stub, "targets_set", { effective_from: day(-400), kcal: 2200 })).ok).toBe(true);
+    for (const [name, args] of one.before ?? []) expect((await objectTool(stub, name, args)).ok, `before: ${name}`).toBe(true);
+    take();
     const waited = skipRetryWaits(g);
-    one.arrange?.(g, stub);
+    await one.arrange?.(g, stub);
     g.clearLogs();
 
-    const m = await measure(stub, one.calls);
+    const m = await measure(stub, one.calls, one.laterResult);
     measured.set(one, m);
     expect(measuredRow(one, m)).toEqual(rowOf(one));
     expect(m.firstHints).toEqual(one.hints ?? m.first.map((result) => (result === "ok" ? null : result === BUDGET ? SHORTER_RANGE_HINT : expect.any(String))));
@@ -608,6 +722,46 @@ describe("the external fetches of one MCP HTTP request", () => {
     const own = await objectTool(await linkedStore(), ...series("weight"));
     expect(own.ok).toBe(true);
     expect(take().health).toBe(1);
+    expectCleanLogs();
+  });
+
+  // A create is not idempotent, so the budget must never leave an entry in
+  // Google that the request did not report with its id.
+  it("stops a POST of 100 adds at the budget: 45 entries are created and reported, and no other entry is sent", async () => {
+    const calls = Array.from({ length: 100 }, (_unused, n): ToolCall => ["nutrition_log_add", { name: `Item ${n + 1}`, meal_type: "SNACK", kcal: 100.5 + n }]);
+    const stub = await linkedStore(EXPIRED);
+    const idsOf = (points: { name: string }[]) => points.map((point) => pointId(point.name));
+    const names = () => g.google.writes.map((write) => write.body.nutritionLog.foodDisplayName as string);
+
+    const outcomes = await batch(stub, calls);
+    expect(take()).toMatchObject({ health: HEALTH_REQUESTS, token: 1, kinds: { "create nutrition-log": HEALTH_REQUESTS, token: 1 } });
+    // The first 45 calls, in the order of the POST, each with the id of its own entry.
+    const reported = outcomes.slice(0, HEALTH_REQUESTS).map((outcome) => (outcome.ok ? (outcome.output.entry_id as string) : ""));
+    expect(reported).toEqual(Array.from({ length: HEALTH_REQUESTS }, (_unused, n) => createdName(n + 1)));
+    expect(names()).toEqual(Array.from({ length: HEALTH_REQUESTS }, (_unused, n) => `Item ${n + 1}`));
+    // Google holds those 45 entries and no other: every entry that was sent was reported.
+    expect(idsOf(g.google.createdPoints() as { name: string }[])).toEqual(reported.map((name) => pointId(name)));
+    // Each of the other 55 calls answers that it was not sent, with the same error.
+    for (const [n, outcome] of outcomes.slice(HEALTH_REQUESTS).entries()) {
+      expect(outcome, `call ${HEALTH_REQUESTS + n + 1}`).toEqual({
+        ok: false,
+        error: {
+          code: "invalid_input",
+          message: "this MCP request already sent all the Google Health requests one request may send: the entry was not sent",
+          hint: "send this call in a request of its own",
+        },
+      });
+    }
+
+    // The client sends the calls that were not sent again, and only those: 45 more, then the last 10.
+    const second = await batch(stub, calls.slice(45));
+    expect(second.map((outcome) => outcome.ok)).toEqual([...Array.from({ length: 45 }, () => true), ...Array.from({ length: 10 }, () => false)]);
+    const third = await batch(stub, calls.slice(90));
+    expect(third.every((outcome) => outcome.ok)).toBe(true);
+    expect(take()).toMatchObject({ health: 55, token: 0 });
+    // Each of the 100 entries exists once.
+    expect(names()).toEqual(Array.from({ length: 100 }, (_unused, n) => `Item ${n + 1}`));
+    expect(g.google.createdPoints()).toHaveLength(100);
     expectCleanLogs();
   });
 

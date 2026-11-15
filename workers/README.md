@@ -126,6 +126,13 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 
 The highest count is **49 external fetches** in one MCP HTTP request: 45 Google Health requests and 4 token requests, in the row with the sign-in race. Without that race the highest count is 47. No row passes 50.
 
+| `nutrition_log_add` | one entry | 1 | 0 | 1 | ok | 1 | 1 |
+| `nutrition_log_add` | one entry; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 1 |
+| `nutrition_log_add` | one entry; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
+| `nutrition_log_delete` | an entry this server created | 1 | 0 | 1 | ok | 1 | 0 |
+| `nutrition_log_delete` | an entry this server created; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 0 |
+| `nutrition_log_delete` | an entry this server created; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
+| `nutrition_log_add`, 100 calls | one POST with 100 entries; the access token is renewed first | 45, 45, 45, 45 | 1, 0, 0, 0 | 46, 45, 45, 45 | ok ×45, budget error ×55 | none | — |
 What the table shows:
 
 1. **Every tool answers its worst-case input, in at most 2 requests.** Request 1 of the largest cases ends with the budget error after 45 requests; request 2 continues from the cached windows.
@@ -137,6 +144,127 @@ What the table shows:
 
 ## Settings
 
+7. **A write is one Google Health request, and at most 5.** `nutrition_log_add` and `nutrition_log_delete` send one request. Their worst case is 5 Google Health requests and 2 token requests (7 external fetches): the token is renewed first, Google rejects the new one (1 request), and Google then answers 429 to the 4 attempts. For an add, a 5xx answer or a network error ends the call at 1 request: see [A create is never sent twice](#a-create-is-never-sent-twice). In the two write rows that succeed, the request sent once more is one more entry for an add (1 request), and `no_data` with no request for a delete (the entry is gone).
+8. **One POST with 100 `nutrition_log_add` calls creates 45 entries.** The calls take turns in the order of the POST. Each of the first 45 creates its entry and answers its `entry_id`. Each of the other 55 answers `invalid_input`, `this MCP request already sent all the Google Health requests one request may send: the entry was not sent`, with the hint `send this call in a request of its own`, and nothing is sent for it. So no entry is sent without being reported: the test compares the entries the fake API holds with the ids the calls answered. The row never succeeds, because it sends the same 100 calls again, and each POST creates 45 more entries. A client sends again only the calls that answered this error: the test then needs 3 POSTs for the 100 entries (45, 45 and 10), and each entry exists once.
+
+## Food log writes
+
+Two tools write to Google Health. `nutrition_log_add` creates one entry of the food log, and `nutrition_log_delete` deletes one entry that this server created. The Go server has no write tool (`docs/CAPABILITY.md` R2: read-only on Google Health), so these two are the Worker's own. They follow the contract of every tool: `defineTool` and `register`, the stable error codes, one `tool_call` log line.
+
+**The request shapes come from Google's documentation. No call to the real API has tested them.** [What the documentation does not settle](#what-the-documentation-does-not-settle) lists each open point and what the server does about it.
+
+### The two tools
+
+`nutrition_log_add` logs one meal or food item, with the calories and macros that the MCP client estimated (for example from a photo).
+
+| Input | Rule |
+|---|---|
+| `name` | required text; the spaces around it are cut; 1 to 120 characters (code points); no control character, line or paragraph separator, or half of a surrogate pair |
+| `meal_type` | required: `BREAKFAST`, `LUNCH`, `DINNER` or `SNACK` |
+| `kcal` | required number, 0 to 10,000 |
+| `protein_g`, `carbs_g`, `fat_g` | optional numbers, 0 to 2,000 each; a macro that is left out is not sent: it is unknown, not 0 |
+| `date` | optional local day, `YYYY-MM-DD`; today when left out; never after today; at most 30 days before today |
+| `time` | optional local time, `HH:MM` on a 24-hour clock, in the coach's zone (`HCM_TZ`); now when left out; required with a `date` before today; never after now |
+
+- **The input is strict.** An unknown property, a wrong type or a value out of bounds is `invalid_input`, and nothing is sent. An optional input may be `null`; `date` and `time` may also be `""`. An error names the field and its bound, never the value.
+- **The bounds** are the ones past which the food reads reject a value of an item (`MAX_ITEM_KCAL` and `MAX_ITEM_GRAMS` in `src/healthdata/nutrition.ts`). A single food item cannot pass them. A value that the tool accepts is a value that `nutrition_day` keeps. They are far inside the range Google documents for kcal and for grams, `[0, 100000]`.
+- **A DST change.** A time that the clocks skip is read as the first instant after the gap. A time that happens twice is read as the first of its two instants. This is the rule of the start of a day in `src/coach/date.ts` (`instantOf` next to `bounds`). The output shows the time that was logged.
+- **The output:** `entry_id` (the data point name that Google returned), `date`, `time`, `meal_type`, the numbers that were sent (`null` for a macro that was not), and a `notice` that says the values are the client's estimate. It does not repeat the food name.
+- **Annotations:** not read-only, not destructive, not idempotent, `openWorldHint: true` (it writes to an external service).
+
+`nutrition_log_delete` takes `entry_id`: at most 256 characters, the name of a nutrition-log data point (`users/<user>/dataTypes/nutrition-log/dataPoints/<id>`). It returns `{entry_id, deleted: true}`. Annotations: not read-only, `destructiveHint: true`, `idempotentHint: true`, `openWorldHint: true`.
+
+Both descriptions say what the tool writes and where, and that it gives no dietary or medical advice. They carry the medical guardrail of the other tools: never diagnose, never suggest starting, stopping or dosing a medication or a supplement.
+
+### The request shapes
+
+The client (`src/googlehealth/client.ts`) lets exactly two writes pass, both for the data type `nutrition-log` and both compared as whole texts (`writeTarget`). Every other method, path, user or data type is refused before a token is asked for. `test/googlehealth-write.test.ts` pins the list.
+
+**Create** ([create reference](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/create), [nutrition guide](https://developers.google.com/health/data-types/nutrition), [DataPoint reference](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints), [scopes](https://developers.google.com/health/scopes)):
+
+```
+POST https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoints
+scope: https://www.googleapis.com/auth/googlehealth.nutrition.writeonly (granted at sign-in)
+
+{"nutritionLog":{
+  "interval":{"startTime":"2026-10-16T11:15:00Z","startUtcOffset":"-10800s","endTime":"2026-10-16T11:15:00Z","endUtcOffset":"-10800s"},
+  "foodDisplayName":"…","mealType":"LUNCH",
+  "energy":{"kcal":431.5},
+  "totalCarbohydrate":{"grams":51.25},
+  "totalFat":{"grams":17.5},
+  "nutrients":[{"nutrient":"PROTEIN","quantity":{"grams":23.75}}]}}
+```
+
+- Carbohydrate and fat go in the item's own total fields and protein in the nutrient list: the places the food reads take them from. A macro that was left out has no key.
+- The answer is an `Operation`. The guide shows it finished: `{"done": true, "response": {"@type": "…DataPoint", "name": "users/<user id>/dataTypes/nutrition-log/dataPoints/<id>", "dataSource": {"platform": "GOOGLE_WEB_API", …}, "nutritionLog": {…}}}`. The `entry_id` is that `name`.
+
+**Delete** ([batchDelete reference](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/batchDelete), [nutrition guide](https://developers.google.com/health/data-types/nutrition)). The API has no other delete for a data point:
+
+```
+POST https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoints:batchDelete
+
+{"names":["users/me/dataTypes/nutrition-log/dataPoints/<id>"]}
+```
+
+- The answer is an `Operation`. The server never uses the wildcard data type (`dataTypes/-`) and never sends more than one name.
+- A write answer is read through a cap of 64 KiB and parsed whole.
+
+### A create is never sent twice
+
+A create is not idempotent. Google ignores an ID that the client provides, and its [data management page](https://developers.google.com/health/data-management) says that a `POST` sent again after a timeout creates a duplicate. So:
+
+- **A create is sent again only after an answer that proves Google did not take it:** HTTP 429, a quota 403 (`RESOURCE_EXHAUSTED`), and the one token renewal after a 401 or the stale-token 403. When the 4 attempts end, the tool answers `upstream_unavailable` with the hint `the entry was not created; try again in a few minutes`.
+- **When the outcome is unknown, the call ends at that one request.** A network error, a timeout (30 seconds), HTTP 408, any 5xx, an answer over the size cap, and an answer that breaks while it is read are all unknown. The tool answers `upstream_unavailable` with the hint `the entry may exist: check the day with nutrition_day before a new try (an entry this server has no id for shows there as food from another source)`.
+- **An `Operation` that gives no name is unknown too.** That is an `Operation` that is not finished (the API has no method to ask for it again), one that carries an `error`, and one whose `response.name` is not a nutrition-log data point name. The tool answers the same `upstream_unavailable` with the same hint, and the log has `google health write answer not usable` with the reason. An id is never made up.
+- **A delete names its entry, so it is idempotent.** It keeps the retry rules of a read: 4 attempts for 429, 408, 5xx and network errors.
+
+### Only the entries of this server are deleted
+
+Google's documentation does not prove that `batchDelete` refuses the name of a data point that another app wrote (see below). So the server does not rely on Google for it.
+
+- Migration 5 adds the table `nutrition_entries` to the object's SQLite store: the data point name that the create answered (the primary key), the local day of the entry, and the creation time. It holds no food name and no nutrient value.
+- **An add:** check the input, send the create, store the returned name, answer. When the store write fails after Google took the entry, the tool answers `internal_error` with a text of its own: `the entry was created in Google Health, but this server could not record it, so it cannot delete the entry`, hint `do not log the same food again`. The log has `tool_internal_error` with the tool name and the error's type names.
+- **A delete:** an `entry_id` that is not a nutrition-log data point name is `invalid_input`. A name that is not in the table, exactly as stored, is `no_data`. In both cases nothing is sent to Google: not for an id of another data type, another user path or a name with more path parts, and not for the band's own food. After a delete that happened, the row is removed. An HTTP 404 means the entry is already gone: the row is removed and the answer is the same `{entry_id, deleted: true}`. After any other error the row stays, so the delete can be asked again.
+
+### The request budget of a write
+
+- A write takes one unit of the 45 for each HTTP attempt, like a read. The two tools take turns with the coach tools on the one budget and the one token answer of the MCP HTTP request.
+- A write that finds no unit left is not sent. It answers `invalid_input`, `this MCP request already sent all the Google Health requests one request may send: the entry was not sent` (or `the delete was not sent`), with the hint `send this call in a request of its own`. It is not the "date range" text of a read.
+- The highest count of external fetches of one MCP HTTP request stays 49. See points 7 and 8 of [Measured subrequests](#measured-subrequests).
+
+### The errors of a write
+
+| Case | Code | Message |
+|---|---|---|
+| An input out of its rule | `invalid_input` | names the field and the bound |
+| No Google account linked, or a 401 after the one renewal | `auth_expired` | `not signed in to Google Health`, or `Google Health rejected the sign-in`; the reconnect hint |
+| HTTP 403 that is not a quota answer | `scope_missing` | `Google Health denied the write of nutrition-log data`; the hint names the reconnect step and `googlehealth.nutrition.writeonly` |
+| Another 4xx | `invalid_input` | `Google Health refused the entry` (hint `the entry was not created; check the date, the time and the values`), or `Google Health refused the delete` (hint `the entry was not deleted`); the log line `google health request rejected` has the HTTP status and Google's status enum |
+| 429 or a quota 403 on every attempt | `upstream_unavailable` | `Google Health API is unavailable`; hint: the entry was not created (or, for a delete, to call it again) |
+| An add whose outcome is unknown | `upstream_unavailable` | hint: the entry may exist |
+| A delete of an entry that is not this server's own | `no_data` | `this server created no entry with that id` |
+| The store write fails after Google took the entry | `internal_error` | the text above |
+
+No error message holds a food name, a number of the entry or a part of Google's answer. No log line holds the payload: the lines of a call are `tool_call`, the client's own lines (a data type, an HTTP status, a retry count, a reason) and, for an internal error, the type chain.
+
+### What the documentation does not settle
+
+Where the pages disagree or say nothing, the server takes the reading that cannot write a wrong entry or delete a wrong one. A real call must still confirm each point.
+
+1. **The UTC offsets.** The reference marks `startUtcOffset` and `endUtcOffset` as required (`SessionTimeInterval`). The example request of the guide leaves them out, and its answer then shows `"0s"`. The server sends both, as the seconds of the coach's zone at the instant of the entry (`"-10800s"` in São Paulo). Without them Google would read the local time of the entry as UTC: an evening meal would land on the next civil day. The only format example of the reference is positive (`"3.5s"`); a negative value is not shown.
+2. **The length of the interval.** No page says whether `endTime` may equal `startTime`. The example of the guide lasts 30 minutes. The server sends an interval without length: a food entry is one instant, the tool has no duration to send, and an end after the start would lie after "now" for an entry logged at the present time. If Google refuses it, the tool answers `Google Health refused the entry` and nothing is written.
+3. **`serving`.** The example of the guide sends `serving.amount` alone. The reference marks `foodMeasurementUnit` as required inside `serving`, and `serving` itself as optional. The server sends no `serving`.
+4. **`foodDisplayName`** has no Required or Optional mark in the reference. The guide says to set it for a food without a food ID. The server always sends it.
+5. **`mealType`.** The field text of the reference names four values, and its enum holds ten. The tool takes the four that `nutrition_day` orders its meals by.
+6. **The `Operation`.** Both writes answer an `Operation`, and the examples of the guide show it finished. No page lists a method to ask for an `Operation` again. So the server cannot wait for one that is not finished: see [A create is never sent twice](#a-create-is-never-sent-twice). For a delete, an `Operation` that is not finished or carries an error is `upstream_unavailable`, the row stays, and the delete can be asked again.
+7. **The answer of `batchDelete` for nutrition-log** is not shown: the guide shows it for hydration-log only. The server takes a finished `Operation` without an error as a delete that happened, and does not read the list of points in it.
+8. **A delete of an entry that is already gone.** No page says what `batchDelete` answers for it. The server takes HTTP 404 as "already gone". If Google answers another 4xx, the tool answers `Google Health refused the delete` and the row stays.
+9. **Whose data points `batchDelete` deletes.** The data management page says that only the creator of a record can modify it, and the scopes page describes the write scope as adding nutrition data and editing or deleting the data it adds. No page says that `batchDelete` refuses the name of another app's data point. The table of [Only the entries of this server are deleted](#only-the-entries-of-this-server-are-deleted) is the answer.
+10. **The two forms of a name.** A request names the user as `me`, and an answer names the user by an ID. The delete request writes the name under `users/me`, the form of the guide's example; the reference says that every name must share the parent of the path. The table keeps the name as the create answered it.
+11. **The characters of an ID that Google makes** are not documented (a client-provided ID is 4 to 63 lowercase letters, digits and hyphens). The server accepts `[A-Za-z0-9_.-]{1,128}`, the pattern the reads already use for a data point name. A create whose answer has another form is an entry that may exist, without a usable id.
+12. **An entry cannot be changed.** The guide says that a log of a food without a food ID cannot be updated: delete it and create a new one. So there is no edit tool.
+
+Also not proven, because no real call was made: that Google accepts each field as sent; how a list reports an entry that was written through the API (its platform, the form of its name); and that the `nutrition.writeonly` scope alone allows the delete.
 | Variable | Kind | Meaning |
 |---|---|---|
 | `HCM_TZ` | var in `wrangler.jsonc` | The IANA zone that defines a "day": today, the target in force, a note's creation day, the day a night ends. Default `America/Sao_Paulo`. `Local`, a UTC offset or an unknown name is rejected. |

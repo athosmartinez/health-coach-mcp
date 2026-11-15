@@ -15,6 +15,7 @@
 // (required, enum, type).
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { LOGGED_SESSIONS } from "../src/tools/workout";
 import fixtureText from "./fixtures/go-tools-list.json?raw";
 import { rpc, signInAsOwner } from "./helpers";
 import { COACH_TOOL_NAMES, MEMORY_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
@@ -73,6 +74,24 @@ function withoutEntryId(tool: ListedTool | undefined): ListedTool | undefined {
   return copy;
 }
 
+/**
+ * workout_review as the Go server lists it. The Worker adds `entry_id` to each
+ * session and, at the end of the description, the sentences about the
+ * sessions it logged; everything else is the Go tool.
+ */
+function withoutSessionEntryId(tool: ListedTool | undefined): ListedTool | undefined {
+  if (!tool) return undefined;
+  const copy = structuredClone(tool);
+  copy.description = goTools.get("workout_review")?.description;
+  const output = copy.outputSchema as {
+    properties?: { data?: { properties?: { sessions?: { items?: { properties?: Record<string, unknown>; required?: string[] } } } } };
+  };
+  const session = output.properties?.data?.properties?.sessions?.items;
+  if (session?.properties) delete session.properties.entry_id;
+  if (session?.required) session.required = session.required.filter((field) => field !== "entry_id");
+  return copy;
+}
+
 /** JSON with the keys of every object sorted, to show a difference as text. */
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, node: unknown) =>
@@ -113,6 +132,18 @@ describe("parity with the Go server's tools/list", () => {
       const sentence = " An item this server logged has entry_id, the id nutrition_log_delete accepts; an item from another app, or logged for another linked Google account, has entry_id null.";
       expect(worker?.description).toBe(`${go?.description}${sentence}`);
       expect(canonical(withoutEntryId(worker))).toBe(canonical(go));
+      return;
+    }
+    if (name === "workout_review") {
+      // The Worker adds entry_id to each session, and says what a session it logged looks like and which flag it can carry.
+      expect(worker?.description).toBe(`${go?.description}${LOGGED_SESSIONS}`);
+      expect(LOGGED_SESSIONS).toContain("A session this server logged has entry_id, the id exercise_log_delete accepts");
+      expect(LOGGED_SESSIONS).toContain("overlaps_band_session marks a logged session that overlaps a band session in time");
+      // The field is there, required and nullable, before it is taken out for the comparison.
+      const session = (worker?.outputSchema as any).properties.data.properties.sessions.items;
+      expect(session.properties.entry_id).toEqual({ type: ["null", "string"], description: expect.stringContaining("exercise_log_delete") });
+      expect(session.required).toContain("entry_id");
+      expect(canonical(withoutSessionEntryId(worker))).toBe(canonical(go));
       return;
     }
     expect(worker?.description).toBe(go?.description);

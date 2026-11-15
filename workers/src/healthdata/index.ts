@@ -42,6 +42,7 @@ export {
   Exercises,
   MAX_HR_SESSIONS,
   MAX_HR_WINDOW,
+  MAX_SESSION_KCAL,
   type ZoneMinutes,
 } from "./exercise";
 export {

@@ -283,6 +283,10 @@ export class CoachStore extends DurableObject<Env> {
           entries: {
             has: (name) => hasEntry(db, name),
           },
+          // The same for the sessions: the has() of exercise_log_delete, and the name map of the exercise read.
+          exerciseEntries: {
+            has: (name) => hasEntry(db, name, "exercise"),
+          },
           now: db.now,
           zone,
         };

@@ -1,7 +1,8 @@
 // Workout sessions (Go: internal/healthdata/exercise.go).
 
 import type { LocalDate } from "../coach/date";
-import { exerciseFlags } from "../metrics/quality";
+import { pointId } from "../googlehealth/exerciselog";
+import { FLAG_OVERLAPS_BAND_SESSION, exerciseFlags } from "../metrics/quality";
 import type { Context } from "./cache";
 import { ZERO_TIME, clean, dataSource, decode, float, int64s, label, object, optionalInt64s, parseDuration, root, text, time } from "./decode";
 import { PRIMARY_PLATFORM } from "./parse";
@@ -61,13 +62,19 @@ export class Exercises {
   sessions: Exercise[] = [];
   /** Records that could not be read. */
   skipped = 0;
-  /** Records from another platform. */
+  /** Records from another platform that this server did not create. */
   otherSource = 0;
   /**
    * Sessions with heart rate left without a max because the call asked for
    * more than MAX_HR_SESSIONS.
    */
   maxHROmitted = 0;
+  /**
+   * Stored names of the sessions this server created for the account that was
+   * linked when this read started, keyed by data point id. Taken before the
+   * list request. Empty when the source has no such table.
+   */
+  ownNames: ReadonlyMap<string, string> = new Map();
 
   constructor(
     readonly from: LocalDate,
@@ -89,7 +96,12 @@ export const MAX_HR_SESSIONS = 31;
 
 const MIN_HR_BPM = 20;
 const MAX_HR_BPM = 250;
-const MAX_SESSION_KCAL = 10_000;
+/**
+ * The most calories one session can plausibly report: a session with more is
+ * dropped as unreadable. The tool that logs a session takes the same bound,
+ * so every value it accepts is a value this reader keeps.
+ */
+export const MAX_SESSION_KCAL = 10_000;
 const MINUTE_NS = 60e9;
 const DAY_MS = 86_400_000;
 
@@ -110,6 +122,16 @@ interface ParsedExercise extends Omit<Exercise, "day" | "flags" | "start" | "end
  * read. "other": from another platform. "bad": values that are not plausible.
  */
 export type ExerciseRead = { kind: "undated" } | { kind: "other" | "bad"; start: number } | { kind: "session"; session: ParsedExercise };
+
+/**
+ * What a read keeps of a record: its reduction with the local day of a record
+ * of the range, or "near", the time span of a session of a margin day.
+ */
+type Kept =
+  | { kind: "undated" }
+  | { kind: "other" | "bad"; start: number; day: LocalDate }
+  | { kind: "session"; session: ParsedExercise; day: LocalDate }
+  | { kind: "near"; start: number; end: number; mine: boolean };
 
 function readExercise(record: unknown) {
   const r = root(record);
@@ -133,12 +155,35 @@ function readExercise(record: unknown) {
   };
 }
 
-/** Reduces one exercise record. */
-export function parseExercise(record: unknown): ExerciseRead {
+/**
+ * Whether the record is a session this server created: its data point ID is
+ * one of `own`. The comparison is by ID (the last part of the name): a create
+ * answers `users/<user id>/…`, and a list can name the user in another form.
+ */
+function createdHere(name: string, own: ReadonlySet<string> | undefined): boolean {
+  if (own === undefined || own.size === 0) return false;
+  const id = pointId(name);
+  return id !== undefined && own.has(id);
+}
+
+/**
+ * Reduces one exercise record.
+ *
+ * `own` holds the data point IDs of the sessions this server created. Such a
+ * session is kept next to the band's own, although its platform is the API's
+ * (GOOGLE_WEB_API): the coach must count the workouts it logged itself. It
+ * was entered by hand, so it is `manual`, and it has no heart rate: the tool
+ * sends none, and a heart rate of another platform is not the band's reading.
+ * The Go server writes nothing to Google Health, so it has no such rule; a
+ * record of any other platform is still left out as "other".
+ */
+export function parseExercise(record: unknown, own?: ReadonlySet<string>): ExerciseRead {
   const r = decode(() => readExercise(record));
   if (r === undefined || !r.present || r.start === ZERO_TIME || !(r.end > r.start)) return { kind: "undated" };
   const { start, end } = r;
-  if (r.source.platform !== PRIMARY_PLATFORM) return { kind: "other", start };
+  const mine = createdHere(r.name, own);
+  const band = r.source.platform === PRIMARY_PLATFORM;
+  if (!band && !mine) return { kind: "other", start };
   const bad: ExerciseRead = { kind: "bad", start };
   const spanMs = end - start;
   // Every real session carries an active duration: none is a renamed field.
@@ -147,7 +192,7 @@ export function parseExercise(record: unknown): ExerciseRead {
   if (r.azm < 0 || r.azm > 2 * (spanMs / 60_000)) return bad;
   if (r.kcal !== undefined && (r.kcal < 0 || r.kcal > MAX_SESSION_KCAL)) return bad;
   let hr: ExerciseHR | null = null;
-  if (r.avgHR !== 0) {
+  if (band && r.avgHR !== 0) {
     // proto3 leaves out a zero: no heart rate
     if (r.avgHR < MIN_HR_BPM || r.avgHR > MAX_HR_BPM) return bad;
     // A session with heart rate always has its zone durations.
@@ -168,7 +213,7 @@ export function parseExercise(record: unknown): ExerciseRead {
       kcal: r.kcal ?? null,
       azm: r.azm,
       hr,
-      manual: r.source.recordingMethod === "MANUAL",
+      manual: mine || r.source.recordingMethod === "MANUAL",
       source: label(r.source),
     },
   };
@@ -203,15 +248,37 @@ export function minutes(s: string, spanMs: number): number | undefined {
 export async function readExercises(ctx: Context, from: LocalDate, to: LocalDate, maxHR: boolean, only?: string): Promise<Exercises> {
   dayList(from, to);
   const out = new Exercises(from, to);
+  // The sessions this server created, with the same day of margin as the
+  // list. The stored names are read here, before the list request: a relink
+  // while that request is in flight must not swap in the new account's name
+  // for a point id the two accounts share.
+  let own: ReadonlySet<string> | undefined;
+  try {
+    const names = ctx.cache.createdExerciseNames?.(shift(from, -1), shift(to, 1));
+    if (names !== undefined) {
+      out.ownNames = names;
+      own = new Set(names.keys());
+    }
+  } catch (cause) {
+    throw new Error("healthdata: read created entries", { cause });
+  }
+  const logged = own !== undefined && own.size > 0;
   // The API filters on the device's local start time; a day of margin keeps
   // a session near midnight in the configured zone.
-  const reads = await ctx.api.list("exercise", shift(from, -1), shift(to, 1), (record) => {
-    const read = parseExercise(record);
+  const reads = await ctx.api.list("exercise", shift(from, -1), shift(to, 1), (record): Kept | undefined => {
+    const read = parseExercise(record, own);
     if (read.kind === "undated") return read;
     const day = ctx.zone.dateOf(Math.floor(read.kind === "session" ? read.session.start : read.start));
-    return day < from || day > to ? undefined : { ...read, day };
+    if (day >= from && day <= to) return { ...read, day };
+    // A session of a margin day is not a session of the range. Its time span
+    // is kept when this server created sessions near the range: a session
+    // can overlap one that starts on the other side of midnight.
+    if (!logged || read.kind !== "session") return undefined;
+    return { kind: "near", start: read.session.start, end: read.session.end, mine: createdHere(read.session.id, own) };
   });
   const sessions: (ParsedExercise & { day: LocalDate })[] = [];
+  /** The time spans of the band's sessions, the margin days included. */
+  const bandSpans: { start: number; end: number }[] = [];
   for (const read of reads) {
     switch (read.kind) {
       case "other":
@@ -219,6 +286,10 @@ export async function readExercises(ctx: Context, from: LocalDate, to: LocalDate
         break;
       case "session":
         sessions.push({ ...read.session, day: read.day });
+        if (logged && !createdHere(read.session.id, own)) bandSpans.push(read.session);
+        break;
+      case "near":
+        if (!read.mine) bandSpans.push(read);
         break;
       default:
         out.skipped++;
@@ -237,17 +308,20 @@ export async function readExercises(ctx: Context, from: LocalDate, to: LocalDate
     if (only !== undefined && session.id !== only) continue;
     session.hr.maxBpm = await maxHeartRate(ctx, session.start, session.end);
   }
-  out.sessions = sessions.map((session) => ({
-    ...session,
-    start: new Date(session.start),
-    end: new Date(session.end),
-    flags: exerciseFlags({
+  out.sessions = sessions.map((session) => {
+    const flags = exerciseFlags({
       type: session.type,
       durationMs: session.activeMin * 60_000,
       avgHR: session.hr ? session.hr.avgBpm : null,
       manualEntry: session.manual,
-    }),
-  }));
+    });
+    // A session this server created stays a record of its own next to the
+    // band's: nothing of the two is merged or summed. When both cover the
+    // same time, the same workout may be there twice, and the flag says so.
+    const overlaps = createdHere(session.id, own) && bandSpans.some((band) => band.start < session.end && band.end > session.start);
+    if (overlaps) flags.push(FLAG_OVERLAPS_BAND_SESSION);
+    return { ...session, start: new Date(session.start), end: new Date(session.end), flags };
+  });
   if (out.skipped > 0) ctx.log.warn("unreadable exercise records", { from, to, skipped: out.skipped });
   return out;
 }

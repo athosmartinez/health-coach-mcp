@@ -64,6 +64,8 @@ describe("workout_review", () => {
       azm_min: 30,
       quality_flags: ["low_hr_for_activity"],
       source: "Synthetic Band",
+      // The source of this test has no table of logged sessions: no session is this server's own.
+      entry_id: null,
     });
     // A session without heart rate has no zones, average or max.
     expect(data.sessions[1]).toMatchObject({ type: "STRENGTH_TRAINING", heart_rate_zone_minutes: null, avg_hr_bpm: null, max_hr_bpm: null });

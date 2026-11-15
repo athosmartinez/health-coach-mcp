@@ -15,8 +15,11 @@ export const TOKEN_REQUESTS = 2;
 export const FORCED_RENEWALS = 1;
 
 /**
- * Left unused. It covers the one case with a third token request: a sign-in
- * that replaces the link while a renewal is in flight.
+ * Left unused. It covers the token requests beyond TOKEN_REQUESTS: a sign-in
+ * that replaces the link while a renewal is in flight makes that renewal send
+ * a second request. RequestTokens (tokens.ts) asks the store at most
+ * TOKEN_REQUESTS times in one MCP HTTP request, so the worst case is
+ * 2 × TOKEN_REQUESTS token requests: two more than planned, within this spare.
  */
 export const SPARE_SUBREQUESTS = 3;
 

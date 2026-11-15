@@ -34,7 +34,7 @@ import {
   sessions,
   untilOk,
 } from "./e2e-helpers";
-import { at, exerciseRec, foodRec } from "./healthdata-helpers";
+import { at, exerciseRec, foodRec, samplesEvery2s } from "./healthdata-helpers";
 import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, rpc, signInAsOwner } from "./helpers";
 import { COACH_TOOL_NAMES, type McpTarget, SCHEMA_HINT, freshStore, mcpRequest, objectTool } from "./memory-helpers";
 
@@ -595,6 +595,47 @@ describe("the Google requests of one MCP request", () => {
     expect(g.takeExternal()).toEqual({ total: 2, "nutrition-log": 1, weight: 1 });
     expect(again.data).toEqual(out.data);
     expect(again.quality_flags).toEqual([]);
+  });
+
+  it("workout_review by exercise_id lists the heart rate of that session only", async () => {
+    daysOfData(g.google, 30);
+    // 33 sessions with heart rate on one day: two more than the cap of max heart rate reads.
+    const heavy = day(-8);
+    const id = (n: number) => `users/me/dataTypes/exercise/dataPoints/syn-many-${n}`;
+    for (let n = 0; n < 33; n++) {
+      const start = new Date(at(heavy, 6, 0).getTime() + n * 20 * 60_000);
+      const end = new Date(start.getTime() + 10 * 60_000);
+      g.google.add("exercise", exerciseRec(start, end, { type: "WALKING", avgHR: 120, kcal: 50, zones: [5, 5, 0, 0], name: id(n) }));
+      g.google.add("heart-rate", ...samplesEvery2s(start, end, 100 + n));
+    }
+    const stub = await linkedStore();
+    // The day by its date: one heart-rate list for each of the newest 31 sessions.
+    const whole = await ok(stub, "workout_review", { date: heavy });
+    expect(g.takeExternal()).toEqual({ total: 38, exercise: 4, "heart-rate": 31, sleep: 1, "heart-rate-variability": 1, "daily-resting-heart-rate": 1 });
+    expect(whole.quality_flags).toEqual(["sessions_truncated", "max_hr_omitted"]);
+    const listed = (n: number) => whole.data.sessions.find((session: { exercise_id: string }) => session.exercise_id === id(n));
+    expect(listed(5).max_hr_bpm).toBe(105);
+    expect(listed(1).max_hr_bpm).toBeNull();
+
+    // One session under the cap: the lookup of its day (2 pages), then one heart-rate list.
+    const one = await ok(stub, "workout_review", { exercise_id: id(5) });
+    expect(g.takeExternal()).toEqual({ total: 10, exercise: 6, "heart-rate": 1, sleep: 1, "heart-rate-variability": 1, "daily-resting-heart-rate": 1 });
+    expect(one.data.sessions).toEqual([listed(5)]);
+    expect(one.data).toMatchObject({ date: heavy, sessions_omitted: 0, week_context: whole.data.week_context, recovery_context: whole.data.recovery_context });
+    // The day has sessions without a max, whichever session is asked for.
+    expect(one.quality_flags).toEqual(["max_hr_omitted"]);
+
+    // The newest session: beyond the 20 that a day's review lists, with its max.
+    const newest = await ok(stub, "workout_review", { exercise_id: id(32) });
+    expect(g.takeExternal()).toMatchObject({ total: 10, "heart-rate": 1 });
+    expect(newest.data.sessions).toMatchObject([{ exercise_id: id(32), max_hr_bpm: 132, avg_hr_bpm: 120 }]);
+    expect(newest.quality_flags).toEqual(["max_hr_omitted"]);
+
+    // A session beyond the cap has no max, as in the day's review: no heart-rate list at all.
+    const oldest = await ok(stub, "workout_review", { exercise_id: id(1) });
+    expect(g.takeExternal()).toEqual({ total: 9, exercise: 6, sleep: 1, "heart-rate-variability": 1, "daily-resting-heart-rate": 1 });
+    expect(oldest.data.sessions).toEqual([listed(1)]);
+    expect(oldest.quality_flags).toEqual(["max_hr_omitted"]);
   });
 });
 

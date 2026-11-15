@@ -143,8 +143,9 @@ async function workoutReview(deps: CoachDeps, args: Record<string, unknown>): Pr
   if (str(args.date) !== "" && id !== "") throw new ToolError("invalid_input", "pass date or exercise_id, not both");
   let day = dayOf(deps, args.date);
   if (id !== "") day = await findDay(deps, id);
-  // Max heart rate is read for the reviewed day only, never for the week.
-  const ex = await deps.health.exercises(day, day, true);
+  // Max heart rate is read for the reviewed day only, never for the week, and
+  // with an ID for that one session only.
+  const ex = await deps.health.exercises(day, day, true, id === "" ? undefined : id);
 
   const flags = new FlagSet();
   const sources = new SourceSet();

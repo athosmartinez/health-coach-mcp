@@ -107,12 +107,29 @@ describe("workout_review", () => {
     // The flags are the session's own; the week still counts every session.
     expect(out.quality_flags).toEqual(["manual_entry", "no_hr_data"]);
     expect(out.data.week_context.sessions).toBe(3);
-    // The ID is looked up in the last 28 days, without max heart rate.
+    // The ID is looked up in the last 28 days, without max heart rate. The
+    // day's read asks for the max heart rate of that session alone.
     expect(h.calls).toEqual([
       "exercises 2026-09-19..2026-10-16 maxHR=false",
-      "exercises 2026-10-14..2026-10-14 maxHR=true",
+      `exercises 2026-10-14..2026-10-14 maxHR=true only=${ID}3`,
       "exercises 2026-10-12..2026-10-16 maxHR=false",
       "recovery 2026-09-17..2026-10-15",
+    ]);
+  });
+
+  it("gives a session reviewed by its ID the max heart rate and the flags of the day's review", async () => {
+    const h = workoutWeek();
+    h.exercisesExtra = { maxHROmitted: 1 };
+    const whole = await review(h, { date: "2026-10-14" });
+    const one = await review(h, { exercise_id: `${ID}2` });
+    expect(one.data.sessions).toEqual([whole.data.sessions[0]]);
+    expect(one.data.sessions[0].max_hr_bpm).toBe(150);
+    expect(one.quality_flags).toEqual(["max_hr_omitted", "low_hr_for_activity"]);
+    expect(whole.quality_flags).toEqual(["max_hr_omitted", "low_hr_for_activity", "manual_entry", "no_hr_data"]);
+    // A date reads the max heart rate of every session of the day.
+    expect(h.calls.filter((call) => call.includes("maxHR=true"))).toEqual([
+      "exercises 2026-10-14..2026-10-14 maxHR=true",
+      `exercises 2026-10-14..2026-10-14 maxHR=true only=${ID}2`,
     ]);
   });
 

@@ -83,7 +83,11 @@ const MEALS: [hour: number, meal: string, kcal: number, protein: number][] = [
   [20, "DINNER", 650, 40],
   [22, "SNACK", 150, 8],
 ];
-/** One day with 33 sessions of 20 minutes: `workout_review` reads a max heart rate for 31 of them. */
+/**
+ * One day with 33 sessions of 20 minutes: `workout_review` by `date` reads a
+ * max heart rate for 31 of them, and by `exercise_id` for one. HEAVY_ID is the
+ * newest session of the day, so its max heart rate is read.
+ */
 const HEAVY_DAY = day(-10);
 const HEAVY_SESSIONS = 33;
 const HEAVY_ID = "users/me/dataTypes/exercise/dataPoints/syn-heavy-1";
@@ -140,7 +144,7 @@ function buildYear(options: YearOptions): { lists: Records; rollups: Records } {
   for (let n = 0; n < HEAVY_SESSIONS; n++) {
     const from = new Date(at(HEAVY_DAY, 6, 0).getTime() + n * 20 * MINUTE);
     const to = new Date(from.getTime() + 20 * MINUTE);
-    list("exercise", exerciseRec(from, to, { type: "WALKING", avgHR: 120, kcal: 80, zones: [10, 10, 0, 0], ...(n === 0 ? { name: HEAVY_ID } : {}) }));
+    list("exercise", exerciseRec(from, to, { type: "WALKING", avgHR: 120, kcal: 80, zones: [10, 10, 0, 0], ...(n === HEAVY_SESSIONS - 1 ? { name: HEAVY_ID } : {}) }));
     list("heart-rate", ...samplesEvery2s(from, to, 120));
   }
   return { lists, rollups };
@@ -291,7 +295,9 @@ interface Case {
 
 const EXPIRED: Partial<GoogleLink> = { accessTokenExpiresAt: 0 };
 const BRIEFING: ToolCall = ["morning_briefing", { date: day(-2) }];
-const WORKOUT: ToolCall = ["workout_review", { exercise_id: HEAVY_ID }];
+// By `date` the review lists heart rate once per session: its worst case.
+const WORKOUT: ToolCall = ["workout_review", { date: HEAVY_DAY }];
+const WORKOUT_BY_ID: ToolCall = ["workout_review", { exercise_id: HEAVY_ID }];
 const WEEK_BEFORE: ToolCall = ["weekly_report", { week_end: day(-7) }];
 const DENSE: YearOptions = { dense: true };
 const HARD: Pick<Case, "year" | "twoPageSteps"> = { year: { offWrist: true }, twoPageSteps: true };
@@ -300,7 +306,8 @@ const BUDGET = "budget error";
 const CASES: Case[] = [
   // Each tool alone, with its worst-case input, on the year of data.
   { tool: "`morning_briefing`", input: "the day after a day without a zone-minutes row", calls: [BRIEFING], health: [9], later: 5 },
-  { tool: "`workout_review`", input: "`exercise_id` of a day with 33 sessions", calls: [WORKOUT], health: [42], later: 38 },
+  { tool: "`workout_review`", input: "`date` of a day with 33 sessions", calls: [WORKOUT], health: [39], later: 35 },
+  { tool: "`workout_review`", input: "`exercise_id` of the newest session of that day", calls: [WORKOUT_BY_ID], health: [12], later: 8 },
   { tool: "`nutrition_day`", input: "a settled day without a zone-minutes row", calls: [["nutrition_day", { date: day(-3) }]], health: [5], later: 1 },
   { tool: "`weekly_report`", input: "the current week, no kcal target", calls: [["weekly_report", {}]], health: [12], later: 10 },
   { tool: "`weekly_report`", input: "the week before, no kcal target", calls: [WEEK_BEFORE], health: [13], later: 3 },
@@ -316,7 +323,7 @@ const CASES: Case[] = [
   { tool: "`metric_series`", input: "`kcal_in`, 366 days by week, a kcal target on every day", kcalTarget: true, calls: [series("kcal_in")], health: [1], later: 1 },
   // The dense account, for the tools that read nights.
   { tool: "`morning_briefing`", input: "dense account, the same day", year: DENSE, calls: [BRIEFING], health: [10], later: 5 },
-  { tool: "`workout_review`", input: "dense account, the same `exercise_id`", year: DENSE, calls: [WORKOUT], health: [43], later: 38 },
+  { tool: "`workout_review`", input: "dense account, the same `date`", year: DENSE, calls: [WORKOUT], health: [40], later: 35 },
   { tool: "`weekly_report`", input: "dense account, the week before", year: DENSE, calls: [WEEK_BEFORE], health: [15], later: 3 },
   { tool: "`metric_series`", input: "dense account, `hrv`, 366 days by week", year: DENSE, calls: [series("hrv")], health: [45], later: 2 },
   { tool: "`metric_series`", input: "dense account, `sleep_asleep_min`, 366 days by week", year: DENSE, calls: [series("sleep_asleep_min")], health: [45], later: 2 },

@@ -99,8 +99,11 @@ export interface Source {
   recovery(from: LocalDate, to: LocalDate, options?: RecoveryOptions): Promise<Recovery>;
   activity(from: LocalDate, to: LocalDate, options?: ActivityOptions): Promise<Activity>;
   body(from: LocalDate, to: LocalDate, options?: BodyOptions): Promise<Body>;
-  /** `maxHR` is this source's narrow option: false reads no heart-rate samples. */
-  exercises(from: LocalDate, to: LocalDate, maxHR: boolean): Promise<Exercises>;
+  /**
+   * `maxHR` is this source's narrow option: false reads no heart-rate samples.
+   * With `only`, a session's ID, they are read for that session alone.
+   */
+  exercises(from: LocalDate, to: LocalDate, maxHR: boolean, only?: string): Promise<Exercises>;
   nutrition(from: LocalDate, to: LocalDate): Promise<Nutrition>;
 }
 
@@ -129,8 +132,8 @@ export class HealthData implements Source {
     return readBody(this.ctx, from, to, options);
   }
 
-  exercises(from: LocalDate, to: LocalDate, maxHR: boolean): Promise<Exercises> {
-    return readExercises(this.ctx, from, to, maxHR);
+  exercises(from: LocalDate, to: LocalDate, maxHR: boolean, only?: string): Promise<Exercises> {
+    return readExercises(this.ctx, from, to, maxHR, only);
   }
 
   nutrition(from: LocalDate, to: LocalDate): Promise<Nutrition> {

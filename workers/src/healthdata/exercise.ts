@@ -191,10 +191,16 @@ export function minutes(s: string, spanMs: number): number | undefined {
  * The sessions that started in [from, to]. With `maxHR`, each session with
  * heart rate costs one more request for its samples.
  *
+ * With `only`, a session's ID, the samples are read for that session alone:
+ * the caller shows one session, so the other requests would be for nothing.
+ * The cap still counts every session with heart rate, newest first. So that
+ * session's max and `maxHROmitted` are what a read of all the sessions gives;
+ * the max of every other session is null.
+ *
  * Sessions are never cached, so the range is one list call: windows would
  * only add requests.
  */
-export async function readExercises(ctx: Context, from: LocalDate, to: LocalDate, maxHR: boolean): Promise<Exercises> {
+export async function readExercises(ctx: Context, from: LocalDate, to: LocalDate, maxHR: boolean, only?: string): Promise<Exercises> {
   dayList(from, to);
   const out = new Exercises(from, to);
   // The API filters on the device's local start time; a day of margin keeps
@@ -228,6 +234,7 @@ export async function readExercises(ctx: Context, from: LocalDate, to: LocalDate
       continue;
     }
     lookups++;
+    if (only !== undefined && session.id !== only) continue;
     session.hr.maxBpm = await maxHeartRate(ctx, session.start, session.end);
   }
   out.sessions = sessions.map((session) => ({

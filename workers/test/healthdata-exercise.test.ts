@@ -116,6 +116,49 @@ describe("exercises", () => {
       expect(ex.sessions.map((session) => session.hr?.maxBpm)).toEqual([null, null, ...new Array(MAX_HR_SESSIONS).fill(160)]);
     }));
 
+  it("reads the heart rate of one session when asked for it by ID, with the cap counted as in a read of all", () =>
+    inStore(async (db) => {
+      const first = at("2026-09-01", 19, 0);
+      const id = (i: number) => `users/me/dataTypes/exercise/dataPoints/syn-only-${i}`;
+      const count = MAX_HR_SESSIONS + 2;
+      for (let i = 0; i < count; i++) {
+        const start = plus(first, i * 24 * HOUR);
+        h.google.add("exercise", exerciseRec(start, plus(start, HOUR), { type: "RUNNING", avgHR: 150, zones: ZONES, name: id(i) }));
+        h.google.add("heart-rate", ...samplesEvery2s(start, plus(start, MINUTE), 130 + i));
+      }
+      const data = newData(db);
+      const all = await data.exercises("2026-09-01", "2026-10-03", true);
+      expect(between(h.google.takeCalls())).toHaveLength(MAX_HR_SESSIONS);
+      const maxOf = (ex: typeof all, i: number) => ex.sessions.find((session) => session.id === id(i))?.hr?.maxBpm;
+
+      // A session under the cap: one heart-rate list, for its own hour.
+      const newest = await data.exercises("2026-09-01", "2026-10-03", true, id(count - 1));
+      expect(between(h.google.takeCalls())).toEqual(["between heart-rate 2026-10-03T22:00:00Z..2026-10-03T23:00:01Z"]);
+      expect(maxOf(newest, count - 1)).toBe(130 + count - 1);
+      expect(maxOf(newest, count - 1)).toBe(maxOf(all, count - 1));
+      // The last session under the cap, counted from the newest.
+      const last = await data.exercises("2026-09-01", "2026-10-03", true, id(2));
+      expect(between(h.google.takeCalls())).toHaveLength(1);
+      expect(maxOf(last, 2)).toBe(132);
+      expect(maxOf(last, 2)).toBe(maxOf(all, 2));
+      // A session beyond the cap has no max, as in the read of all: no request.
+      const oldest = await data.exercises("2026-09-01", "2026-10-03", true, id(1));
+      expect(between(h.google.takeCalls())).toEqual([]);
+      expect(maxOf(oldest, 1)).toBeNull();
+      expect(maxOf(all, 1)).toBeNull();
+      // An ID that no session has reads no heart rate.
+      await data.exercises("2026-09-01", "2026-10-03", true, id(count));
+      expect(between(h.google.takeCalls())).toEqual([]);
+
+      for (const one of [newest, last, oldest]) {
+        expect(one.maxHROmitted).toBe(all.maxHROmitted);
+        expect(one.sessions.map((session) => ({ ...session, hr: null }))).toEqual(all.sessions.map((session) => ({ ...session, hr: null })));
+        // Every other session is left without a max.
+        expect(one.sessions.filter((session) => session.hr?.maxBpm !== null)).toHaveLength(one === oldest ? 0 : 1);
+      }
+      expect(all.maxHROmitted).toBe(2);
+    }));
+
   it("keeps the heart-rate window of a full-day session within a day", () =>
     inStore(async (db) => {
       const start = at(D10, 0, 0);

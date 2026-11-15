@@ -89,7 +89,8 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | Tool | Input | Google Health requests | Token requests | Total | Outcome of request 1 | Requests until success | A later request |
 |---|---|---|---|---|---|---|---|
 | `morning_briefing` | the day after a day without a zone-minutes row | 9 | 0 | 9 | ok | 1 | 5 |
-| `workout_review` | `exercise_id` of a day with 33 sessions | 42 | 0 | 42 | ok | 1 | 38 |
+| `workout_review` | `date` of a day with 33 sessions | 39 | 0 | 39 | ok | 1 | 35 |
+| `workout_review` | `exercise_id` of the newest session of that day | 12 | 0 | 12 | ok | 1 | 8 |
 | `nutrition_day` | a settled day without a zone-minutes row | 5 | 0 | 5 | ok | 1 | 1 |
 | `weekly_report` | the current week, no kcal target | 12 | 0 | 12 | ok | 1 | 10 |
 | `weekly_report` | the week before, no kcal target | 13 | 0 | 13 | ok | 1 | 3 |
@@ -104,7 +105,7 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | `metric_series` | `protein_g`, 366 days by week, no kcal target | 45, 3 | 0, 0 | 45, 3 | budget error | 2 | 3 |
 | `metric_series` | `kcal_in`, 366 days by week, a kcal target on every day | 1 | 0 | 1 | ok | 1 | 1 |
 | `morning_briefing` | dense account, the same day | 10 | 0 | 10 | ok | 1 | 5 |
-| `workout_review` | dense account, the same `exercise_id` | 43 | 0 | 43 | ok | 1 | 38 |
+| `workout_review` | dense account, the same `date` | 40 | 0 | 40 | ok | 1 | 35 |
 | `weekly_report` | dense account, the week before | 15 | 0 | 15 | ok | 1 | 3 |
 | `metric_series` | dense account, `hrv`, 366 days by week | 45 | 0 | 45 | ok | 1 | 2 |
 | `metric_series` | dense account, `sleep_asleep_min`, 366 days by week | 45 | 0 | 45 | ok | 1 | 2 |
@@ -126,7 +127,7 @@ What the table shows:
 
 1. **Every tool answers its worst-case input, in at most 2 requests.** Request 1 of the largest cases ends with the budget error after 45 requests; request 2 continues from the cached windows.
 2. **Three inputs use exactly the 45 requests and succeed:** `total_calories` over 366 days (27 total-calories rollups, 5 zone-minutes rollups, 13 lists of the band's steps), and `hrv` and `sleep_asleep_min` over 366 days in the dense account (39 sleep pages, 6 HRV pages). One more page ends request 1 with the budget error, and request 2 succeeds.
-3. **`workout_review` has a margin of 2 to 3 requests on a day with 33 sessions.** Its session lists and heart-rate lists are never cached: 7 session pages and 31 heart-rate lists on every call. Each 25 more sessions in the day, in its week or in the 28 days of the `exercise_id` lookup add one request. A day that needs more than 45 answers the budget error on every call. `date` in place of `exercise_id` saves the lookup (3 requests here).
+3. **The worst case of `workout_review` is a `date`: 39 to 40 requests on a day with 33 sessions, a margin of 5 to 6.** Its session lists and heart-rate lists are never cached: 4 session pages and 31 heart-rate lists on every call (a max heart rate is read for the newest 31 sessions of the day). Each 25 more sessions in the day or in its week add one request. A day that needs more than 45 answers the budget error on every call. With `exercise_id` the heart rate is listed for that session only: 7 session pages (3 of them for the lookup of the day in the last 28 days) and 1 heart-rate list, 12 requests here.
 4. **A day without band data is checked again on every call.** Over a year the repeated "band worn" check costs `5 + 13 × pages` requests, where `pages` is the pages of one 31-day list of the band's steps: 18 with one page, 31 with two (the table has 29 to 31). With three pages it is 44, and with four it is 57: over the budget on every call. Three and four pages are not measured.
 5. **A JSON-RPC batch shares one budget.** A call that does not fit answers the budget error, and no request is sent for it. The same POST sent again succeeds only when the parts of its calls that are never cached fit one budget together. The POST with the worst-case input of each tool never does: send such calls in requests of their own.
 6. **Retries count.** With 503 on every request the call ends after 4 attempts. With three 503 answers before each answer the call ends at 45 requests with `upstream_unavailable`, after 33 waits (about a minute).
@@ -315,5 +316,5 @@ How to measure after a deploy:
 - The OAuth resource is `<request origin>/mcp`. A second hostname (`workers.dev` and a custom domain) is a separate resource with its own grants.
 - `/register` and the consent page are open to anyone, as MCP clients need them. Each attempt writes to KV, so heavy abuse could use up the Free plan's daily KV writes.
 - A call that needs more than 45 Google Health requests answers the budget error and must be sent again (see [Measured subrequests](#measured-subrequests), points 1 to 5). The largest measured input needs 2 requests.
-- `workout_review` of a day whose session lists and heart-rate lists need more than 45 requests cannot succeed: nothing of them is cached.
+- `workout_review` by `date` of a day whose session lists and heart-rate lists need more than 45 requests cannot succeed: nothing of them is cached. `exercise_id` reviews one session of such a day with one heart-rate list.
 - A year in which every 31-day window has days without band data, in an account whose 31-day list of the band's steps has four pages or more, makes `metric_series` for `azm`, `total_calories`, `kcal_in` and `protein_g` over that year answer the budget error on every call. Use a shorter range.

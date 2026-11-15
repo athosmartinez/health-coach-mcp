@@ -166,8 +166,8 @@ export class FakeHealth implements Source {
     return b;
   }
 
-  async exercises(from: LocalDate, to: LocalDate, maxHR: boolean): Promise<Exercises> {
-    this.call("exercises", from, to, ` maxHR=${maxHR}`);
+  async exercises(from: LocalDate, to: LocalDate, maxHR: boolean, only?: string): Promise<Exercises> {
+    this.call("exercises", from, to, ` maxHR=${maxHR}${only === undefined ? "" : ` only=${only}`}`);
     const extra = this.byRange.get(`${from}..${to}`) ?? this.exercisesExtra;
     const e = new Exercises(from, to);
     e.skipped = extra.skipped ?? 0;
@@ -175,7 +175,9 @@ export class FakeHealth implements Source {
     e.maxHROmitted = extra.maxHROmitted ?? 0;
     for (const session of this.sessions) {
       if (session.day < from || session.day > to) continue;
-      e.sessions.push(maxHR || !session.hr ? session : { ...session, hr: { ...session.hr, maxBpm: null } });
+      // As the real source: with `only`, the max is read for that session alone.
+      const read = maxHR && (only === undefined || session.id === only);
+      e.sessions.push(read || !session.hr ? session : { ...session, hr: { ...session.hr, maxBpm: null } });
     }
     return e;
   }

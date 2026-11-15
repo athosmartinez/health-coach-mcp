@@ -134,10 +134,12 @@ describe("CoachStore schema", () => {
       // The cache survives the upgrade, and the table starts empty.
       expect(sql.exec("SELECT COUNT(*) AS n FROM daily_metrics").one()).toEqual({ n: 1 });
       expect(sql.exec("SELECT COUNT(*) AS n FROM nutrition_entries").one()).toEqual({ n: 0 });
-      // The name, the day and the creation time: no column for a food name or a nutrient value.
+      // The account, the name, the day and the creation time: no column for a food name or a nutrient value.
+      // The key is the account with the name: an entry belongs to one Google account.
       const columns = sql.exec<{ name: string; type: string; notnull: number; pk: number }>("SELECT name, type, \"notnull\", pk FROM pragma_table_info('nutrition_entries')").toArray();
       expect(columns).toEqual([
-        { name: "name", type: "TEXT", notnull: 0, pk: 1 },
+        { name: "sub", type: "TEXT", notnull: 1, pk: 1 },
+        { name: "name", type: "TEXT", notnull: 1, pk: 2 },
         { name: "day", type: "TEXT", notnull: 1, pk: 0 },
         { name: "created_at", type: "TEXT", notnull: 1, pk: 0 },
       ]);

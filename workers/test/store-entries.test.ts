@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import { entryIdsBetween, forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
 import { fixedClock, withDb } from "./memory-helpers";
+import { linkAccount } from "./memory-helpers";
+import { linkedAccount } from "../src/store/entries";
+import { OWNER_SUB } from "./helpers";
 
 const NAME = "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-entry-1";
 const OTHER = "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-entry-2";
@@ -113,12 +116,94 @@ describe("the entries this server created", () => {
   it("finds an entry through the primary key, and writes three rows for one", () =>
     withDb((db, sql) => {
       for (let n = 0; n < 200; n++) recordEntry(db, `users/1122334455/dataTypes/nutrition-log/dataPoints/syn-fill-${n}`, "2026-10-13");
-      const written = sql.exec("INSERT INTO nutrition_entries (name, day, created_at) VALUES (?, '2026-10-13', 'x')", NAME).rowsWritten;
+      const written = sql.exec("INSERT INTO nutrition_entries (sub, name, day, created_at) VALUES (?, ?, '2026-10-13', 'x')", OWNER_SUB, NAME).rowsWritten;
       // The row, the entry of the primary key and the entry of the day index.
       expect(written).toBe(3);
-      const lookup = sql.exec("SELECT COUNT(*) FROM nutrition_entries WHERE name = ?", NAME);
+      const lookup = sql.exec("SELECT COUNT(*) FROM nutrition_entries WHERE sub = ? AND name = ?", OWNER_SUB, NAME);
       lookup.toArray();
       expect(lookup.rowsRead).toBe(1);
       expect(hasEntry(db, NAME)).toBe(true);
+    }));
+});
+
+// An entry belongs to the Google account that was linked when it was created.
+// With another account linked, a delete would go out with the wrong token.
+describe("the entries of the linked Google account", () => {
+  const OTHER_SUB = "200000000000000000002";
+  const owners = (sql: SqlStorage) => sql.exec("SELECT sub, name FROM nutrition_entries ORDER BY sub, name").toArray();
+
+  it("records an entry for the account that is linked now", () =>
+    withDb((db, sql) => {
+      expect(linkedAccount(db)).toBe(OWNER_SUB);
+      recordEntry(db, NAME, "2026-10-13");
+      expect(owners(sql)).toEqual([{ sub: OWNER_SUB, name: NAME }]);
+      // The row has the account, the name, the day and the creation time: nothing of the food.
+      const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('nutrition_entries') ORDER BY cid").toArray();
+      expect(columns.map((column) => column.name)).toEqual(["sub", "name", "day", "created_at"]);
+    }));
+
+  it("knows only the entries of the linked account, and keeps the rows of another account", () =>
+    withDb((db, sql) => {
+      recordEntry(db, NAME, "2026-10-13");
+      expect(hasEntry(db, NAME)).toBe(true);
+
+      // Another account is linked: the entry of the first one is not this server's own now.
+      linkAccount(sql, OTHER_SUB);
+      expect(linkedAccount(db)).toBe(OTHER_SUB);
+      expect(hasEntry(db, NAME)).toBe(false);
+      // Forgetting it does nothing: the row is not the linked account's.
+      forgetEntry(db, NAME);
+      expect(owners(sql)).toEqual([{ sub: OWNER_SUB, name: NAME }]);
+      // The new account has entries of its own.
+      recordEntry(db, OTHER, "2026-10-14");
+      expect(hasEntry(db, OTHER)).toBe(true);
+
+      // The first account is linked again: its entry is its own again, and the other one is not.
+      linkAccount(sql, OWNER_SUB);
+      expect(hasEntry(db, NAME)).toBe(true);
+      expect(hasEntry(db, OTHER)).toBe(false);
+      forgetEntry(db, NAME);
+      expect(owners(sql)).toEqual([{ sub: OTHER_SUB, name: OTHER }]);
+    }));
+
+  it("keeps one row per account for a name that two accounts hold", () =>
+    withDb((db, sql) => {
+      const shared = "users/me/dataTypes/nutrition-log/dataPoints/syn-shared";
+      recordEntry(db, shared, "2026-10-13");
+      linkAccount(sql, OTHER_SUB);
+      expect(hasEntry(db, shared)).toBe(false);
+      recordEntry(db, shared, "2026-10-14");
+      expect(sql.exec("SELECT sub, day FROM nutrition_entries ORDER BY sub").toArray()).toEqual([
+        { sub: OWNER_SUB, day: "2026-10-13" },
+        { sub: OTHER_SUB, day: "2026-10-14" },
+      ]);
+      // A delete for one account leaves the row of the other.
+      forgetEntry(db, shared);
+      expect(owners(sql)).toEqual([{ sub: OWNER_SUB, name: shared }]);
+    }));
+
+  it("knows no entry and records none when no account is linked", () =>
+    withDb((db, sql) => {
+      recordEntry(db, NAME, "2026-10-13");
+      sql.exec("DELETE FROM google_account");
+      expect(linkedAccount(db)).toBeUndefined();
+      expect(hasEntry(db, NAME)).toBe(false);
+      forgetEntry(db, NAME);
+      expect(() => recordEntry(db, OTHER, "2026-10-13")).toThrow("store: no Google account is linked");
+      expect(() => recordEntry(db, OTHER, "2026-10-13", OWNER_SUB)).toThrow("store: no Google account is linked");
+      // The row of the account that was linked stays, for when it is linked again.
+      expect(owners(sql)).toEqual([{ sub: OWNER_SUB, name: NAME }]);
+    }));
+
+  it("does not record an entry when the linked account is not the one the entry was created for", () =>
+    withDb((db, sql) => {
+      // The account that was linked before the create was sent.
+      const owner = linkedAccount(db);
+      linkAccount(sql, OTHER_SUB);
+      expect(() => recordEntry(db, NAME, "2026-10-13", owner)).toThrow("store: another Google account was linked");
+      expect(owners(sql)).toEqual([]);
+      // The same account still: recorded.
+      recordEntry(db, NAME, "2026-10-13", OTHER_SUB);
+      expect(owners(sql)).toEqual([{ sub: OTHER_SUB, name: NAME }]);
     }));
 });

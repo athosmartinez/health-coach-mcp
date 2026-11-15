@@ -59,8 +59,12 @@ export interface GoogleMock {
   auths: string[];
   /** Answers the token endpoint. Default: a new token. */
   tokenReply: () => Response | Promise<Response>;
-  /** When set and it returns a response, answers a Health API request instead of the fake API. */
-  healthReply: ((request: Request) => Response | undefined) | undefined;
+  /**
+   * When set and it returns a response, answers a Health API request instead
+   * of the fake API. It may wait: for a test that changes the store while a
+   * request is in flight.
+   */
+  healthReply: ((request: Request) => Response | undefined | Promise<Response | undefined>) | undefined;
   /** Puts the mock on `fetch` again, after another helper replaced it (the OAuth sign-in). */
   install(): void;
   /** The external fetches since the last take: a count per kind, and the total. */
@@ -94,7 +98,7 @@ export function googleMock(): GoogleMock {
         if (!mock.google.serves(request)) throw new Error(`unexpected fetch in test: ${request.method} ${request.url}`);
         mock.external.push(mock.google.kindOf(request));
         mock.auths.push(request.headers.get("authorization") ?? "");
-        return mock.healthReply?.(request) ?? mock.google.respond(request);
+        return (await mock.healthReply?.(request)) ?? mock.google.respond(request);
       });
     },
     takeExternal() {

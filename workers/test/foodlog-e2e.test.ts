@@ -97,7 +97,9 @@ const toolCall = (tool: string, code?: string) => ["tool_call", { tool, duration
 const googleError = (status: number, grpc: string) => () =>
   Response.json({ error: { code: status, message: `${BODY_MARK} for ${GOOGLE_ACCESS_TOKEN}`, status: grpc } }, { status });
 
-const storedEntries = () => runInDurableObject(coachStore(env), (_instance, state) => state.storage.sql.exec("SELECT * FROM nutrition_entries ORDER BY name").toArray());
+/** The entries the store holds. Each one also carries the Google account it was created for (`sub`). */
+const storedEntries = () =>
+  runInDurableObject(coachStore(env), (_instance, state) => state.storage.sql.exec("SELECT name, day, created_at FROM nutrition_entries ORDER BY name").toArray());
 
 const WRITE_SCOPE_HINT = `${RECONNECT_HINT} Allow the permission to add nutrition data (googlehealth.nutrition.writeonly), and check that the Google Health API is enabled in the Cloud project.`;
 
@@ -273,13 +275,15 @@ describe("one error of each kind that a write can give, as the client reads it",
     await runInDurableObject(coachStore(env), (_instance, state) => {
       state.storage.sql.exec("DELETE FROM google_account");
     });
-    const expected = { code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT };
-    expect(await fails("nutrition_log_add", FOOD)).toEqual(expected);
-    expect(await fails("nutrition_log_delete", { entry_id: added.entry_id })).toEqual(expected);
+    expect(await fails("nutrition_log_add", FOOD)).toEqual({ code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT });
+    // An entry belongs to the Google account it was created for. With no
+    // account linked, no entry is this server's own: the delete stops there.
+    expect(await fails("nutrition_log_delete", { entry_id: added.entry_id })).toMatchObject({ code: "no_data", message: "this server created no entry with that id" });
     // Nothing is asked of Google, not even a token.
     expect(g.external).toEqual([]);
+    // The row stays, for when its account is linked again.
     expect(await storedEntries()).toMatchObject([{ name: createdName(1) }]);
-    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add", "auth_expired"), toolCall("nutrition_log_delete", "auth_expired")]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add", "auth_expired"), toolCall("nutrition_log_delete", "no_data")]);
   });
 
   it("answers upstream_unavailable for a 503 on an add, once: the entry may exist, and it is not sent again", async () => {

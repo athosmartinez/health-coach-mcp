@@ -11,7 +11,7 @@ import { RequestTokens } from "./googlehealth/tokens";
 import { HealthData, dbCache } from "./healthdata";
 import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
-import { forgetEntry, hasEntry, recordEntry } from "./store/entries";
+import { forgetEntry, hasEntry, linkedAccount, recordEntry } from "./store/entries";
 import { targetInForce } from "./store/memory";
 import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
@@ -123,13 +123,18 @@ const MIGRATIONS: readonly string[] = [
   // 5: the food entries this server created in Google Health (the Go server
   // writes nothing there, so its store has no such table). A row proves that
   // an entry is this server's own: only such an entry is deleted. It holds no
-  // food name and no nutrient value. `name` is the data point name as the
-  // create answered it; `day` is the local day of the entry, and the index
-  // serves the lookup of the entries of a range of days.
+  // food name and no nutrient value. `sub` is the Google account that was
+  // linked when the entry was created: an entry belongs to that account, and
+  // only while that account is the linked one is it this server's own. `name`
+  // is the data point name as the create answered it; `day` is the local day
+  // of the entry, and the index serves the lookup of the entries of a range
+  // of days.
   `CREATE TABLE nutrition_entries (
-    name TEXT PRIMARY KEY,
+    sub TEXT NOT NULL,
+    name TEXT NOT NULL,
     day TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sub, name)
   );
   CREATE INDEX nutrition_entries_by_day ON nutrition_entries (day)`,
 ];
@@ -270,7 +275,12 @@ export class CoachStore extends DurableObject<Env> {
         return {
           api: clientIn(zone),
           entries: {
-            record: (name, day) => recordEntry(db, name, day),
+            owner: () => linkedAccount(db),
+            record: (name, day, owner) => {
+              // An add always has a linked account: the create needs its token.
+              if (owner === undefined) throw new Error("store: no Google account was linked");
+              recordEntry(db, name, day, owner);
+            },
             has: (name) => hasEntry(db, name),
             forget: (name) => forgetEntry(db, name),
           },

@@ -29,6 +29,7 @@ import {
 import { invoke } from "../src/tools/register";
 import { RENEWED_TOKEN, STORED_TOKEN, TODAY, batch, day, googleMock, linkedStore } from "./e2e-helpers";
 import { DiskError, FAKE_CLIENT_ID, FAKE_USER_ID, NOW } from "./healthdata-helpers";
+import { OWNER_SUB } from "./helpers";
 import { ALL_TOOL_NAMES, SAO_PAULO, SCHEMA_HINT, freshStore, objectRpc, objectTool } from "./memory-helpers";
 
 // The clock is fixed at NOW (2026-10-16 10:00 in São Paulo), and every console level is spied on.
@@ -57,14 +58,23 @@ interface FakeOptions {
   remove?: (id: string) => Promise<"deleted" | "gone">;
   failRecord?: boolean;
   failForget?: boolean;
+  /** The linked Google account at the start; null for none. Default: ACCOUNT. */
+  account?: string | null;
 }
+
+/** The `sub` of the linked account of the fake store. It must never reach a result, an error or a log line. */
+const ACCOUNT = "300000000000000000003";
 
 /** The tool bodies over a fake client and a fake store that note every step. */
 function session(options: FakeOptions = {}) {
   const created: NewFoodEntry[] = [];
   const removed: string[] = [];
   const rows = new Map<string, string>();
+  /** The account each row was recorded for. */
+  const owners = new Map<string, string>();
   const steps: string[] = [];
+  /** The account that is linked now: a test can link another one. */
+  const linked: { account: string | undefined } = { account: options.account === null ? undefined : (options.account ?? ACCOUNT) };
   const deps: WriteDeps = {
     api: {
       createNutritionLog: async (entry) => {
@@ -78,20 +88,27 @@ function session(options: FakeOptions = {}) {
         return options.remove ? options.remove(id) : "deleted";
       },
     },
+    // The rules of the store: an entry is recorded for the linked account,
+    // and only the entries of the linked account are known.
     entries: {
-      record: (name, onDay) => {
+      owner: () => linked.account,
+      record: (name, onDay, owner) => {
         steps.push("record");
         if (options.failRecord) throw new DiskError();
+        if (owner === undefined || owner !== linked.account) throw new Error("another account is linked");
         rows.set(name, onDay);
+        owners.set(name, owner);
       },
       has: (name) => {
         steps.push("has");
-        return rows.has(name);
+        return rows.has(name) && owners.get(name) === linked.account;
       },
       forget: (name) => {
         steps.push("forget");
         if (options.failForget) throw new DiskError();
+        if (owners.get(name) !== linked.account) return;
         rows.delete(name);
+        owners.delete(name);
       },
     },
     now: () => options.now ?? NOW,
@@ -111,6 +128,8 @@ function session(options: FakeOptions = {}) {
     created,
     removed,
     rows,
+    owners,
+    linked,
     steps,
     call,
     async ok(name: string, args: unknown): Promise<Record<string, any>> {
@@ -577,6 +596,46 @@ describe("nutrition_log_add", () => {
       expect([...s.rows.keys()]).toEqual([name]);
     });
   });
+
+  describe("the Google account of an entry", () => {
+    it("records the entry for the account that was linked before the create was sent", async () => {
+      const s = session();
+      const out = await s.ok("nutrition_log_add", FOOD);
+      expect([...s.owners]).toEqual([[out.entry_id, ACCOUNT]]);
+      // The account is the server's own business: it is in no result and no log line.
+      expect(JSON.stringify(out)).not.toContain(ACCOUNT);
+      expect(g.logged()).not.toContain(ACCOUNT);
+    });
+
+    it("does not record an entry when another account is linked while Google creates it", async () => {
+      const other = "400000000000000000004";
+      const s = session({
+        create: async () => {
+          // A sign-in of another account, while the create is in flight.
+          s.linked.account = other;
+          return entryName(1);
+        },
+      });
+      // The entry exists in the account that was linked; the store binds no row to the new one.
+      expect(await s.fails("nutrition_log_add", FOOD)).toEqual({
+        code: "internal_error",
+        message: "the entry was created in Google Health, but this server could not record it, so it cannot delete the entry",
+        hint: "do not log the same food again",
+      });
+      expect(s.steps).toEqual(["create", "record"]);
+      expect(s.rows.size).toBe(0);
+      expect(g.logLines("error")).toEqual([["tool_internal_error", { tool: "nutrition_log_add", error_types: "ToolError > Error" }]]);
+      for (const secret of [ACCOUNT, other]) expect(g.logged()).not.toContain(secret);
+    });
+
+    it("does not record an entry for a store without a linked account", async () => {
+      // It cannot happen with the real client, which needs the token of a linked account for the create.
+      const s = session({ account: null });
+      expect(await s.fails("nutrition_log_add", FOOD)).toMatchObject({ code: "internal_error", hint: "do not log the same food again" });
+      expect(s.created).toHaveLength(1);
+      expect(s.rows.size).toBe(0);
+    });
+  });
 });
 
 describe("nutrition_log_delete", () => {
@@ -696,6 +755,27 @@ describe("nutrition_log_delete", () => {
     expect(g.logLines("error")).toEqual([["tool_internal_error", { tool: "nutrition_log_delete", error_types: "ToolError > DiskError" }]]);
     expectNoSecret(g.logged());
   });
+
+  it("answers no_data, without a request, for an entry of a Google account that is not the linked one", async () => {
+    const { s, entryId } = await withEntry();
+    // Another account is linked: its token must never delete an entry of the first account.
+    s.linked.account = "400000000000000000004";
+    expect(await s.fails("nutrition_log_delete", { entry_id: entryId })).toEqual({
+      code: "no_data",
+      message: "this server created no entry with that id",
+      hint: "it deletes only an entry that nutrition_log_add created and that was not deleted yet",
+    });
+    expect(s.removed).toEqual([]);
+    expect(s.steps).toEqual(["has"]);
+    // The row stays.
+    expect([...s.rows.keys()]).toEqual([entryId]);
+
+    // The first account is linked again: the entry is its own again, and the delete happens.
+    s.linked.account = ACCOUNT;
+    expect(await s.ok("nutrition_log_delete", { entry_id: entryId })).toEqual({ entry_id: entryId, deleted: true });
+    expect(s.removed).toEqual(["syn-entry-1"]);
+    expect(s.rows.size).toBe(0);
+  });
 });
 
 // From here on: the object, the real client and store, and the fake API.
@@ -735,8 +815,8 @@ describe("the write tools through /mcp of the object", () => {
         '"energy":{"kcal":431.5},"totalCarbohydrate":{"grams":51.25},"totalFat":{"grams":17.5},' +
         '"nutrients":[{"nutrient":"PROTEIN","quantity":{"grams":23.75}}]}}}]',
     );
-    // The row holds the name, the local day and the creation time: no food name, no value.
-    expect(await storedEntries(stub)).toEqual([{ name: createdName(1), day: TODAY, created_at: "2026-10-16T13:00:00.000000000Z" }]);
+    // The row holds the linked Google account, the name, the local day and the creation time: no food name, no value.
+    expect(await storedEntries(stub)).toEqual([{ sub: OWNER_SUB, name: createdName(1), day: TODAY, created_at: "2026-10-16T13:00:00.000000000Z" }]);
     expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add")]);
     for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
   });

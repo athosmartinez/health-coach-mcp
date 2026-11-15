@@ -27,11 +27,21 @@ export interface FoodLogApi {
   deleteNutritionLog(id: string): Promise<"deleted" | "gone">;
 }
 
-/** The entries this server created, as the store keeps them. */
+/**
+ * The entries this server created, as the store keeps them. An entry belongs
+ * to the Google account that was linked when it was created, and the store
+ * knows only the entries of the account that is linked now.
+ */
 export interface Entries {
-  /** Records the entry that Google just created. */
-  record(name: string, day: LocalDate): void;
-  /** Whether this server created an entry with exactly this name. */
+  /** The Google account that is linked now, or undefined when none is. Never shown and never logged. */
+  owner(): string | undefined;
+  /**
+   * Records the entry that Google just created. `owner` is the account that
+   * was linked before the create was sent: when it is not the linked account
+   * any more, or was none, the entry is not recorded and this throws.
+   */
+  record(name: string, day: LocalDate, owner: string | undefined): void;
+  /** Whether this server created an entry with exactly this name for the linked account. */
   has(name: string): boolean;
   forget(name: string): void;
 }
@@ -231,12 +241,15 @@ const NUTRITION_LOG_ADD = writeTool(
     if (protein !== undefined) entry.proteinGrams = protein;
     if (carbs !== undefined) entry.carbGrams = carbs;
     if (fat !== undefined) entry.fatGrams = fat;
+    // The entry will belong to the account that is linked now. Without a link
+    // the create answers auth_expired, and nothing is sent.
+    const owner = deps.entries.owner();
     const entryId = await deps.api.createNutritionLog(entry);
 
     // Google holds the entry from here on. Without its row the server does
     // not own it: say so, instead of an error that reads as "nothing happened".
     try {
-      deps.entries.record(entryId, day);
+      deps.entries.record(entryId, day, owner);
     } catch (cause) {
       throw new ToolError("internal_error", NOT_RECORDED, "do not log the same food again", { cause });
     }
@@ -284,7 +297,9 @@ const NUTRITION_LOG_DELETE = writeTool(
     }
     // Only an entry of this server is deleted, and the check comes before any
     // request: Google's documentation does not prove that it would refuse the
-    // delete of an entry another app wrote.
+    // delete of an entry another app wrote. An entry that was created for
+    // another Google account than the linked one is not this server's own
+    // now: the delete would go out with the wrong account's token.
     if (!deps.entries.has(entryId)) {
       throw new ToolError(
         "no_data",

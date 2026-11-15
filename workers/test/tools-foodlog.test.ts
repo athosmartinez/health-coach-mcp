@@ -823,6 +823,112 @@ describe("nutrition_log_delete", () => {
   });
 });
 
+// The arguments of a write are its payload. The text of the schema validator
+// names an unknown property by its key and can quote a value, so the two write
+// tools word their own schema errors: the name of a declared property and the
+// rule that failed, never a key or a value that the client sent.
+describe("a schema error of a write tool", () => {
+  const SCHEMA_PREFIX = "the arguments do not match the tool's input schema: ";
+  const UNKNOWN = `${SCHEMA_PREFIX}the arguments hold a property that the tool does not have`;
+  const OWN = entryName(1);
+
+  /** The whole error, as the client reads it, and the log of the call. */
+  async function schemaError(tool: string, args: unknown): Promise<string> {
+    const s = session();
+    g.clearLogs();
+    const result = await s.call(tool, args);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content).toHaveLength(1);
+    const [block] = result.content;
+    const text = block?.type === "text" ? block.text : "";
+    const wire = JSON.parse(text) as WireError;
+    // The code, the hint and the form of every schema error stay.
+    expect(wire.code).toBe("invalid_input");
+    expect(wire.hint).toBe(SCHEMA_HINT);
+    expect(wire.message.startsWith(SCHEMA_PREFIX)).toBe(true);
+    expect(new TextEncoder().encode(wire.message).length).toBeLessThanOrEqual(500);
+    // Nothing was sent, and nothing of the arguments is in the error or in a log line.
+    expect(s.steps).toEqual([]);
+    expectNoSecret(text);
+    expectNoSecret(g.logged());
+    expect(g.logLines("log")).toEqual([toolCall(tool, "invalid_input")]);
+    return wire.message;
+  }
+
+  it("does not repeat a food name that was sent as the key of a property", async () => {
+    expect(await schemaError("nutrition_log_add", { name: "X", meal_type: "LUNCH", kcal: 1, "Feijoada completa": true })).toBe(UNKNOWN);
+    expect(await schemaError("nutrition_log_add", { ...FOOD, "Feijoada completa 431.5": 23.75 })).toBe(UNKNOWN);
+    // Also when another rule fails in the same call: the unknown property is named first, without its key.
+    expect(await schemaError("nutrition_log_add", { kcal: "431.5", "Feijoada completa": { kcal: 431.5 } })).toBe(UNKNOWN);
+  });
+
+  it("does not repeat an entry id that was sent as the key of a property", async () => {
+    expect(await schemaError("nutrition_log_delete", { entry_id: OWN, [OWN]: true })).toBe(UNKNOWN);
+    expect(await schemaError("nutrition_log_delete", { [OWN]: OWN })).toBe(UNKNOWN);
+    expect(await schemaError("nutrition_log_add", { ...FOOD, [OWN]: null })).toBe(UNKNOWN);
+  });
+
+  it.each([
+    ["a kcal that is a text of a number", "nutrition_log_add", { kcal: "431.5" }, "kcal must be a number"],
+    ["a kcal that is a list of numbers", "nutrition_log_add", { kcal: [431.5, 23.75] }, "kcal must be a number"],
+    ["a kcal that is an object", "nutrition_log_add", { kcal: { value: 431.5 } }, "kcal must be a number"],
+    ["an infinite kcal", "nutrition_log_add", { kcal: Number.POSITIVE_INFINITY }, "kcal must be a finite number"],
+    ["a protein that is a text", "nutrition_log_add", { protein_g: "23.75" }, "protein_g must be a number or null"],
+    ["a protein that is an object with a food name", "nutrition_log_add", { protein_g: { "Feijoada completa": 23.75 } }, "protein_g must be a number or null"],
+    ["a fat that is a boolean", "nutrition_log_add", { fat_g: true }, "fat_g must be a number or null"],
+    ["a name that is a number", "nutrition_log_add", { name: 431.5 }, "name must be a text"],
+    ["a name that is a list with the food", "nutrition_log_add", { name: ["Feijoada completa"] }, "name must be a text"],
+    ["a meal type that is the food name", "nutrition_log_add", { meal_type: "Feijoada completa" }, "meal_type must be one of BREAKFAST, LUNCH, DINNER, SNACK"],
+    ["a meal type that is a number", "nutrition_log_add", { meal_type: 431.5 }, "meal_type must be a text"],
+    ["a date that is the food name", "nutrition_log_add", { date: "Feijoada completa" }, "date must be a date, YYYY-MM-DD"],
+    ["a date that is a number", "nutrition_log_add", { date: 431.5 }, "date must be a text or null"],
+    ["a time that is the food name", "nutrition_log_add", { time: "Feijoada completa" }, "time does not have the format that its description gives"],
+    ["a time that is a number", "nutrition_log_add", { time: 17.5 }, "time must be a text or null"],
+    ["an entry id that is a number", "nutrition_log_delete", { entry_id: 431.5 }, "entry_id must be a text"],
+    ["an entry id that is a list of ids", "nutrition_log_delete", { entry_id: [entryName(1)] }, "entry_id must be a text"],
+    ["an entry id longer than the cap", "nutrition_log_delete", { entry_id: `${entryName(1)}${"-syn-entry".repeat(30)}` }, "entry_id must be at most 256 characters"],
+  ] as [string, string, Record<string, unknown>, string][])("names the property and its rule for %s, and never the value", async (_name, tool, change, message) => {
+    const base = tool === "nutrition_log_add" ? FOOD : {};
+    expect(await schemaError(tool, { ...base, ...change })).toBe(`${SCHEMA_PREFIX}${message}`);
+  });
+
+  it("names a property that is missing", async () => {
+    expect(await schemaError("nutrition_log_add", { name: "Feijoada completa", meal_type: "LUNCH" })).toBe(`${SCHEMA_PREFIX}kcal is required`);
+    expect(await schemaError("nutrition_log_add", { kcal: 431.5 })).toBe(`${SCHEMA_PREFIX}name is required`);
+    expect(await schemaError("nutrition_log_delete", {})).toBe(`${SCHEMA_PREFIX}entry_id is required`);
+  });
+
+  it("has one text for arguments that are not an object", async () => {
+    for (const args of ["Feijoada completa", 431.5, ["Feijoada completa"], null]) {
+      expect(await schemaError("nutrition_log_add", args)).toBe(`${SCHEMA_PREFIX}the arguments must be an object`);
+    }
+  });
+
+  it("is the same through /mcp of the object: the error and the log hold nothing of the call", async () => {
+    const stub = await linkedStore();
+    const outcome = await objectTool(stub, "nutrition_log_add", { name: "X", meal_type: "LUNCH", kcal: 1, "Feijoada completa 431.5": true });
+    expect(outcome).toEqual({ ok: false, error: { code: "invalid_input", message: UNKNOWN, hint: SCHEMA_HINT } });
+    const withId = await objectTool(stub, "nutrition_log_delete", { entry_id: createdName(1), [createdName(1)]: true });
+    expect(withId).toEqual({ ok: false, error: { code: "invalid_input", message: UNKNOWN, hint: SCHEMA_HINT } });
+    expect(g.external).toEqual([]);
+    expect(g.logLines("log")).toEqual([toolCall("nutrition_log_add", "invalid_input"), toolCall("nutrition_log_delete", "invalid_input")]);
+    for (const level of ["info", "warn", "error", "debug"] as const) expect(g.logLines(level), level).toEqual([]);
+    expectNoSecret(g.logged());
+  });
+
+  it("leaves the schema errors of the other tools as they were: they name the property", async () => {
+    const stub = await linkedStore();
+    // A tool of the Go server keeps the text of the validator, which names the unknown key.
+    const outcome = await objectTool(stub, "nutrition_day", { date: TODAY, "zz-key-55c1": 1 });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "invalid_input", hint: SCHEMA_HINT } });
+    if (!outcome.ok) {
+      expect(outcome.error.message).toContain("zz-key-55c1");
+      expect(outcome.error.message).not.toBe(UNKNOWN);
+    }
+  });
+});
+
 // From here on: the object, the real client and store, and the fake API.
 
 const storedEntries = (stub: DurableObjectStub<CoachStore>) =>

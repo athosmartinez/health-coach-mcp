@@ -64,7 +64,9 @@ interface WriteTool {
   body: Body;
 }
 
-const writeTool = (definition: ToolDefinition, body: Body): WriteTool => ({ tool: defineTool(definition), body });
+// The arguments of a write are the payload: a schema error must not repeat a
+// food name, a value or an entry id, also not one that was sent as a key.
+const writeTool = (definition: ToolDefinition, body: Body): WriteTool => ({ tool: defineTool(definition, { echo: false }), body });
 
 // --- bounds ---
 

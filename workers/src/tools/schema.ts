@@ -153,6 +153,79 @@ export function nonFiniteNumber(args: unknown): string | undefined {
 const DATE_PATTERNS = new Set([DATE_PATTERN, `^(?:${DATE_PATTERN.slice(1, -1)})?$`]);
 
 /**
+ * The text for a property that the schema does not declare. Its name is the
+ * client's own text (it can be a food name or an entry id), so it is never
+ * repeated.
+ */
+export const UNKNOWN_PROPERTY = "the arguments hold a property that the tool does not have";
+
+/** The text for arguments that fail a rule {@link plainProblem} does not name. */
+export const NOT_MATCHED = "a value does not match its rule";
+
+const TYPE_WORDS: Readonly<Record<string, string>> = {
+  string: "a text",
+  number: "a number",
+  integer: "a whole number",
+  boolean: "true or false",
+  object: "an object",
+  array: "a list",
+};
+
+function jsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function typeProblem(name: string, schema: JsonSchema, value: unknown): string | undefined {
+  if (schema.type === undefined) return undefined;
+  const allowed = Array.isArray(schema.type) ? schema.type : [schema.type];
+  const actual = jsonType(value);
+  const fits = allowed.some((type) => type === actual || (type === "integer" && actual === "number" && Number.isInteger(value)));
+  if (fits) return undefined;
+  const words = allowed.filter((type) => type !== "null").map((type) => TYPE_WORDS[type] ?? type);
+  if (allowed.includes("null")) words.push("null");
+  return `${name} must be ${words.join(" or ")}`;
+}
+
+/**
+ * Why `args` fail a flat input schema, in words that hold nothing the client
+ * sent: the name of a property that the schema declares and the rule that
+ * failed, never a key or a value of the arguments. Undefined when it finds no
+ * problem.
+ *
+ * It reads the keywords a flat schema uses: `required`, a closed object
+ * (`additionalProperties: false`), `type`, `enum`, `pattern` and `maxLength`
+ * of each property. It is not a full validator: the caller still runs one
+ * after it, and answers {@link NOT_MATCHED} for what only that one finds.
+ */
+export function plainProblem(schema: JsonSchema, args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return "the arguments must be an object";
+  const properties = schema.properties ?? {};
+  const given = args as Record<string, unknown>;
+  if (schema.additionalProperties === false && Object.keys(given).some((key) => !Object.hasOwn(properties, key))) return UNKNOWN_PROPERTY;
+  for (const name of schema.required ?? []) {
+    if (!Object.hasOwn(given, name) || given[name] === undefined) return `${name} is required`;
+  }
+  for (const [name, property] of Object.entries(properties)) {
+    const value = Object.hasOwn(given, name) ? given[name] : undefined;
+    if (value === undefined) continue;
+    const wrongType = typeProblem(name, property, value);
+    if (wrongType !== undefined) return wrongType;
+    if (typeof value === "number" && !Number.isFinite(value)) return `${name} must be a finite number`;
+    if (property.enum && !property.enum.includes(value as string | null)) {
+      return `${name} must be one of ${property.enum.filter((one) => one !== null && one !== "").join(", ")}`;
+    }
+    if (typeof value !== "string") continue;
+    if (property.maxLength !== undefined && [...value].length > property.maxLength) return `${name} must be at most ${property.maxLength} characters`;
+    if (property.pattern !== undefined && !new RegExp(property.pattern, "u").test(value)) {
+      return DATE_PATTERNS.has(property.pattern) ? `${name} must be a date, YYYY-MM-DD` : `${name} does not have the format that its description gives`;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Finds a date in `value` that matches the schema's pattern but is not a real
  * calendar day (2026-02-30). Returns where it is, without echoing the value,
  * or undefined when every date is real. "" is "not set" and passes.

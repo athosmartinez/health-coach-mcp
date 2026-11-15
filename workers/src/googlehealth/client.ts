@@ -675,11 +675,14 @@ const WRITE_SCOPE_HINT =
 /**
  * The hint of a create whose outcome is unknown. An entry that this server
  * has no ID for is not one of its own: nutrition_day reports it as food from
- * another source.
+ * another source. That report is one flag, not a count. So on a day that
+ * already had food from another source, nutrition_day cannot show whether
+ * the entry was added: only the food log itself, in the Fitbit app, can.
  */
 export const MAY_EXIST_HINT =
   "the entry may exist: check the day with nutrition_day before a new try " +
-  "(an entry this server has no id for shows there as food from another source)";
+  "(an entry this server has no id for shows there as food from another source; " +
+  "when the day already had food from another source, check the food log in the Fitbit app instead)";
 
 /**
  * The hint of an unavailable answer, by kind of request. A create that ends

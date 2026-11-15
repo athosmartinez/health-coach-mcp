@@ -291,7 +291,7 @@ describe("one error of each kind that a write can give, as the client reads it",
     g.healthReply = googleError(503, "UNAVAILABLE");
     expect(await fails("nutrition_log_add", FOOD)).toEqual({ code: "upstream_unavailable", message: "Google Health API is unavailable", hint: MAY_EXIST_HINT });
     expect(MAY_EXIST_HINT).toBe(
-      "the entry may exist: check the day with nutrition_day before a new try (an entry this server has no id for shows there as food from another source)",
+      "the entry may exist: check the day with nutrition_day before a new try (an entry this server has no id for shows there as food from another source; when the day already had food from another source, check the food log in the Fitbit app instead)",
     );
     // One attempt, no wait: a second create could log the food twice.
     expect(g.takeExternal()).toEqual({ total: 1, "create nutrition-log": 1 });

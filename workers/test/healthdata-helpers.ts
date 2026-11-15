@@ -315,6 +315,12 @@ export class FakeGoogle {
   loose = false;
   /** When set, every request gets this answer. */
   fail: (() => Response) | undefined;
+  /**
+   * The lists of these data types come back in two pages when they hold two
+   * records or more: the API may return fewer records than the page size asks
+   * for. It stands for a dense account without a large fixture.
+   */
+  twoPages = new Set<DataType>();
   private calls: string[] = [];
   private sent: string[] = [];
 
@@ -419,7 +425,9 @@ export class FakeGoogle {
         return this.loose || recordOn === "" || (recordOn >= from && recordOn <= to);
       });
     }
-    return this.page("dataPoints", items, Number(query.get("pageSize")), query.get("pageToken"));
+    const asked = Number(query.get("pageSize"));
+    const size = this.twoPages.has(dataType as DataType) && items.length >= 2 ? Math.min(asked, Math.ceil(items.length / 2)) : asked;
+    return this.page("dataPoints", items, size, query.get("pageToken"));
   }
 }
 

@@ -14,7 +14,6 @@ import {
   KEY_HRV,
   KEY_RESTING_HR,
   KEY_STEPS,
-  KEY_TOTAL_CALORIES,
   KEY_WEIGHT,
   MAX_RANGE_DAYS,
   type Nutrition,
@@ -189,10 +188,9 @@ const RECOVERY_KEYS: Record<"resting_hr" | "hrv" | "sleep_asleep_min", RecoveryK
   sleep_asleep_min: KEY_ASLEEP,
 };
 
-const ACTIVITY_KEYS: Record<"steps" | "azm" | "total_calories", ActivityKey> = {
+const ACTIVITY_KEYS: Record<"steps" | "azm", ActivityKey> = {
   steps: KEY_STEPS,
   azm: KEY_AZM,
-  total_calories: KEY_TOTAL_CALORIES,
 };
 
 /**
@@ -203,7 +201,8 @@ const ACTIVITY_KEYS: Record<"steps" | "azm" | "total_calories", ActivityKey> = {
  *   - hrv, sleep_asleep_min: the nights (sleep and HRV; a night is cached as a whole);
  *   - steps: the steps rollup;
  *   - azm: the zone-minutes rollup, and the band's steps for the days without a row;
- *   - total_calories: the total-calories rollup, and what tells that the band was worn;
+ *   - total_calories: what tells that the band was worn (as azm), then the
+ *     total-calories rollup of the worn days alone;
  *   - kcal_in, protein_g: the food log (see `food`).
  */
 async function daily(deps: CoachDeps, metric: SeriesMetric, from: LocalDate, to: LocalDate, flags: FlagSet, sources: SourceSet): Promise<DailySeries> {
@@ -225,22 +224,37 @@ async function daily(deps: CoachDeps, metric: SeriesMetric, from: LocalDate, to:
       return plain(rec.baselineSeries(RECOVERY_KEYS[metric]));
     }
     case "steps":
-    case "azm":
-    case "total_calories": {
-      const act = await deps.health.activity(from, to, { values: metric === "total_calories" ? ["total_calories", "worn"] : [metric] });
+    case "azm": {
+      const act = await deps.health.activity(from, to, { values: [metric] });
       const today = todayOf(deps);
       flags.add(FLAG_PARTIAL_DAY, to >= today);
       flags.add(FLAG_UNREADABLE_RECORDS, act.skipped > 0);
       const series = plain(act.baselineSeries(ACTIVITY_KEYS[metric]));
       for (const point of series.points) {
-        const day = act.days.get(point.date);
-        if (point.value === null && point.date >= today) {
+        if (point.value === null && point.date >= today) series.reason.set(point.date, REASON_PARTIAL_DAY);
+      }
+      return series;
+    }
+    case "total_calories": {
+      // Two steps (burnOf): the days the band was worn, then their totals. The
+      // total of a day without the band is mostly a resting estimate and is
+      // never shown, so it is not read.
+      const days: LocalDate[] = [];
+      for (let day = from; day <= to; day = plusDays(day, 1)) days.push(day);
+      const burn = await burnOf(deps, days);
+      const today = todayOf(deps);
+      flags.add(FLAG_PARTIAL_DAY, to >= today);
+      flags.add(FLAG_UNREADABLE_RECORDS, burn.skipped > 0);
+      const series = plain(days.map((date): Point => ({ date, value: null })));
+      for (const point of series.points) {
+        if (point.date >= today) {
+          // Today's total still grows.
           series.reason.set(point.date, REASON_PARTIAL_DAY);
-        } else if (metric === "total_calories" && point.value !== null && day && !day.worn) {
-          // Without the band the day's total is mostly a resting estimate.
-          point.value = null;
+        } else if (!burn.worn.has(point.date)) {
           series.reason.set(point.date, REASON_NOT_WORN);
           flags.add(FLAG_NOT_WORN, true);
+        } else {
+          point.value = burn.kcal.get(point.date) ?? null;
         }
       }
       return series;

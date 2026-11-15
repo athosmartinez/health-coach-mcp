@@ -696,6 +696,116 @@ describe("request counts: activity", () => {
     }),
   );
 
+  describe("the days option", () => {
+    const [first, last] = ["2026-09-01", "2026-09-20"];
+
+    it("reads only the listed days, in windows planned over them", () =>
+      inStore(async (db) => {
+        fill(h.google, first, last);
+        const data = newData(db);
+        // Unsorted, with a day twice: the list is a set of days.
+        const days = ["2026-09-18", "2026-09-02", "2026-09-05", "2026-09-02"];
+        const a = await data.activity(first, last, { values: ["total_calories"], days });
+        // One 14-day window from 09-02 holds 09-02 and 09-05; 09-18 starts the next one.
+        expect(h.google.takeCalls()).toEqual(["rollup total-calories 2026-09-02..2026-09-05", "rollup total-calories 2026-09-18..2026-09-18"]);
+        // The rows of 09-03 and 09-04 came back in the first page and were dropped.
+        expect([...a.days.keys()]).toEqual(["2026-09-02", "2026-09-05", "2026-09-18"]);
+        expect([...a.days.values()].map((day) => day.totalKcal)).toEqual([2201, 2204, 2217]);
+        // The series covers the range: a day that was not asked for is null.
+        expect(a.series(KEY_TOTAL_CALORIES).filter((point) => point.value !== null).map((point) => point.date)).toEqual([
+          "2026-09-02",
+          "2026-09-05",
+          "2026-09-18",
+        ]);
+        expect(a.series(KEY_TOTAL_CALORIES)).toHaveLength(20);
+      }));
+
+    it("reads every value of the listed days, and caches only them", () =>
+      inStore(async (db) => {
+        fill(h.google, first, last);
+        const data = newData(db);
+        const some = await data.activity(first, last, { days: ["2026-09-03", "2026-09-04", "2026-09-10"] });
+        expect(h.google.takeCalls()).toEqual([
+          "rollup steps 2026-09-03..2026-09-10",
+          "rollup active-zone-minutes 2026-09-03..2026-09-10",
+          "rollup total-calories 2026-09-03..2026-09-10",
+        ]);
+        expect([...some.days]).toEqual([
+          ["2026-09-03", { steps: 6002, azm: 16, totalKcal: 2202, worn: true, partial: false }],
+          ["2026-09-04", { steps: 6003, azm: 17, totalKcal: 2203, worn: true, partial: false }],
+          ["2026-09-10", { steps: 6009, azm: 16, totalKcal: 2209, worn: true, partial: false }],
+        ]);
+        for (const key of ACTIVITY_KEYS) {
+          expect(metricRange(db, key, first, last, ALGO_VERSION).map((row) => row.date), key).toEqual(["2026-09-03", "2026-09-04", "2026-09-10"]);
+        }
+        // The listed days now come from the cache; a read of the whole range fetches the others.
+        h.google.takeRequests();
+        await data.activity(first, last, { days: ["2026-09-10", "2026-09-03"] });
+        expect(h.google.takeRequests()).toEqual({ total: 0 });
+        const all = await data.activity(first, last);
+        expect(h.google.takeCalls()).toEqual([
+          "rollup steps 2026-09-01..2026-09-20",
+          "rollup active-zone-minutes 2026-09-01..2026-09-20",
+          "rollup total-calories 2026-09-01..2026-09-14",
+          "rollup total-calories 2026-09-15..2026-09-20",
+        ]);
+        expect([...all.days]).toEqual([...(await inStore((other) => newData(other).activity(first, last))).days]);
+      }));
+
+    it("checks the band only for the listed days without a zone-minutes row", () =>
+      inStore(async (db) => {
+        // No zone-minutes row on 09-03, 09-07 and 09-11: the band counted steps there.
+        fill(h.google, first, last, { noZoneMinutes: (index) => index % 4 === 2 && index < 12 });
+        const a = await newData(db).activity(first, last, { values: ["worn"], days: ["2026-09-06", "2026-09-07", "2026-09-08"] });
+        expect(h.google.takeCalls()).toEqual(["rollup active-zone-minutes 2026-09-06..2026-09-08", "steps 2026-09-07..2026-09-07"]);
+        expect([...a.days].map(([day, value]) => [day, value.azm, value.worn])).toEqual([
+          ["2026-09-06", 19, true],
+          ["2026-09-07", 0, true],
+          ["2026-09-08", 14, true],
+        ]);
+      }));
+
+    it("makes no request for an empty list", () =>
+      inStore(async (db) => {
+        fill(h.google, first, last);
+        const a = await newData(db).activity(first, last, { days: [] });
+        expect(h.google.takeRequests()).toEqual({ total: 0 });
+        expect(a.days.size).toBe(0);
+        expect(a.series(KEY_STEPS).every((point) => point.value === null)).toBe(true);
+      }));
+
+    it("refuses a day outside the range, before any request", () =>
+      inStore(async (db) => {
+        fill(h.google, first, last);
+        const data = newData(db);
+        for (const day of ["2026-08-31", "2026-09-21", "2026-09-31", "soon", ""]) {
+          await expect(data.activity(first, last, { days: ["2026-09-05", day] }), day).rejects.toThrow("healthdata: a day to read is outside the range");
+        }
+        // The range itself is still checked.
+        await expect(data.activity(last, first, { days: [] })).rejects.toThrow();
+        expect(h.google.takeRequests()).toEqual({ total: 0 });
+      }));
+  });
+
+  it("keeps a day the band recorded in a read of worn alone, also when a dropped row hides its zone minutes", () =>
+    inStore(async (db) => {
+      // The band counted steps on 09-03 without zone minutes.
+      fill(h.google, "2026-09-01", "2026-09-07", { noZoneMinutes: (index) => index === 2 });
+      // A zone-minutes row of the same run cannot be read: the run gets no 0.
+      h.google.addRollup("active-zone-minutes", { civilStartTime: { date: { year: 2026, month: 9, day: 5 } }, activeZoneMinutes: {} });
+      const data = newData(db);
+      const band = await data.activity("2026-09-01", "2026-09-07", { values: ["worn"] });
+      expect(band.skipped).toBe(1);
+      // The day has no value this read asked for, but it is a day with the band.
+      expect(band.days.get("2026-09-03")).toEqual({ steps: null, azm: null, totalKcal: null, worn: true, partial: false });
+      expect(band.days.size).toBe(7);
+      // The run is not cached, as in the Go server.
+      expect(metricRange(db, KEY_AZM, "2026-09-01", "2026-09-07", ALGO_VERSION)).toEqual([]);
+      // The read of every value is the Go server's: the day shows its totals.
+      const full = await data.activity("2026-09-01", "2026-09-07");
+      expect(full.days.get("2026-09-03")).toEqual({ steps: 6002, azm: null, totalKcal: 2202, worn: true, partial: false });
+    }));
+
   it("leaves the finished windows cached when the budget runs out, so the same call then needs fewer requests", () =>
     inStore(async (db) => {
       fill(h.google, FROM, TO);

@@ -168,10 +168,11 @@ async function batch(target: McpTarget, calls: [string, Record<string, unknown>]
  * Synthetic data for today and the `back` days before it: each day a night of
  * 480 minutes in bed with 97 HRV samples, a resting heart rate, and the daily
  * totals. Every fifth day has no zone-minutes row but step records of the
- * band. A weigh-in with body fat every third day. A day that `offWrist` picks
- * has no band data: no zone-minutes row and no step record.
+ * band (`bandStepRecords` of them). A weigh-in with body fat every third day.
+ * A day that `offWrist` picks has no band data: no zone-minutes row and no
+ * step record.
  */
-function daysOfData(back: number, offWrist: (i: number) => boolean = () => false): void {
+function daysOfData(back: number, offWrist: (i: number) => boolean = () => false, bandStepRecords = 1): void {
   for (let i = back; i >= 0; i--) {
     const [end, start] = [day(-i), day(-i - 1)];
     google.add("sleep", sleepRec(at(start, 23, 0), at(end, 7, 0), { deep: 60 }));
@@ -181,7 +182,7 @@ function daysOfData(back: number, offWrist: (i: number) => boolean = () => false
     google.addRollup("total-calories", kcalRollup(end, 2400 + (i % 100)));
     // A day off the wrist has neither a zone-minutes row nor step records of the band.
     if (!offWrist(i)) {
-      if (i % 5 === 3) google.add("steps", stepRec(end, "FITBIT"));
+      if (i % 5 === 3) for (let n = 0; n < bandStepRecords; n++) google.add("steps", stepRec(end, "FITBIT"));
       else google.addRollup("active-zone-minutes", azmRollup(end, 20, 5, 0));
     }
     if (i % 3 === 0) {
@@ -492,6 +493,24 @@ describe("the coach tools over /mcp, inside the object", () => {
       { date: "2026-10-15", value: null, n_days: 0, complete: true },
     ]);
     expect(kcal.sources).toEqual(["FITBIT"]);
+
+    // Total calories of the days the band was worn. 2026-10-13 has no
+    // zone-minutes row, but the band counted steps: it is a worn day.
+    const burned = await ok(stub, "metric_series", { metric: "total_calories", from: day(-3), to: TODAY });
+    expect(burned.data.points).toEqual([
+      { date: "2026-10-13", value: 2403, n_days: 1, complete: true },
+      { date: "2026-10-14", value: 2402, n_days: 1, complete: true },
+      { date: "2026-10-15", value: 2401, n_days: 1, complete: true },
+      { date: TODAY, value: null, n_days: 0, complete: true, reason: "partial_day" },
+    ]);
+    expect(burned.quality_flags).toEqual(["partial_day"]);
+    // A range before the data starts: no band data, so no total is read or shown.
+    const before = await ok(stub, "metric_series", { metric: "total_calories", from: day(-40), to: day(-39) });
+    expect(before.data.points).toEqual([
+      { date: "2026-09-06", value: null, n_days: 0, complete: true, reason: "band_not_worn" },
+      { date: "2026-09-07", value: null, n_days: 0, complete: true, reason: "band_not_worn" },
+    ]);
+    expect(before.quality_flags).toEqual(["band_not_worn"]);
 
     expect(await fails(stub, "metric_series", { metric: "steps", from: day(-200), to: TODAY })).toEqual({
       code: "invalid_input",
@@ -839,20 +858,32 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     expect(takeExternal().total, "cold, the week before").toBe(11);
   });
 
-  // A day without band data has no zone-minutes value, so no call can cache
-  // it: every call reads it again. These years are harder than the one above.
-  it.each<[string, (i: number) => boolean, Record<string, [number[], number]>]>([
-    // Each later call reads the off-wrist days again: their zone-minutes
-    // rollups and step lists, and for total_calories their 14-day windows.
-    // kcal_in reads total calories only for the days with the band.
-    ["a day off the wrist in every week", (i) => i % 7 === 6, { total_calories: [[45], 43], azm: [[18], 17], kcal_in: [[45, 43], 43] }],
-    // total_calories takes the whole budget on every call. kcal_in has no
-    // day with the band, so it reads no total calories: the food log 1, the
-    // zone-minutes rollup 5 and the steps lists 13.
-    ["no band data at all", () => true, { total_calories: [[45], 45], azm: [[18], 18], kcal_in: [[19], 19] }],
-  ])("metric_series over 366 days with %s", async (_name, offWrist, expected) => {
-    daysOfData(365, offWrist);
+  // Harder years than the one below. A day without band data has no
+  // zone-minutes value, so no call can cache it: every call asks again if the
+  // band was worn on it (the zone-minutes rollup and the steps lists). Its
+  // total calories are never read. In a dense account a 31-day list of the
+  // band's steps has more than one page: here every such list has two.
+  // Each metric: the Google requests of each call until success, then the
+  // requests of one more call on the cache they filled.
+  it.each<[string, (i: number) => boolean, boolean, Record<string, [number[], number]>]>([
+    // Later calls ask "worn" again for the off-wrist days (17) and read the live days' totals (1).
+    ["a day off the wrist in every week", (i) => i % 7 === 6, false, { total_calories: [[45], 18], azm: [[18], 17], kcal_in: [[45, 18], 18] }],
+    // No day with the band: no total-calories request at all. The
+    // zone-minutes rollup 5 and the steps lists 13, and for kcal_in the food log 1.
+    ["no band data at all", () => true, false, { total_calories: [[18], 18], azm: [[18], 18], kcal_in: [[19], 19] }],
+    // "Worn" costs 5 + 26. The first call ends with the budget error inside
+    // the total-calories windows, and leaves the finished ones cached.
+    ["two pages in every list of the band's steps", () => false, true, { total_calories: [[45, 14], 2], azm: [[31], 1], kcal_in: [[45, 16], 3] }],
+    [
+      "a day off the wrist in every week and two pages in every steps list",
+      (i) => i % 7 === 6,
+      true,
+      { total_calories: [[45, 42], 30], azm: [[31], 29], kcal_in: [[45, 43], 30] },
+    ],
+  ])("metric_series over 366 days with %s", async (_name, offWrist, twoPages, expected) => {
+    daysOfData(365, offWrist, twoPages ? 2 : 1);
     foodDays(365);
+    if (twoPages) google.twoPages.add("steps");
     const measured: Record<string, [number[], number]> = {};
     for (const metric of Object.keys(expected)) {
       const stub = await linkedStore();
@@ -884,7 +915,8 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     ["steps", [5], 5],
     // zone-minutes rollup 5, the band's steps for the days without a row 13
     ["azm", [18], 1],
-    // total-calories rollup 27 (14 days each), zone minutes 5, the band's steps 13: the whole budget
+    // "Worn" first (zone minutes 5, the band's steps 13), then the
+    // total-calories rollup of the worn days 27 (14 days each): the whole budget.
     ["total_calories", [45], 2],
     // No kcal target: the food log 1, then the 45 of total_calories do not fit.
     // The first call ends with the budget error and leaves its windows cached.

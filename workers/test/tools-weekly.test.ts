@@ -460,7 +460,7 @@ describe("weekly_report", () => {
       "body 2026-07-14..2026-10-11",
       "nutrition 2026-10-05..2026-10-11",
       "exercises 2026-10-05..2026-10-11 maxHR=false",
-      "activity 2026-10-05..2026-10-11 values=total_calories",
+      "activity 2026-10-05..2026-10-11 values=total_calories days=2026-10-05..2026-10-11",
     ]);
   });
 
@@ -468,7 +468,7 @@ describe("weekly_report", () => {
     const h = weeklyHealth();
     // A kcal target from Thursday: only Monday to Wednesday need the burn.
     const out = await closedWeek(h, fakeTargets({ effective_from: "2026-10-08", kcal: 2000 }));
-    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-07 values=total_calories");
+    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-07 values=total_calories days=2026-10-05..2026-10-07");
     expect(out.data.adherence.kcal_within_10pct).toMatchObject({
       days_counted: 2,
       days_left_out: { no_target: 3, other_source_food: 1, log_likely_incomplete: 1 },
@@ -482,12 +482,16 @@ describe("weekly_report", () => {
     const leftOut = async () => (await coachSession(h).ok("weekly_report", { week_end: WEEK_END })).data.adherence.kcal_within_10pct.days_left_out;
     // Under half the 2600 kcal burned.
     expect(await leftOut()).toEqual({ log_likely_incomplete: 1, no_target: 5, other_source_food: 1 });
-    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-11 values=total_calories");
+    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-11 values=total_calories days=2026-10-05..2026-10-11");
     // Without the band the total is mostly a resting estimate: it is no
     // reference, and it is not read.
     h.activityDays.set("2026-10-11", activityDay({ steps: 300, azm: 0, totalKcal: 2600, worn: false }));
     expect(await leftOut()).toEqual({ no_target: 6, other_source_food: 1 });
-    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-10 values=total_calories");
+    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-10 values=total_calories days=2026-10-05..2026-10-10");
+    // A day off the wrist in the middle of the week is left out of the read too.
+    h.activityDays.set("2026-10-07", activityDay({ steps: 300, totalKcal: 1700, worn: false }));
+    expect(await leftOut()).toEqual({ no_target: 6, other_source_food: 1 });
+    expect(h.calls.at(-1)).toBe("activity 2026-10-05..2026-10-10 values=total_calories days=2026-10-05..2026-10-06,2026-10-08..2026-10-10");
     // With the band and 1000 kcal burned, 550 kcal is over half.
     h.activityDays.set("2026-10-11", activityDay({ steps: 300, azm: 0, totalKcal: 1000, worn: true }));
     expect(await leftOut()).toEqual({ no_target: 6, other_source_food: 1 });

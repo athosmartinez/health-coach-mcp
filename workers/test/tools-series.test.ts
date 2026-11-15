@@ -47,6 +47,15 @@ function render(out: Out): string {
     .join(" ");
 }
 
+/**
+ * The two reads of the calories burned over one run of days (burnOf): whether
+ * the band was worn, then the total calories of the worn days.
+ */
+function burnCalls(first: LocalDate, last: LocalDate): string[] {
+  const days = first === last ? first : `${first}..${last}`;
+  return [`activity ${first}..${last} values=worn days=${days}`, `activity ${first}..${last} values=total_calories days=${days}`];
+}
+
 function args(from: LocalDate, to: LocalDate, metric: string, granularity?: string): Record<string, unknown> {
   return { metric, from, to, ...(granularity === undefined ? {} : { granularity }) };
 }
@@ -113,7 +122,7 @@ describe("metric_series", () => {
         "2026-10-14=2600/1 2026-10-15=2600/1 2026-10-16=null/0/partial_day",
         "partial_day",
         "",
-        ["activity 2026-10-14..2026-10-16 values=total_calories,worn"],
+        burnCalls("2026-10-14", "2026-10-16"),
       ],
       // No kcal target: the log check of the two logged days needs the
       // calories burned, for the days the band was worn.
@@ -123,7 +132,7 @@ describe("metric_series", () => {
         "2026-10-14=2200/1 2026-10-15=2200/1 2026-10-16=null/0",
         "partial_day",
         "Google Fitbit Air",
-        ["nutrition 2026-10-14..2026-10-16", "activity 2026-10-14..2026-10-15 values=worn", "activity 2026-10-14..2026-10-15 values=total_calories"],
+        ["nutrition 2026-10-14..2026-10-16", ...burnCalls("2026-10-14", "2026-10-15")],
       ],
       [
         "protein_g",
@@ -131,7 +140,7 @@ describe("metric_series", () => {
         "2026-10-14=130/1 2026-10-15=130/1 2026-10-16=null/0",
         "partial_day",
         "Google Fitbit Air",
-        ["nutrition 2026-10-14..2026-10-16", "activity 2026-10-14..2026-10-15 values=worn", "activity 2026-10-14..2026-10-15 values=total_calories"],
+        ["nutrition 2026-10-14..2026-10-16", ...burnCalls("2026-10-14", "2026-10-15")],
       ],
     ])("%s", async (metric, unit, points, flag, source, calls) => {
       const h = health();
@@ -185,12 +194,57 @@ describe("metric_series", () => {
     // Without the band the total is mostly a resting estimate: null.
     expect(render(out)).toBe("2026-10-13=2600/1 2026-10-14=null/0/band_not_worn 2026-10-15=2600/1");
     expect(out.quality_flags).toEqual(["band_not_worn"]);
+    // Two steps: the days the band was worn, then the totals of those days alone.
+    expect(h.calls).toEqual([
+      "activity 2026-10-13..2026-10-15 values=worn days=2026-10-13..2026-10-15",
+      "activity 2026-10-13..2026-10-15 values=total_calories days=2026-10-13,2026-10-15",
+    ]);
     out = await coachSession(h).ok("metric_series", args("2026-10-12", "2026-10-15", "total_calories", "week"));
     expect(render(out)).toBe("2026-10-12=2600/3/-1");
     // Steps stay: they come from the band or the phone either way.
     out = await coachSession(h).ok("metric_series", args("2026-10-14", "2026-10-14", "steps"));
     expect(render(out)).toBe("2026-10-14=400/1");
     expect(out.quality_flags).toEqual([]);
+  });
+
+  it("reads no total calories at all when the band was never worn", async () => {
+    // The Go server gives no reason for a day that has no total at all. This
+    // server does not read the total of a day without the band, so it cannot
+    // tell that day from one with a resting estimate: both are band_not_worn.
+    const h = weeklyHealth();
+    for (const d of ["2026-10-13", "2026-10-14", "2026-10-15"]) h.activityDays.delete(d);
+    h.activityDays.set("2026-10-14", activityDay({ steps: 400, totalKcal: 1700, worn: false }));
+    const out = await coachSession(h).ok("metric_series", args("2026-10-13", "2026-10-15", "total_calories"));
+    expect(render(out)).toBe("2026-10-13=null/0/band_not_worn 2026-10-14=null/0/band_not_worn 2026-10-15=null/0/band_not_worn");
+    expect(out.quality_flags).toEqual(["band_not_worn"]);
+    expect(out.coverage.n_days).toBe(0);
+    expect(h.calls).toEqual(["activity 2026-10-13..2026-10-15 values=worn days=2026-10-13..2026-10-15"]);
+    // By week: the three days are left out for a reason.
+    const week = await coachSession(h).ok("metric_series", args("2026-10-13", "2026-10-15", "total_calories", "week"));
+    expect(render(week)).toBe("2026-10-12=null/0/-3");
+  });
+
+  it("keeps a worn day without a total as null, with no reason", async () => {
+    const h = weeklyHealth();
+    h.activityDays.set("2026-10-14", activityDay({ steps: 9000, azm: 20, worn: true }));
+    const out = await coachSession(h).ok("metric_series", args("2026-10-13", "2026-10-15", "total_calories"));
+    expect(render(out)).toBe("2026-10-13=2600/1 2026-10-14=null/0 2026-10-15=2600/1");
+    expect(out.quality_flags).toEqual([]);
+  });
+
+  it("gives today no total, worn or not: the day is still running", async () => {
+    const h = weeklyHealth();
+    const today = async () => render(await coachSession(h).ok("metric_series", args("2026-10-15", COACH_TODAY, "total_calories")));
+    expect(await today()).toBe("2026-10-15=2600/1 2026-10-16=null/0/partial_day");
+    h.activityDays.delete(COACH_TODAY);
+    expect(await today()).toBe("2026-10-15=2600/1 2026-10-16=null/0/partial_day");
+  });
+
+  it("raises unreadable_records for a row that either step of total_calories could not read", async () => {
+    const h = weeklyHealth();
+    h.activitySkipped = 1;
+    const out = await coachSession(h).ok("metric_series", args("2026-10-13", "2026-10-15", "total_calories"));
+    expect(out.quality_flags).toEqual(["unreadable_records"]);
   });
 
   it("follows nutrition_day's rule for each logged day", async () => {
@@ -206,11 +260,7 @@ describe("metric_series", () => {
     );
     expect(out.quality_flags).toEqual(["other_source_food_excluded"]);
     // Without a kcal target the log check needs the calories burned.
-    expect(h.calls).toEqual([
-      "nutrition 2026-10-08..2026-10-12",
-      "activity 2026-10-08..2026-10-12 values=worn",
-      "activity 2026-10-08..2026-10-12 values=total_calories",
-    ]);
+    expect(h.calls).toEqual(["nutrition 2026-10-08..2026-10-12", ...burnCalls("2026-10-08", "2026-10-12")]);
 
     // A partial protein total is shown as a lower bound, with the reason.
     out = await coachSession(h).ok("metric_series", args("2026-10-08", "2026-10-12", "protein_g"));
@@ -249,11 +299,7 @@ describe("metric_series", () => {
     // A kcal target from 10-08: the logged days before it are 10-05 to 10-07.
     const targets = fakeTargets({ effective_from: "2026-10-08", kcal: 2000 });
     const out = await coachSession(h, { targets }).ok("metric_series", args("2026-09-20", "2026-10-11", "kcal_in", "week"));
-    expect(h.calls).toEqual([
-      "nutrition 2026-09-20..2026-10-11",
-      "activity 2026-10-05..2026-10-07 values=worn",
-      "activity 2026-10-05..2026-10-07 values=total_calories",
-    ]);
+    expect(h.calls).toEqual(["nutrition 2026-09-20..2026-10-11", ...burnCalls("2026-10-05", "2026-10-07")]);
     expect(render(out)).toBe("2026-09-14=null/0 2026-09-21=null/0 2026-09-28=null/0 2026-10-05=2160/5/-2");
   });
 
@@ -264,28 +310,42 @@ describe("metric_series", () => {
     const point = async () => render(await coachSession(h).ok("metric_series", args("2026-10-11", "2026-10-11", "kcal_in")));
     // Under half the 2600 kcal burned.
     expect(await point()).toBe("2026-10-11=null/0/log_likely_incomplete");
-    expect(h.calls).toEqual(["nutrition 2026-10-11..2026-10-11", "activity 2026-10-11..2026-10-11 values=worn", "activity 2026-10-11..2026-10-11 values=total_calories"]);
+    expect(h.calls).toEqual(["nutrition 2026-10-11..2026-10-11", ...burnCalls("2026-10-11", "2026-10-11")]);
     // Without the band the total is mostly a resting estimate: it is no
     // reference, and it is not read.
     h.calls = [];
     h.activityDays.set("2026-10-11", activityDay({ steps: 300, azm: 0, totalKcal: 2600, worn: false }));
     expect(await point()).toBe("2026-10-11=550/1");
-    expect(h.calls).toEqual(["nutrition 2026-10-11..2026-10-11", "activity 2026-10-11..2026-10-11 values=worn"]);
+    expect(h.calls).toEqual(["nutrition 2026-10-11..2026-10-11", "activity 2026-10-11..2026-10-11 values=worn days=2026-10-11"]);
   });
 
-  it("reads total calories only over the days the band was worn", async () => {
+  it("reads total calories only for the days the band was worn", async () => {
     const h = weeklyHealth();
-    // The band stays off the wrist until 10-08: the logged days 10-05 to 10-07 have no burn to read.
-    for (const d of ["2026-10-05", "2026-10-06", "2026-10-07"]) h.activityDays.set(d, activityDay({ steps: 300, totalKcal: 1700, worn: false }));
+    // The band stays off the wrist on 10-06 and 10-07: these logged days have no burn to read.
+    for (const d of ["2026-10-06", "2026-10-07"]) h.activityDays.set(d, activityDay({ steps: 300, totalKcal: 1700, worn: false }));
     const out = await coachSession(h).ok("metric_series", args("2026-10-05", "2026-10-11", "kcal_in"));
     expect(h.calls).toEqual([
       "nutrition 2026-10-05..2026-10-11",
-      "activity 2026-10-05..2026-10-11 values=worn",
-      "activity 2026-10-08..2026-10-11 values=total_calories",
+      "activity 2026-10-05..2026-10-11 values=worn days=2026-10-05..2026-10-11",
+      // The two days in the middle are left out of the read, not only of the result.
+      "activity 2026-10-05..2026-10-11 values=total_calories days=2026-10-05,2026-10-08..2026-10-11",
     ]);
     expect(render(out)).toBe(
       "2026-10-05=2200/1 2026-10-06=2200/1 2026-10-07=2200/1 2026-10-08=null/0/other_source_food 2026-10-09=2100/1 2026-10-10=2100/1 2026-10-11=null/0/log_likely_incomplete",
     );
+  });
+
+  it("asks whether the band was worn only for the logged days without a kcal target", async () => {
+    const h = weeklyHealth();
+    // A kcal target on 10-08 and 10-09 only: the days before and after need the calories burned.
+    const targets = fakeTargets({ effective_from: "2026-10-08", kcal: 2000 }, { effective_from: "2026-10-10", protein_g: 150 });
+    await coachSession(h, { targets }).ok("metric_series", args("2026-10-05", "2026-10-11", "kcal_in"));
+    const days = "2026-10-05..2026-10-07,2026-10-10..2026-10-11";
+    expect(h.calls).toEqual([
+      "nutrition 2026-10-05..2026-10-11",
+      `activity 2026-10-05..2026-10-11 values=worn days=${days}`,
+      `activity 2026-10-05..2026-10-11 values=total_calories days=${days}`,
+    ]);
   });
 
   it("withholds every kcal total when a food record of the range is unreadable", async () => {

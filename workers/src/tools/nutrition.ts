@@ -476,25 +476,28 @@ export function checkFood(
 
 /**
  * The band's total calories on each of `days`, for the days it was worn: what
- * checkFood takes as `burned` over a range (weekly_report, metric_series). A
- * day without the band has none: its total is mostly a resting estimate.
+ * checkFood takes as `burned` over a range (weekly_report, metric_series), and
+ * the points of metric_series total_calories. A day without the band has
+ * none: its total is mostly a resting estimate.
  *
- * The read has two steps, each over the days that need it: whether the band
- * was worn (`worn`, when the caller already read it), then total calories of
- * the worn days. A day without band data is never cached, and in this order it
- * costs no total-calories request (one per 14 days) on any call.
+ * The read has two steps, each over the days that need it alone: whether the
+ * band was worn (`worn`, when the caller already read it), then the total
+ * calories of the worn days. A day without band data is never cached. So it
+ * is read again on every call for "worn" (the zone-minutes rollup, one request
+ * per 90 days), and it never costs a total-calories request (one per 14 days).
  */
 export async function burnOf(deps: CoachDeps, days: readonly LocalDate[], worn?: Activity): Promise<Burn> {
-  const burn: Burn = { kcal: new Map(), skipped: 0 };
-  const wanted = [...days].sort(compareText);
+  const burn: Burn = { kcal: new Map(), worn: new Set(), skipped: 0 };
+  const wanted = [...new Set(days)].sort(compareText);
   const [first, latest] = [wanted[0], wanted.at(-1)];
   if (first === undefined || latest === undefined) return burn;
-  const band = worn ?? (await deps.health.activity(first, latest, { values: ["worn"] }));
+  const band = worn ?? (await deps.health.activity(first, latest, { values: ["worn"], days: wanted }));
   if (!worn) burn.skipped += band.skipped;
   const wornDays = wanted.filter((day) => band.days.get(day)?.worn);
   const [firstWorn, latestWorn] = [wornDays[0], wornDays.at(-1)];
   if (firstWorn === undefined || latestWorn === undefined) return burn;
-  const totals = await deps.health.activity(firstWorn, latestWorn, { values: ["total_calories"] });
+  burn.worn = new Set(wornDays);
+  const totals = await deps.health.activity(firstWorn, latestWorn, { values: ["total_calories"], days: wornDays });
   burn.skipped += totals.skipped;
   for (const day of wornDays) {
     const kcal = totals.days.get(day)?.totalKcal;
@@ -507,6 +510,8 @@ export async function burnOf(deps: CoachDeps, days: readonly LocalDate[], worn?:
 export interface Burn {
   /** The total calories of each worn day that has a total. */
   kcal: Map<LocalDate, number>;
+  /** The days, among the ones asked for, that the band was worn on. */
+  worn: Set<LocalDate>;
   /** Rollup rows of its own reads that could not be read. */
   skipped: number;
 }

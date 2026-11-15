@@ -73,9 +73,22 @@ export interface ActivityOptions {
   /**
    * The values the caller needs. Default: all of them, as the Go server
    * reads. With fewer, a day holds only what was read: the other totals are
-   * null, `worn` is false, and a day without any of the values read is absent.
+   * null, `worn` is false, and a day without any of the values read is absent
+   * (a read of "worn" keeps every day the band recorded).
    */
   values?: readonly ActivityValue[];
+  /**
+   * Limits the read to these days of [from, to]. Default: every day of the
+   * range. The windows are planned over the missing days of the list alone, a
+   * row of another day is dropped as its page is read, and the result holds
+   * only days of the list. An empty list makes no request. A day outside
+   * [from, to] is an error.
+   *
+   * A caller uses it to leave out days that would be read again on every call
+   * for nothing: a day without band data is never cached, and its total
+   * calories are of no use to a caller that reads them as "calories burned".
+   */
+  days?: readonly LocalDate[];
 }
 
 /** Which data a set of values needs. */
@@ -150,7 +163,7 @@ interface RollupRead {
  * are read.
  */
 export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate, options: ActivityOptions = {}): Promise<Activity> {
-  const days = dayList(from, to);
+  const days = listed(dayList(from, to), options.days);
   const values = wanted(options.values, ACTIVITY_VALUES);
   const read = reads(values);
   const { today, settled } = ctx.clock();
@@ -229,7 +242,12 @@ export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate,
     // The rollup leaves out a day without zone minutes. On a day the band
     // recorded steps that is 0 minutes; on a day it was not worn, no data.
     const zone = z === null && bandDay && clean ? 0 : z;
-    if (s === null && zone === null && k === null) return undefined;
+    // A day without any value is no day, as in the Go server, which reads all
+    // three totals. A read of fewer totals cannot tell that the day is empty:
+    // when the band's step records say it was worn, the day is kept (its zone
+    // minutes are unknown in a run with a dropped row).
+    const known = bandDay && read.azm && !(read.steps && read.kcal);
+    if (s === null && zone === null && k === null && !known) return undefined;
     return { steps: s, azm: zone, totalKcal: k, worn: z !== null || bandDay, partial: day >= today };
   };
   const isClean = (day: LocalDate) => !dirty.has(runOfDay.get(day) as Run);
@@ -295,6 +313,14 @@ export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate,
   }
   a.days = new Map([...a.days].sort(([x], [y]) => compareText(x, y)));
   return a;
+}
+
+/** The days to read: all of `range`, or the days of `only` in date order, each once. */
+function listed(range: readonly LocalDate[], only: readonly LocalDate[] | undefined): LocalDate[] {
+  if (only === undefined) return [...range];
+  const inRange = new Set(range);
+  for (const day of only) if (!inRange.has(day)) throw new Error("healthdata: a day to read is outside the range");
+  return [...new Set(only)].sort(compareText);
 }
 
 function required(value: number | undefined): number {

@@ -58,6 +58,17 @@ export function midnight(day: LocalDate): Date {
   return range.start;
 }
 
+/** A list of days as its runs of consecutive days: "2026-10-05..2026-10-07,2026-10-09"; "none" when empty. */
+export function spans(days: readonly LocalDate[]): string {
+  const runs: [LocalDate, LocalDate][] = [];
+  for (const day of [...days].sort()) {
+    const current = runs.at(-1);
+    if (current && plus(current[1], 1) === day) current[1] = day;
+    else runs.push([day, day]);
+  }
+  return runs.length === 0 ? "none" : runs.map(([first, last]) => (first === last ? first : `${first}..${last}`)).join(",");
+}
+
 function within<V>(values: ReadonlyMap<LocalDate, V>, from: LocalDate, to: LocalDate): Map<LocalDate, V> {
   return new Map([...values].filter(([day]) => day >= from && day <= to).sort(([a], [b]) => (a < b ? -1 : 1)));
 }
@@ -121,11 +132,15 @@ export class FakeHealth implements Source {
   }
 
   async activity(from: LocalDate, to: LocalDate, options?: ActivityOptions): Promise<Activity> {
-    this.call("activity", from, to, options?.values ? ` values=${options.values.join(",")}` : "");
+    const only = options?.days;
+    this.call("activity", from, to, `${options?.values ? ` values=${options.values.join(",")}` : ""}${only ? ` days=${spans(only)}` : ""}`);
+    if (only?.some((day) => day < from || day > to)) throw new Error("healthdata: a day to read is outside the range");
     const values = new Set(options?.values ?? ACTIVITY_VALUES);
     const read = { steps: values.has("steps"), azm: values.has("azm") || values.has("worn"), kcal: values.has("total_calories") };
     const a = new Activity(from, to, values);
     for (const [day, stored] of within(this.activityDays, from, to)) {
+      // As the real source: the result holds only the days asked for.
+      if (only && !only.includes(day)) continue;
       const narrowed: ActivityDay = {
         steps: read.steps ? stored.steps : null,
         azm: read.azm ? stored.azm : null,

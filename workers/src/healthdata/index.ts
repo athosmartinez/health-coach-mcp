@@ -46,6 +46,8 @@ export {
 } from "./exercise";
 export {
   type FoodItem,
+  MAX_ITEM_GRAMS,
+  MAX_ITEM_KCAL,
   NUTRIENTS,
   NUTRIENT_CARB,
   NUTRIENT_FAT,

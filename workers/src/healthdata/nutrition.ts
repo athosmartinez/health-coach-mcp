@@ -114,8 +114,13 @@ export class Nutrition {
   }
 }
 
-const MAX_ITEM_KCAL = 10_000;
-const MAX_ITEM_GRAMS = 2_000;
+/**
+ * The most one item can plausibly report: a higher value is rejected when it
+ * is read. The tool that logs food takes the same bounds, so every value it
+ * accepts is a value this reader keeps.
+ */
+export const MAX_ITEM_KCAL = 10_000;
+export const MAX_ITEM_GRAMS = 2_000;
 const MAX_ITEM_SODIUM = 20_000; // mg: 50 g of salt in one item
 
 /**

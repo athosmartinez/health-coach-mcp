@@ -50,7 +50,10 @@ export const newToken = (accessToken: string) => Response.json({ access_token: a
 /** Google behind `fetch` for one test, and what the code under test sent and logged. */
 export interface GoogleMock {
   google: FakeGoogle;
-  /** Every external fetch since the last take: "token", or the Health data type ("rollup …" for a daily rollup). */
+  /**
+   * Every external fetch since the last take: "token", or the Health data type
+   * ("rollup …" for a daily rollup, "create …" and "delete …" for a write).
+   */
   external: string[];
   /** The Authorization header of every Health API request. */
   auths: string[];
@@ -89,8 +92,7 @@ export function googleMock(): GoogleMock {
           return mock.tokenReply();
         }
         if (!mock.google.serves(request)) throw new Error(`unexpected fetch in test: ${request.method} ${request.url}`);
-        const [, , , , , dataType = "?", operation = ""] = new URL(request.url).pathname.split("/");
-        mock.external.push(operation.endsWith(":dailyRollUp") ? `rollup ${dataType}` : dataType);
+        mock.external.push(mock.google.kindOf(request));
         mock.auths.push(request.headers.get("authorization") ?? "");
         return mock.healthReply?.(request) ?? mock.google.respond(request);
       });

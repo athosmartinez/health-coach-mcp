@@ -11,9 +11,11 @@ import { RequestTokens } from "./googlehealth/tokens";
 import { HealthData, dbCache } from "./healthdata";
 import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
+import { forgetEntry, hasEntry, recordEntry } from "./store/entries";
 import { targetInForce } from "./store/memory";
 import { searchNotes } from "./store/notes";
 import type { CoachDeps } from "./tools/coach";
+import { type WriteDeps, runWriteTool } from "./tools/foodlog";
 import { runMemoryTool } from "./tools/memory";
 import { runCoachTool } from "./tools/moments";
 import type { ToolOutcome } from "./tools/register";
@@ -244,22 +246,42 @@ export class CoachStore extends DurableObject<Env> {
         invalidate: (rejected) => this.invalidateGoogleAccessToken(rejected),
       });
       const budget = new RequestBudget();
-      let deps: CoachDeps | undefined;
-      const coachDeps = (): CoachDeps | undefined => {
+      // One client for the reads and the writes of this MCP HTTP request:
+      // every request to Google Health takes its unit from the one budget.
+      let client: GoogleHealthClient | undefined;
+      const clientIn = (zone: Zone) => (client ??= new GoogleHealthClient({ tokens, zone, budget }));
+      let coachDeps: CoachDeps | undefined;
+      const newCoachDeps = (): CoachDeps | undefined => {
         const zone = zoneOrError();
         if (!zone) return undefined;
-        const client = new GoogleHealthClient({ tokens, zone, budget });
         return {
-          health: new HealthData(client, dbCache(db), zone, db.now),
+          health: new HealthData(clientIn(zone), dbCache(db), zone, db.now),
           targets: (day) => targetInForce(db, day),
           notes: (filter) => searchNotes(db, filter),
           now: db.now,
           zone,
         };
       };
-      // The tool calls of a batch start together. The coach tools take turns,
-      // so the Google requests of one MCP request run one after the other, and
-      // a later call finds in the cache what an earlier one fetched.
+      let writeDeps: WriteDeps | undefined;
+      const newWriteDeps = (): WriteDeps | undefined => {
+        const zone = zoneOrError();
+        if (!zone) return undefined;
+        return {
+          api: clientIn(zone),
+          entries: {
+            record: (name, day) => recordEntry(db, name, day),
+            has: (name) => hasEntry(db, name),
+            forget: (name) => forgetEntry(db, name),
+          },
+          now: db.now,
+          zone,
+        };
+      };
+      // The tool calls of a batch start together. The tools that reach Google
+      // take turns, so the Google requests of one MCP request run one after
+      // the other, and a later call finds in the cache what an earlier one
+      // fetched. A write takes its turn like a read: two adds of one batch
+      // never run at the same time.
       //
       // The queue belongs to this MCP HTTP request. The object does not order
       // two MCP HTTP requests: while one waits for Google, it serves the
@@ -268,19 +290,29 @@ export class CoachStore extends DurableObject<Env> {
       // the whole object would order them, but a request that stops while it
       // holds the turn would then block every later request.
       let turn: Promise<unknown> = Promise.resolve();
-      const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
+      const inTurn = (run: () => ToolOutcome | Promise<ToolOutcome>): Promise<ToolOutcome> => {
         const outcome = turn.then((): ToolOutcome | Promise<ToolOutcome> => {
           // From here on, the units already taken are those of earlier calls.
           budget.beginCall();
-          deps ??= coachDeps();
-          return deps ? runCoachTool(deps, name, args) : { ok: false, error: INTERNAL_ERROR };
+          return run();
         });
         turn = outcome.catch(() => undefined);
         return outcome;
       };
+      const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> =>
+        inTurn(() => {
+          coachDeps ??= newCoachDeps();
+          return coachDeps ? runCoachTool(coachDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
+        });
+      const write = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> =>
+        inTurn(() => {
+          writeDeps ??= newWriteDeps();
+          return writeDeps ? runWriteTool(writeDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
+        });
       return createServer({
         memory,
         coach,
+        write,
         googleAccountStatus: async () => this.accountStatus(await tokens.accessToken()),
       });
     };

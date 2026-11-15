@@ -7,6 +7,7 @@ import { Zone } from "../src/coach/date";
 import { ToolError, type WireError } from "../src/coach/errors";
 import type { CoachStore } from "../src/store";
 import { type Clock, Db } from "../src/store/db";
+import { WRITE_TOOLS } from "../src/tools/foodlog";
 import { MEMORY_TOOLS, runMemoryTool } from "../src/tools/memory";
 import { COACH_TOOLS } from "../src/tools/moments";
 import { invoke } from "../src/tools/register";
@@ -17,8 +18,11 @@ export const MEMORY_TOOL_NAMES = MEMORY_TOOLS.map((tool) => tool.name);
 /** The coach-moment tools, which read Google Health. */
 export const COACH_TOOL_NAMES = COACH_TOOLS.map((tool) => tool.name);
 
+/** The tools that write to Google Health. */
+export const WRITE_TOOL_NAMES = WRITE_TOOLS.map((tool) => tool.name);
+
 /** Every tool the Worker lists, sorted. */
-export const ALL_TOOL_NAMES = ["google_account_status", "server_info", ...MEMORY_TOOL_NAMES, ...COACH_TOOL_NAMES].sort();
+export const ALL_TOOL_NAMES = ["google_account_status", "server_info", ...MEMORY_TOOL_NAMES, ...COACH_TOOL_NAMES, ...WRITE_TOOL_NAMES].sort();
 
 /** The tables the coach memory migration creates, with the FTS5 shadow tables. */
 export const MEMORY_TABLES = [

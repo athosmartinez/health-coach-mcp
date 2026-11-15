@@ -4,6 +4,7 @@ import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "./google";
 import { registerGuardrails, registerPrompts } from "./prompts";
 import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
+import { registerWrites } from "./tools/foodlog";
 import { registerCoach } from "./tools/moments";
 import { type ToolOutcome, defineTool, register } from "./tools/register";
 import { inputSchema, s } from "./tools/schema";
@@ -25,6 +26,11 @@ export interface ServerDeps {
    * request budget of this MCP HTTP request, which every call here shares.
    */
   coach(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
+  /**
+   * Runs the body of a tool that writes to Google Health. It takes its turn
+   * with the coach-moment tools, on the same request budget and token answer.
+   */
+  write(name: string, args: Record<string, unknown>): Promise<ToolOutcome>;
   /** Shares the access token answer of this MCP HTTP request with the coach tools. */
   googleAccountStatus(): Promise<GoogleAccountStatus>;
 }
@@ -94,6 +100,7 @@ export function createServer(deps: ServerDeps): McpServer {
 
   registerMemory(server, deps.memory);
   registerCoach(server, deps.coach);
+  registerWrites(server, deps.write);
   registerGuardrails(server);
   // The prompts call profile_get and the coach tools: this server has both.
   registerPrompts(server);

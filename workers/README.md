@@ -134,6 +134,11 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | `nutrition_log_delete` | an entry this server created; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 0 |
 | `nutrition_log_delete` | an entry this server created; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
 | `nutrition_log_add`, 100 calls | one POST with 100 entries; the access token is renewed first | 45, 45, 45, 45 | 1, 0, 0, 0 | 46, 45, 45, 45 | ok ×45, budget error ×55 | none | — |
+| `exercise_log_add` | one session | 1 | 0 | 1 | ok | 1 | 1 |
+| `exercise_log_add` | one session; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 1 |
+| `exercise_log_add` | one session; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
+| `exercise_log_delete` | a session this server created | 1 | 0 | 1 | ok | 1 | 0 |
+| `exercise_log_delete` | a session this server created; the token is renewed first, Google rejects the new one once, then answers 429 to every request | 5 | 2 | 7 | upstream_unavailable | none | — |
 
 The highest count is **49 external fetches** in one MCP HTTP request: 45 Google Health requests and 4 token requests, in the row with the sign-in race. Without that race the highest count is 47. No row passes 50.
 

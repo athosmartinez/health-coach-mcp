@@ -11,9 +11,12 @@ import { RequestTokens } from "./googlehealth/tokens";
 import { HealthData, dbCache } from "./healthdata";
 import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
+import { forgetEntry, hasEntry, linkedAccount, recordEntry } from "./store/entries";
 import { targetInForce } from "./store/memory";
+import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
 import type { CoachDeps } from "./tools/coach";
+import { type WriteDeps, runWriteTool } from "./tools/foodlog";
 import { runMemoryTool } from "./tools/memory";
 import { runCoachTool } from "./tools/moments";
 import type { ToolOutcome } from "./tools/register";
@@ -117,6 +120,23 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (date, metric)
   );
   CREATE INDEX daily_metrics_by_metric ON daily_metrics (metric, date)`,
+  // 5: the food entries this server created in Google Health (the Go server
+  // writes nothing there, so its store has no such table). A row proves that
+  // an entry is this server's own: only such an entry is deleted. It holds no
+  // food name and no nutrient value. `sub` is the Google account that was
+  // linked when the entry was created: an entry belongs to that account, and
+  // only while that account is the linked one is it this server's own. `name`
+  // is the data point name as the create answered it; `day` is the local day
+  // of the entry, and the index serves the lookup of the entries of a range
+  // of days.
+  `CREATE TABLE nutrition_entries (
+    sub TEXT NOT NULL,
+    name TEXT NOT NULL,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sub, name)
+  );
+  CREATE INDEX nutrition_entries_by_day ON nutrition_entries (day)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -232,22 +252,47 @@ export class CoachStore extends DurableObject<Env> {
         invalidate: (rejected) => this.invalidateGoogleAccessToken(rejected),
       });
       const budget = new RequestBudget();
-      let deps: CoachDeps | undefined;
-      const coachDeps = (): CoachDeps | undefined => {
+      // One client for the reads and the writes of this MCP HTTP request:
+      // every request to Google Health takes its unit from the one budget.
+      let client: GoogleHealthClient | undefined;
+      const clientIn = (zone: Zone) => (client ??= new GoogleHealthClient({ tokens, zone, budget }));
+      let coachDeps: CoachDeps | undefined;
+      const newCoachDeps = (): CoachDeps | undefined => {
         const zone = zoneOrError();
         if (!zone) return undefined;
-        const client = new GoogleHealthClient({ tokens, zone, budget });
         return {
-          health: new HealthData(client, dbCache(db), zone, db.now),
+          health: new HealthData(clientIn(zone), dbCache(db), zone, db.now),
           targets: (day) => targetInForce(db, day),
           notes: (filter) => searchNotes(db, filter),
           now: db.now,
           zone,
         };
       };
-      // The tool calls of a batch start together. The coach tools take turns,
-      // so the Google requests of one MCP request run one after the other, and
-      // a later call finds in the cache what an earlier one fetched.
+      let writeDeps: WriteDeps | undefined;
+      const newWriteDeps = (): WriteDeps | undefined => {
+        const zone = zoneOrError();
+        if (!zone) return undefined;
+        return {
+          api: clientIn(zone),
+          entries: {
+            owner: () => linkedAccount(db),
+            record: (name, day, owner) => {
+              // An add always has a linked account: the create needs its token.
+              if (owner === undefined) throw new Error("store: no Google account was linked");
+              recordEntry(db, name, day, owner);
+            },
+            has: (name) => hasEntry(db, name),
+            forget: (name) => forgetEntry(db, name),
+          },
+          now: db.now,
+          zone,
+        };
+      };
+      // The tool calls of a batch start together. The tools that reach Google
+      // take turns, so the Google requests of one MCP request run one after
+      // the other, and a later call finds in the cache what an earlier one
+      // fetched. A write takes its turn like a read: two adds of one batch
+      // never run at the same time.
       //
       // The queue belongs to this MCP HTTP request. The object does not order
       // two MCP HTTP requests: while one waits for Google, it serves the
@@ -256,19 +301,29 @@ export class CoachStore extends DurableObject<Env> {
       // the whole object would order them, but a request that stops while it
       // holds the turn would then block every later request.
       let turn: Promise<unknown> = Promise.resolve();
-      const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
+      const inTurn = (run: () => ToolOutcome | Promise<ToolOutcome>): Promise<ToolOutcome> => {
         const outcome = turn.then((): ToolOutcome | Promise<ToolOutcome> => {
           // From here on, the units already taken are those of earlier calls.
           budget.beginCall();
-          deps ??= coachDeps();
-          return deps ? runCoachTool(deps, name, args) : { ok: false, error: INTERNAL_ERROR };
+          return run();
         });
         turn = outcome.catch(() => undefined);
         return outcome;
       };
+      const coach = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> =>
+        inTurn(() => {
+          coachDeps ??= newCoachDeps();
+          return coachDeps ? runCoachTool(coachDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
+        });
+      const write = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> =>
+        inTurn(() => {
+          writeDeps ??= newWriteDeps();
+          return writeDeps ? runWriteTool(writeDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
+        });
       return createServer({
         memory,
         coach,
+        write,
         googleAccountStatus: async () => this.accountStatus(await tokens.accessToken()),
       });
     };
@@ -299,9 +354,27 @@ export class CoachStore extends DurableObject<Env> {
     return row.version;
   }
 
-  /** Stores the account that just signed in, replacing any earlier link. */
+  /**
+   * Stores the account that just signed in, replacing any earlier link.
+   *
+   * The cache of daily values holds the days of one Google account, and its
+   * rows do not say whose they are. So it is emptied when the account that
+   * signs in is not the one stored: another `sub`, or no stored link at all
+   * (a revoked link is removed, and then nothing says whose days the cache
+   * holds). A new link of the same account keeps the cache. The cache is
+   * disposable: the next read fetches the days again. The coach memory
+   * (profile, targets, labs, notes) is not tied to the Google account and
+   * stays.
+   */
   linkGoogleAccount(link: GoogleLink): void {
     const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      if (this.account()?.sub !== link.sub) clearMetrics(new Db(this.ctx.storage));
+      this.storeLink(link, now);
+    });
+  }
+
+  private storeLink(link: GoogleLink, now: number): void {
     this.ctx.storage.sql.exec(
       `INSERT INTO google_account
          (id, sub, email, refresh_token, scopes, access_token, access_token_expires_at, linked_at, updated_at)

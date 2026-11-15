@@ -7,18 +7,22 @@ import { Zone } from "../src/coach/date";
 import { ToolError, type WireError } from "../src/coach/errors";
 import type { CoachStore } from "../src/store";
 import { type Clock, Db } from "../src/store/db";
+import { WRITE_TOOLS } from "../src/tools/foodlog";
 import { MEMORY_TOOLS, runMemoryTool } from "../src/tools/memory";
 import { COACH_TOOLS } from "../src/tools/moments";
 import { invoke } from "../src/tools/register";
-import { type JsonRpc, MCP_HEADERS, MCP_URL, parseRpc } from "./helpers";
+import { type JsonRpc, MCP_HEADERS, MCP_URL, OWNER_SUB, parseRpc } from "./helpers";
 
 export const MEMORY_TOOL_NAMES = MEMORY_TOOLS.map((tool) => tool.name);
 
 /** The coach-moment tools, which read Google Health. */
 export const COACH_TOOL_NAMES = COACH_TOOLS.map((tool) => tool.name);
 
+/** The tools that write to Google Health. */
+export const WRITE_TOOL_NAMES = WRITE_TOOLS.map((tool) => tool.name);
+
 /** Every tool the Worker lists, sorted. */
-export const ALL_TOOL_NAMES = ["google_account_status", "server_info", ...MEMORY_TOOL_NAMES, ...COACH_TOOL_NAMES].sort();
+export const ALL_TOOL_NAMES = ["google_account_status", "server_info", ...MEMORY_TOOL_NAMES, ...COACH_TOOL_NAMES, ...WRITE_TOOL_NAMES].sort();
 
 /** The tables the coach memory migration creates, with the FTS5 shadow tables. */
 export const MEMORY_TABLES = [
@@ -46,9 +50,30 @@ export function freshStore(): DurableObjectStub<CoachStore> {
   return env.COACH_STORE.get(env.COACH_STORE.newUniqueId());
 }
 
-/** Runs `body` inside a new store, with the store's code on a controlled clock. */
+/**
+ * Stores a Google link in a test store without a sign-in. The food entries
+ * that the server creates belong to the linked account, so a store that
+ * records one needs a link.
+ */
+export function linkAccount(sql: SqlStorage, sub: string = OWNER_SUB): void {
+  sql.exec(
+    `INSERT INTO google_account (id, sub, email, refresh_token, scopes, linked_at, updated_at)
+     VALUES (1, ?, 'synthetic@example.com', 'fake-refresh-token-of-a-test-store', 'openid', 1, 1)
+     ON CONFLICT(id) DO UPDATE SET sub = excluded.sub`,
+    sub,
+  );
+}
+
+/**
+ * Runs `body` inside a new store, with the store's code on a controlled
+ * clock. The store has a linked Google account (OWNER_SUB), as every store
+ * that serves a tool has.
+ */
 export function withDb<T>(body: (db: Db, sql: SqlStorage) => T | Promise<T>, now: Clock = fixedClock): Promise<T> {
-  return runInDurableObject(freshStore(), (_instance, state) => body(new Db(state.storage, now), state.storage.sql));
+  return runInDurableObject(freshStore(), (_instance, state) => {
+    linkAccount(state.storage.sql);
+    return body(new Db(state.storage, now), state.storage.sql);
+  });
 }
 
 /** The code of the ToolError `body` throws; fails the test when it throws anything else or nothing. */

@@ -46,6 +46,8 @@ export {
 } from "./exercise";
 export {
   type FoodItem,
+  MAX_ITEM_GRAMS,
+  MAX_ITEM_KCAL,
   NUTRIENTS,
   NUTRIENT_CARB,
   NUTRIENT_FAT,
@@ -60,6 +62,7 @@ export {
   type Total,
   dayComplete,
 } from "./nutrition";
+export { MAX_LABEL_RUNES, clean } from "./decode";
 export { PRIMARY_PLATFORM, type Stages } from "./parse";
 export { KCAL_WINDOW_DAYS, MAX_RANGE_DAYS, NIGHT_WINDOW_DAYS, ROLLUP_WINDOW_DAYS, SETTLE_DAYS, WORN_WINDOW_DAYS } from "./plan";
 export {

@@ -12,9 +12,13 @@ import {
   type Nutrient,
   dayComplete,
 } from "../src/healthdata";
+import { HealthData, dbCache } from "../src/healthdata";
+import { parseFood } from "../src/healthdata/nutrition";
 import { ALGO_VERSION } from "../src/metrics/stats";
+import { recordEntry } from "../src/store/entries";
 import { METRIC_KEYS, metricRange } from "../src/store/metrics";
-import { at, foodRec, harness, inStore, newData, render } from "./healthdata-helpers";
+import { SAO_PAULO } from "./memory-helpers";
+import { DiskError, at, foodRec, harness, inStore, newClient, newData, render } from "./healthdata-helpers";
 
 const h = harness();
 
@@ -141,4 +145,189 @@ describe("nutrition", () => {
       expect(h.google.takeCalls()).toEqual(["nutrition-log 2026-10-09..2026-10-11"]);
       for (const key of METRIC_KEYS) expect(metricRange(db, key, D10, D10, ALGO_VERSION), key).toEqual([]);
     }));
+});
+
+// The Go server has no such rule: it writes nothing to Google Health. An entry
+// that nutrition_log_add created has the platform of the API (GOOGLE_WEB_API),
+// and the food log keeps it when its data point id is in the table of the
+// entries this server created.
+describe("the food entries this server created", () => {
+  const listed = (id: string) => `users/me/dataTypes/nutrition-log/dataPoints/${id}`;
+  /** The name as the create answered it: under the user's ID. */
+  const answered = (id: string) => `users/1122334455/dataTypes/nutrition-log/dataPoints/${id}`;
+  /** A record written through the API, as a list returns it. */
+  const viaApi = (hour: number, id: string, options: Parameters<typeof foodRec>[1] = {}) =>
+    foodRec(at(D10, hour, 0), { ...options, platform: "GOOGLE_WEB_API", name: listed(id) });
+
+  /** A band item, an item this server created and an item another app wrote through the API. */
+  function threeSources(): void {
+    h.google.add(
+      "nutrition-log",
+      foodRec(at(D10, 8, 0), { meal: "BREAKFAST", kcal: 300, list: { PROTEIN: 20 } }),
+      viaApi(12, "syn-own-1", { meal: "LUNCH", kcal: 600, carb: 70, list: { PROTEIN: 40 } }),
+      viaApi(19, "syn-other-app", { meal: "DINNER", kcal: 900, list: { PROTEIN: 50 } }),
+    );
+  }
+
+  it("counts the band's item and the server's own item, and leaves the item of another app out", () =>
+    inStore(async (db) => {
+      threeSources();
+      recordEntry(db, answered("syn-own-1"), D10);
+      const n = await newData(db).nutrition(D10, D10);
+      const day = n.days.get(D10);
+      expect(day?.items.map((item) => [item.meal, item.source])).toEqual([
+        ["BREAKFAST", "FITBIT"],
+        ["LUNCH", "GOOGLE_WEB_API"],
+      ]);
+      // Totals over the two items.
+      expect(day?.totals).toEqual({
+        [NUTRIENT_KCAL]: { value: 900, items: 2 },
+        [NUTRIENT_PROTEIN]: { value: 60, items: 2 },
+        [NUTRIENT_CARB]: { value: 70, items: 1 },
+      });
+      expect(dayComplete(day, NUTRIENT_KCAL)).toBe(true);
+      // The item of the other app is still "other source".
+      expect(n.otherSource).toBe(1);
+      expect([...n.otherSourceDays]).toEqual([[D10, 1]]);
+      expect(n.skipped).toBe(0);
+      expect(day?.items[1]).toEqual({
+        id: listed("syn-own-1"),
+        name: "Synthetic food",
+        meal: "LUNCH",
+        at: at(D10, 12, 0),
+        source: "GOOGLE_WEB_API",
+        nutrients: { kcal: 600, carb_g: 70, protein_g: 40 },
+        rejected: [],
+      });
+      // One list request, as before: the table is read in the store.
+      expect(h.google.takeRequests()).toEqual({ total: 1, "nutrition-log": 1 });
+      expect(h.logged()).toBe("[]");
+    }));
+
+  it("gives the Go server's result for the same day without the row in the table", () =>
+    inStore(async (db) => {
+      threeSources();
+      const n = await newData(db).nutrition(D10, D10);
+      const day = n.days.get(D10);
+      // Only the band's item: both items of the API are left out.
+      expect(day?.items.map((item) => item.meal)).toEqual(["BREAKFAST"]);
+      expect(day?.totals).toEqual({ [NUTRIENT_KCAL]: { value: 300, items: 1 }, [NUTRIENT_PROTEIN]: { value: 20, items: 1 } });
+      expect(n.otherSource).toBe(2);
+      expect([...n.otherSourceDays]).toEqual([[D10, 2]]);
+    }));
+
+  it("gives the Go server's result for a source that has no table", () =>
+    inStore(async (db) => {
+      threeSources();
+      recordEntry(db, answered("syn-own-1"), D10);
+      const { metricRange: range, putMetric, deleteMetric } = dbCache(db);
+      const source = new HealthData(newClient(), { metricRange: range, putMetric, deleteMetric }, SAO_PAULO, () => new Date("2026-10-16T13:00:00Z"));
+      const n = await source.nutrition(D10, D10);
+      expect(n.days.get(D10)?.items).toHaveLength(1);
+      expect(n.otherSource).toBe(2);
+    }));
+
+  it("knows an entry by its data point id, whatever the form of the user in its name", () =>
+    inStore(async (db) => {
+      // The table holds the name under `me`; the list names the user by an ID.
+      h.google.add("nutrition-log", foodRec(at(D10, 12, 0), { kcal: 600, platform: "GOOGLE_WEB_API", name: answered("syn-own-2") }));
+      recordEntry(db, listed("syn-own-2"), D10);
+      const n = await newData(db).nutrition(D10, D10);
+      expect(n.days.get(D10)?.items).toHaveLength(1);
+      expect(n.otherSource).toBe(0);
+    }));
+
+  it.each([
+    ["another data point id", listed("syn-own-10")],
+    ["the id as a part of a longer id", listed("xsyn-own-1")],
+    ["the same id under another data type", "users/me/dataTypes/hydration-log/dataPoints/syn-own-1"],
+    ["the same id with one more path part", `${listed("syn-own-1")}/x`],
+    ["the id without its path", "syn-own-1"],
+    ["an empty name", ""],
+  ])("leaves out a record of the API with %s", (_name, name) =>
+    inStore(async (db) => {
+      h.google.add("nutrition-log", foodRec(at(D10, 12, 0), { kcal: 600, platform: "GOOGLE_WEB_API", name }));
+      recordEntry(db, answered("syn-own-1"), D10);
+      const n = await newData(db).nutrition(D10, D10);
+      expect(n.days.size).toBe(0);
+      expect(n.otherSource).toBe(1);
+    }));
+
+  it("leaves out a record without a name, and one whose name is not a text is unreadable as before", () =>
+    inStore(async (db) => {
+      const unnamed = foodRec(at(D10, 12, 0), { kcal: 600, platform: "GOOGLE_WEB_API" });
+      delete unnamed.name;
+      const numbered = { ...foodRec(at(D10, 13, 0), { kcal: 100, platform: "GOOGLE_WEB_API" }), name: 7 };
+      h.google.add("nutrition-log", unnamed, numbered);
+      recordEntry(db, answered("syn-own-1"), D10);
+      const n = await newData(db).nutrition(D10, D10);
+      expect(n).toMatchObject({ otherSource: 1, skipped: 1 });
+      expect(n.days.size).toBe(0);
+    }));
+
+  it("looks the entries up by their day, with one day of margin on each side", () =>
+    inStore(async (db) => {
+      h.google.add("nutrition-log", viaApi(12, "syn-near"), viaApi(13, "syn-far"));
+      // Recorded on the day before the item's day (a changed time zone can move a day by one): still known.
+      recordEntry(db, answered("syn-near"), "2026-10-09");
+      // Recorded two days away: not looked up for this day.
+      recordEntry(db, answered("syn-far"), "2026-10-12");
+      const n = await newData(db).nutrition(D10, D10);
+      expect(n.days.get(D10)?.items.map((item) => item.id)).toEqual([listed("syn-near")]);
+      expect(n.otherSource).toBe(1);
+    }));
+
+  it("does not count an entry that was created for another Google account than the linked one", () =>
+    inStore(async (db) => {
+      threeSources();
+      recordEntry(db, answered("syn-own-1"), D10);
+      const relink = (sub: string) => db.all("UPDATE google_account SET sub = ? WHERE id = 1", sub);
+
+      // Another account is linked: the entry of the account before is food of another source, as in the Go server.
+      relink("200000000000000000002");
+      const other = await newData(db).nutrition(D10, D10);
+      expect(other.days.get(D10)?.items.map((item) => item.meal)).toEqual(["BREAKFAST"]);
+      expect(other.otherSource).toBe(2);
+
+      // The first account is linked again: its entry counts again.
+      relink("100000000000000000001");
+      const again = await newData(db).nutrition(D10, D10);
+      expect(again.days.get(D10)?.items.map((item) => item.meal)).toEqual(["BREAKFAST", "LUNCH"]);
+      expect(again.otherSource).toBe(1);
+    }));
+
+  it("still rejects an implausible value of an entry of its own", () =>
+    inStore(async (db) => {
+      h.google.add("nutrition-log", viaApi(12, "syn-own-1", { kcal: 20_000, carb: 30 }));
+      recordEntry(db, answered("syn-own-1"), D10);
+      const day = (await newData(db).nutrition(D10, D10)).days.get(D10);
+      expect(day?.items[0]?.rejected).toEqual(["kcal"]);
+      expect(day?.totals).toEqual({ [NUTRIENT_CARB]: { value: 30, items: 1 } });
+    }));
+
+  it("fails the read when the table cannot be read, and sends no request", () =>
+    inStore(async (db) => {
+      threeSources();
+      const cache = {
+        ...dbCache(db),
+        createdFoodIds: () => {
+          throw new DiskError();
+        },
+      };
+      const source = new HealthData(newClient(), cache, SAO_PAULO, () => new Date("2026-10-16T13:00:00Z"));
+      await expect(source.nutrition(D10, D10)).rejects.toThrow("healthdata: read created entries");
+      expect(h.google.takeRequests()).toEqual({ total: 0 });
+    }));
+
+  it("parseFood keeps a record of another platform only when its id is one of the server's", () => {
+    const record = viaApi(12, "syn-own-1", { kcal: 600 });
+    expect(parseFood(record)).toEqual({ kind: "other", at: at(D10, 12, 0).getTime() });
+    expect(parseFood(record, new Set())).toMatchObject({ kind: "other" });
+    expect(parseFood(record, new Set(["syn-own-2"]))).toMatchObject({ kind: "other" });
+    expect(parseFood(record, new Set(["syn-own-1"]))).toMatchObject({ kind: "item", item: { id: listed("syn-own-1"), source: "GOOGLE_WEB_API" } });
+    // A record of the band needs no row.
+    expect(parseFood(foodRec(at(D10, 12, 0), { kcal: 600 }), new Set())).toMatchObject({ kind: "item", item: { source: "FITBIT" } });
+    // Another app's platform with an id of the server's: the id decides, not the platform.
+    expect(parseFood(foodRec(at(D10, 12, 0), { kcal: 600, platform: "HEALTH_KIT", name: listed("syn-own-1") }), new Set(["syn-own-1"]))).toMatchObject({ kind: "item" });
+  });
 });

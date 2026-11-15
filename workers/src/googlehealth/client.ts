@@ -362,6 +362,9 @@ export class GoogleHealthClient {
             this.budget.takeRenewal();
             console.warn("google health token rejected; renewing", { data_type: dataType, http_status: status });
           }
+          // The request was tried. When the budget has no unit left to send
+          // it again, it is unavailable: not a range that holds too much.
+          last = unavailable("Google Health API is unavailable", statusError(status, reply.text));
           continue; // a renewal is not a failure: no backoff, no attempt used
         }
         const limited = quota(status, reply.text);

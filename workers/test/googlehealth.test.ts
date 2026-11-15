@@ -1147,8 +1147,47 @@ describe("request budget", () => {
     vi.mocked(globalThis.fetch).mockRestore();
     requests = fakeApi((_n, request) => answer(request));
     const short = testClient({ budget: new RequestBudget(1) });
-    expect(toWire(await failure(listSteps(short.client))).code).toBe("invalid_input");
+    // The request was tried and cannot be sent again: unavailable, not a range that holds too much.
+    expect(toWire(await failure(listSteps(short.client))).code).toBe("upstream_unavailable");
     expect(requests).toHaveLength(1);
+  });
+
+  // A page that was never tried is invalid_input (a shorter range fits). A
+  // request that was tried and cannot be sent again is upstream_unavailable.
+  it.each<[string, number, () => Response]>([
+    ["a 401", 401, () => apiError(401, "UNAUTHENTICATED", "token 51c2 rejected")],
+    ["the stale-token 403", 403, () => apiError(403, "PERMISSION_DENIED", "Request had insufficient authentication scopes.")],
+  ])("answers upstream_unavailable when %s takes the last unit: the request was tried", async (_name, status, reject) => {
+    // 44 pages are read; the request of page 45 takes the last unit and its token is rejected.
+    const requests = fakeApi((n) => (n < HEALTH_REQUESTS ? json(200, { dataPoints: points(`r${n}`), nextPageToken: `p${n}` }) : reject()));
+    const { client, budget, tokens, waits } = testClient();
+    const error = await failure(listSteps(client));
+    expect(toWire(error)).toEqual({
+      code: "upstream_unavailable",
+      message: "Google Health API is unavailable",
+      hint: "try again in a few minutes",
+    });
+    expect(statusOf(error)).toMatchObject({ httpStatus: status });
+    expect(requests).toHaveLength(HEALTH_REQUESTS);
+    expect(budget.remaining).toBe(0);
+    // The token is marked for renewal, so the next MCP request gets a new
+    // one. Nothing more is asked or sent in this one, and nothing waits.
+    expect(tokens.invalidated).toEqual(["at-0"]);
+    expect(tokens.asked).toBe(HEALTH_REQUESTS);
+    expect(waits).toEqual([]);
+    expect(warnings()).toEqual([["google health token rejected; renewing", { data_type: "steps", http_status: status }]]);
+    expect(logged()).not.toMatch(/51c2|insufficient/);
+  });
+
+  it("keeps invalid_input for the page after a renewed request that was answered", async () => {
+    // A budget of 2: the first request is rejected, the second (after the
+    // renewal) is answered with a next page, and that page is never tried.
+    const requests = fakeApi((_n, request) =>
+      request.auth === "Bearer at-0" ? apiError(401, "UNAUTHENTICATED", "") : json(200, { dataPoints: points("a"), nextPageToken: "p2" }),
+    );
+    const error = await failure(listSteps(testClient({ budget: new RequestBudget(2) }).client));
+    expect(toWire(error)).toMatchObject({ code: "invalid_input", message: "the date range holds more steps data than one call reads" });
+    expect(requests).toHaveLength(2);
   });
 
   it("is shared by every call and every client of one MCP request", async () => {

@@ -41,7 +41,7 @@ The Workers Free plan allows 50 external subrequests per invocation. The design 
 - The coach tools of one request take turns. The Google requests of a request run one after the other, and a later call finds in the cache what an earlier call fetched.
 - A request that would pass the budget is not sent. The tool answers one of two errors:
   - the call needs more pages or chunks than the budget has left: `invalid_input`, `the date range holds more <type> data than one call reads`, hint `use a shorter date range` (the Go client's own error for a range that is too large);
-  - retries of a failing request used the budget up: `upstream_unavailable`, as when the 4 attempts of a request run out.
+  - retries of a failing request used the budget up, or Google rejected the token of a request and no unit is left to send it again after the renewal: `upstream_unavailable`, as when the 4 attempts of a request run out. The rule: a page that was never tried is `invalid_input`; a request that was tried and cannot be sent again is `upstream_unavailable`.
 - A failing request is tried 4 times, with waits of about 1, 2 and 4 seconds (jittered; a `Retry-After` of up to 8 seconds is honored).
 
 ### Batching
@@ -245,7 +245,7 @@ Error texts and hints of the Google Health side:
 The request budget (the Go server has none):
 
 - **The budget error.** A call that needs more than the 45 Google Health requests of its MCP HTTP request answers `invalid_input`, `the date range holds more <type> data than one call reads`, hint `use a shorter date range`. The Go server gives this error only at 200 pages or 64 MiB. Here it also comes at 16 MiB per response and 32 MiB per call, and the 32 MiB cover all the chunks of one rollup.
-- **Retries that use the budget up** are `upstream_unavailable`.
+- **Retries that use the budget up** are `upstream_unavailable`. So is a request that Google rejects for its token when the budget has no unit left to send it again.
 - **Every network error is retried.** The Go server fails fast on a DNS not-found and on a certificate error; `fetch` in workerd does not tell the kinds apart.
 - **`Retry-After` as a date is read only in the IMF-fixdate form.** The Go server also reads the two obsolete forms.
 

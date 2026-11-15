@@ -140,7 +140,9 @@ interface RollupRead {
 /**
  * Steps, Active Zone Minutes and total calories for each day of [from, to],
  * from the API's daily rollups. A settled day comes from the cache when every
- * value the caller asked for is there.
+ * value the caller asked for is there. Only a day the band recorded (a day
+ * with a zone-minutes value) is ever cached, so a day without band data is
+ * read again on every call.
  *
  * The missing days are fetched in windows (plan.ts): one steps and one
  * zone-minutes rollup request per 90 days, and one total-calories request per
@@ -158,7 +160,10 @@ export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate,
   if (read.steps) keys.push(KEY_STEPS);
   if (read.azm) keys.push(KEY_AZM);
   if (read.kcal) keys.push(KEY_TOTAL_CALORIES);
-  const cached = ctx.readCache(from, to, settled, keys);
+  // The zone-minutes rows are loaded also for a caller that did not ask for
+  // zone minutes: a cached one says that the band recorded the day, which
+  // decides if a steps or total-calories row may be cached (see below).
+  const cached = ctx.readCache(from, to, settled, read.azm ? keys : [...keys, KEY_AZM]);
   const need: LocalDate[] = [];
   for (const day of days) {
     const s = cached.get(KEY_STEPS)?.get(day);
@@ -166,7 +171,7 @@ export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate,
     const k = cached.get(KEY_TOTAL_CALORIES)?.get(day);
     if ((!read.steps || s) && (!read.azm || z) && (!read.kcal || k)) {
       // An AZM value, even 0, means the band recorded the day.
-      a.days.set(day, { steps: s?.value ?? null, azm: z?.value ?? null, totalKcal: k?.value ?? null, worn: read.azm, partial: false });
+      a.days.set(day, { steps: s?.value ?? null, azm: read.azm ? (z?.value ?? null) : null, totalKcal: k?.value ?? null, worn: read.azm, partial: false });
       continue;
     }
     need.push(day);
@@ -263,9 +268,17 @@ export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate,
       const clean = isClean(day);
       const v = dayOf(day, clean);
       if (!v || day > settled || !clean) continue;
-      if (read.steps && v.steps !== null) ctx.put({ date: day, key: KEY_STEPS, value: v.steps, source: ROLLUP_SOURCE });
+      // A steps or total-calories row is cached only for a day the band
+      // recorded: its zone-minutes value was read now (a row, or the 0 of a
+      // worn day), or its row is already in the cache. A day without band
+      // data is read again on every call, as in the Go server, which serves a
+      // cached day only with its zone-minutes row. So band data that arrives
+      // after the day settled (a late sync) replaces the totals, also for a
+      // caller that reads steps or total calories alone.
+      const recorded = v.azm !== null || cached.get(KEY_AZM)?.has(day) === true;
+      if (read.steps && v.steps !== null && recorded) ctx.put({ date: day, key: KEY_STEPS, value: v.steps, source: ROLLUP_SOURCE });
       if (read.azm && v.azm !== null) ctx.put({ date: day, key: KEY_AZM, value: v.azm, source: ROLLUP_SOURCE });
-      if (read.kcal && v.totalKcal !== null) ctx.put({ date: day, key: KEY_TOTAL_CALORIES, value: v.totalKcal, source: ROLLUP_SOURCE });
+      if (read.kcal && v.totalKcal !== null && recorded) ctx.put({ date: day, key: KEY_TOTAL_CALORIES, value: v.totalKcal, source: ROLLUP_SOURCE });
       written.push(day);
     }
   }

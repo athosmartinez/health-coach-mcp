@@ -845,7 +845,7 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     // Each later call reads the off-wrist days again: their zone-minutes
     // rollups and step lists, and for total_calories their 14-day windows.
     // kcal_in reads total calories only for the days with the band.
-    ["a day off the wrist in every week", (i) => i % 7 === 6, { total_calories: [[45], 43], azm: [[18], 17], kcal_in: [[45, 18], 18] }],
+    ["a day off the wrist in every week", (i) => i % 7 === 6, { total_calories: [[45], 43], azm: [[18], 17], kcal_in: [[45, 43], 43] }],
     // total_calories takes the whole budget on every call. kcal_in has no
     // day with the band, so it reads no total calories: the food log 1, the
     // zone-minutes rollup 5 and the steps lists 13.
@@ -879,8 +879,9 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     // sleep 18 pages (6 windows of 63 nights), HRV 6
     ["hrv", [24], 2],
     ["sleep_asleep_min", [24], 2],
-    // one steps rollup per 90 days
-    ["steps", [5], 1],
+    // One steps rollup per 90 days. A read of steps alone learns no
+    // zone-minutes value, so it caches nothing and costs the same again.
+    ["steps", [5], 5],
     // zone-minutes rollup 5, the band's steps for the days without a row 13
     ["azm", [18], 1],
     // total-calories rollup 27 (14 days each), zone minutes 5, the band's steps 13: the whole budget

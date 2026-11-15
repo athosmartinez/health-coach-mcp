@@ -35,7 +35,7 @@ import { ALGO_VERSION } from "../src/metrics/stats";
 import type { Db } from "../src/store/db";
 import { deleteMetric, metricRange } from "../src/store/metrics";
 import {
-  type FakeGoogle,
+  FakeGoogle,
   NOW,
   assertSame,
   at,
@@ -600,20 +600,101 @@ describe("request counts: activity", () => {
     }),
   );
 
-  it("serves a narrow read from the rows it wrote, and a full read still fetches the whole day", () =>
+  it("serves a narrow read from the cache once the zone minutes of its days are known, and a full read still fetches the whole day", () =>
     inStore(async (db) => {
       fill(h.google, FROM, TO, { noZoneMinutes });
       const data = newData(db);
       const first = await data.activity(FROM, TO, { values: ["steps"] });
       h.google.takeRequests();
+      // No zone-minutes value is known yet, so no steps row was kept: the read is sent again.
+      expect(metricRange(db, KEY_STEPS, FROM, TO, ALGO_VERSION)).toEqual([]);
       const second = await data.activity(FROM, TO, { values: ["steps"] });
-      expect(h.google.takeRequests()).toEqual({ total: 0 });
+      expect(h.google.takeRequests()).toEqual({ total: 1, "rollup steps": 1 });
       expect(render(second.series(KEY_STEPS))).toBe(render(first.series(KEY_STEPS)));
       // A day is a hit for the Go server only with all three rows.
       const full = await data.activity(FROM, TO);
       expect(h.google.takeRequests().total).toBe(9);
       expect([...full.days]).toEqual([...(await inStore((other) => newData(other).activity(FROM, TO))).days]);
+      h.google.takeRequests();
+      // Now every day has its zone-minutes row: a narrow read comes from the cache.
+      for (const values of [["steps"], ["total_calories"], ["azm"], ["total_calories", "worn"]] as const) {
+        const narrow = await data.activity(FROM, TO, { values });
+        expect(h.google.takeRequests(), values.join()).toEqual({ total: 0 });
+        expect(narrow.days.size, values.join()).toBe(60);
+      }
+      expect(render((await data.activity(FROM, TO, { values: ["steps"] })).series(KEY_STEPS))).toBe(render(first.series(KEY_STEPS)));
     }));
+
+  it("caches a steps or total-calories row only for a day whose zone-minutes row is in the cache", () =>
+    inStore(async (db) => {
+      fill(h.google, "2026-09-01", "2026-09-10");
+      const data = newData(db);
+      const cachedDays = (key: string) => metricRange(db, key, "2026-09-01", "2026-09-10", ALGO_VERSION).map((row) => row.date);
+      // Zone minutes are read for the first five days only.
+      await data.activity("2026-09-01", "2026-09-05", { values: ["azm"] });
+      expect(cachedDays(KEY_AZM)).toEqual(["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05"]);
+      h.google.takeCalls();
+
+      for (const [values, key, rollup] of [
+        [["steps"], KEY_STEPS, "rollup steps"],
+        [["total_calories"], KEY_TOTAL_CALORIES, "rollup total-calories"],
+      ] as const) {
+        const first = await data.activity("2026-09-01", "2026-09-10", { values });
+        expect(h.google.takeCalls(), key).toEqual([`${rollup} 2026-09-01..2026-09-10`]);
+        // The read caches the days the band is known to have recorded, and no other day.
+        expect(cachedDays(key), key).toEqual(["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05"]);
+        // It did not write a zone-minutes row itself.
+        expect(cachedDays(KEY_AZM), key).toHaveLength(5);
+        // The next read asks only for the days without a zone-minutes row.
+        const second = await data.activity("2026-09-01", "2026-09-10", { values });
+        expect(h.google.takeCalls(), key).toEqual([`${rollup} 2026-09-06..2026-09-10`]);
+        expect(render(second.series(key)), key).toBe(render(first.series(key)));
+        expect(second.days.size, key).toBe(10);
+        // A narrow read never reports zone minutes or "worn" from the rows it only looked at.
+        expect([...second.days.values()].every((day) => day.azm === null && !day.worn), key).toBe(true);
+      }
+    }));
+
+  // Band data can reach Google days later (the band syncs after the day
+  // settled). A day without band data is never a cached day, so the next read
+  // of any kind gets the new totals.
+  it.each([
+    { name: "steps alone", values: ["steps"] as const },
+    { name: "total calories alone", values: ["total_calories"] as const },
+    { name: "every value", values: undefined },
+  ])("reads $name again for a settled day whose band data arrived late", ({ values }) =>
+    inStore(async (db) => {
+      const day = "2026-09-10";
+      // Before the sync: steps of another source and a resting estimate; no zone-minutes row, no step record of the band.
+      h.google.addRollup("steps", stepsRollup(day, 3000));
+      h.google.addRollup("total-calories", kcalRollup(day, 1700));
+      const data = newData(db);
+      const before = (await data.activity(day, day, values ? { values } : {})).days.get(day);
+      if (!values || values[0] === "steps") expect(before?.steps).toBe(3000);
+      if (!values || values[0] === "total_calories") expect(before?.totalKcal).toBe(1700);
+      if (!values) expect(before).toEqual({ steps: 3000, azm: null, totalKcal: 1700, worn: false, partial: false });
+      // Nothing of the day is cached: the band did not record it.
+      for (const key of ACTIVITY_KEYS) expect(metricRange(db, key, day, day, ALGO_VERSION), key).toEqual([]);
+
+      // After the sync: a zone-minutes row, and new totals.
+      const synced = new FakeGoogle();
+      synced.addRollup("steps", stepsRollup(day, 9000));
+      synced.addRollup("total-calories", kcalRollup(day, 2600));
+      synced.addRollup("active-zone-minutes", azmRollup(day, 20, 5, 0));
+      synced.install();
+      const after = (await data.activity(day, day, values ? { values } : {})).days.get(day);
+      if (!values || values[0] === "steps") expect(after?.steps).toBe(9000);
+      if (!values || values[0] === "total_calories") expect(after?.totalKcal).toBe(2600);
+      if (!values) expect(after).toEqual({ steps: 9000, azm: 25, totalKcal: 2600, worn: true, partial: false });
+      expect(synced.takeRequests().total).toBeGreaterThan(0);
+      // The band recorded the day now: the full read caches all three rows.
+      if (!values) {
+        for (const key of ACTIVITY_KEYS) expect(metricRange(db, key, day, day, ALGO_VERSION), key).toHaveLength(1);
+        await data.activity(day, day);
+        expect(synced.takeRequests()).toEqual({ total: 0 });
+      }
+    }),
+  );
 
   it("leaves the finished windows cached when the budget runs out, so the same call then needs fewer requests", () =>
     inStore(async (db) => {

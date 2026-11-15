@@ -234,6 +234,21 @@ export async function exchangeMcpCode(client: McpClient, code: string): Promise<
 export async function signInAsOwner(
   options: { client?: McpClient; other?: (request: Request) => Response | undefined } = {},
 ): Promise<McpTokens & { calls: GoogleCalls; clientId: string }> {
+  // The sign-in runs on the real clock, also in a test that fixed the clock.
+  // The OAuth provider stores the grant in KV with an absolute expiration
+  // (now + 30 days), and KV refuses an expiration that is not in the real
+  // future: with a clock fixed in the past, the sign-in fails from the day
+  // the real time passes "fixed time + 30 days".
+  const fixed = vi.isFakeTimers() ? vi.getMockedSystemTime() : null;
+  if (fixed !== null) vi.useRealTimers();
+  try {
+    return await signIn(options);
+  } finally {
+    if (fixed !== null) vi.useFakeTimers({ toFake: ["Date"], now: fixed });
+  }
+}
+
+async function signIn(options: { client?: McpClient; other?: (request: Request) => Response | undefined }): Promise<McpTokens & { calls: GoogleCalls; clientId: string }> {
   let nonce = "";
   const calls = mockGoogle(codeExchangeReply({ email: OWNER_EMAIL }, () => nonce), options.other);
   const client = options.client ?? (await registerClient());

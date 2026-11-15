@@ -105,6 +105,19 @@ describe("nights", () => {
       expect(r.excluded).toEqual({ ...NO_EXCLUDED, otherSource: 1, naps: 1 });
     }));
 
+  it("keeps a night that ends in the last nanosecond of a day on that day, as the Go server does", () =>
+    inStore(async (db) => {
+      const record = sleepRec(at(D10, 16, 0), at(D10, 23, 59), { deep: 70 });
+      // A sum in milliseconds that rounds up gives 2026-10-11T03:00:00Z: a night of the next local day.
+      record.sleep.interval.endTime = "2026-10-10T23:59:59.999999999-03:00";
+      h.google.add("sleep", record);
+      const r = await newData(db).recovery(D10, "2026-10-11");
+      expect([...r.nights.keys()]).toEqual([D10]);
+      // A night's window is kept to the minute.
+      expect(nightOf(r, D10)).toMatchObject({ start: at(D10, 16, 0), end: at(D10, 23, 59), endMinOfDay: 23 * 60 + 59 });
+      expect(r.skipped).toBe(0);
+    }));
+
   it("reads a cached night back with its window", () =>
     inStore(async (db) => {
       // One night starts before midnight, the other after it: both read back

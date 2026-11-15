@@ -497,7 +497,10 @@ describe("times", () => {
     ["2026-10-10T03:00:00-03:00", base],
     ["2026-10-10T11:30:00+05:30", base],
     ["2026-10-10T06:00:00.5Z", base + 500],
-    ["2026-10-10T06:00:00.123456789Z", base + 123.456789],
+    // Below the millisecond the fraction is cut to steps of 1/1024 ms: 0.456789 ms is 467 of them.
+    ["2026-10-10T06:00:00.123456789Z", base + 123 + 467 / 1024],
+    ["2026-10-10T06:00:00.123Z", base + 123],
+    ["2026-10-10T06:00:00.1239Z", base + 123 + 921 / 1024],
     ["2024-02-29T00:00:00Z", Date.parse("2024-02-29T00:00:00Z")],
     ["0001-01-01T00:00:00Z", ZERO_TIME],
     ["0099-12-31T23:59:59Z", Date.parse("0099-12-31T23:59:59Z")],
@@ -524,6 +527,47 @@ describe("times", () => {
     "",
   ])("refuses %j", (value) => {
     expect(ms(value)).toBeUndefined();
+  });
+
+  it("never rounds an instant up: the last nanosecond of a second stays in that second", () => {
+    // 23:59:59.999999999 in São Paulo. Rounded up it is the next second, and the next local day.
+    const next = Date.parse("2026-10-16T03:00:00Z");
+    for (const value of [
+      "2026-10-15T23:59:59.999999999-03:00",
+      "2026-10-16T02:59:59.999999999Z",
+      "2026-10-16T02:59:59.9999995Z",
+      // More digits than a nanosecond: the Go server cuts them too.
+      "2026-10-16T02:59:59.99999999999999999999Z",
+    ]) {
+      const read = ms(value) as number;
+      expect(read, value).toBeLessThan(next);
+      expect(Math.floor(read), value).toBe(next - 1);
+      expect(new Date(read).toISOString(), value).toBe("2026-10-16T02:59:59.999Z");
+    }
+    // Every fraction of a second keeps its whole milliseconds, exactly.
+    for (let n = 0; n < 1000; n++) {
+      const digits = String(n).padStart(3, "0");
+      expect(ms(`2026-10-10T06:00:00.${digits}Z`), digits).toBe(base + n);
+      expect(Math.floor(ms(`2026-10-10T06:00:00.${digits}999999Z`) as number), digits).toBe(base + n);
+    }
+    for (const [digits, whole] of [["9", 900], ["29", 290], ["57", 570], ["07", 70], ["0009", 0], ["99999", 999]] as const) {
+      expect(Math.floor(ms(`2026-10-10T06:00:00.${digits}Z`) as number), digits).toBe(base + whole);
+    }
+    // Before 1970 too: the instant is never after the text.
+    const old = Date.parse("1969-12-31T23:59:59Z");
+    expect(Math.floor(ms("1969-12-31T23:59:59.999999999Z") as number)).toBe(old + 999);
+    expect(ms("1969-12-31T23:59:59.999999999Z")).toBeLessThan(0);
+  });
+
+  it("keeps the order of instants inside one millisecond, down to about a microsecond", () => {
+    const inMs = ["000000", "000001", "000003", "0000035", "00025", "0005", "000999", "000999999"].map((digits) => ms(`2026-10-10T06:00:00.${digits}Z`) as number);
+    expect(inMs[0]).toBe(base);
+    for (let i = 1; i < inMs.length; i++) expect(inMs[i], String(i)).toBeGreaterThanOrEqual(inMs[i - 1] as number);
+    // A microsecond apart: different instants.
+    expect(new Set(inMs.slice(0, 3)).size).toBe(3);
+    expect(inMs.at(-1)).toBeLessThan(base + 1);
+    // Far from 1970 a double holds no such step: the instant is cut to its millisecond.
+    expect(ms("9000-01-01T00:00:00.123999Z")).toBe(Date.parse("9000-01-01T00:00:00.123Z"));
   });
 
   it("refuses a time that is not a string", () => {

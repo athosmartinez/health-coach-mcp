@@ -262,6 +262,27 @@ describe("body", () => {
       expect(b.weight.get(D10)?.value).toBe(80.5);
     }));
 
+  it("keeps a weigh-in of the last nanosecond of a day on that day, as the Go server does", () =>
+    inStore(async (db) => {
+      const record = weightRec(at(D10, 23, 59), 80500, "FITBIT");
+      // A sum in milliseconds that rounds up gives 2026-10-11T03:00:00Z: the next local day.
+      record.weight.sampleTime.physicalTime = "2026-10-10T23:59:59.999999999-03:00";
+      h.google.add("weight", record);
+      const b = await newData(db).body(D10, "2026-10-11");
+      expect([...b.weight]).toEqual([[D10, { at: new Date("2026-10-11T02:59:59.999Z"), value: 80.5, source: "Synthetic Scale" }]]);
+      expect(render(b.series(KEY_WEIGHT))).toBe("2026-10-10=80.5 2026-10-11=nil ");
+    }));
+
+  it("takes the earlier of two readings inside one millisecond", () =>
+    inStore(async (db) => {
+      const [later, earlier] = [weightRec(at(D10, 7, 0), 81200, "FITBIT"), weightRec(at(D10, 7, 0), 80500, "FITBIT")];
+      later.weight.sampleTime.physicalTime = "2026-10-10T07:00:00.000900-03:00";
+      earlier.weight.sampleTime.physicalTime = "2026-10-10T07:00:00.000100-03:00";
+      h.google.add("weight", later, earlier);
+      const b = await newData(db).body(D10, D10);
+      expect(b.weight.get(D10)).toEqual({ at: at(D10, 7, 0), value: 80.5, source: "Synthetic Scale" });
+    }));
+
   it("caches only settled days", () =>
     inStore(async (db) => {
       for (const date of ["2026-10-13", "2026-10-14", "2026-10-16"]) h.google.add("weight", weightRec(at(date, 7, 0), 80000, "FITBIT"));

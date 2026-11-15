@@ -275,7 +275,7 @@ Decoding of Google Health records:
 - **Key names match exactly.** Go's decoder also matches without regard to case.
 - **A repeated key keeps the last value**, and a page that holds its list key twice is refused. Go decodes both values, and keeps the last list.
 - **A whole number written as `440.0` or `4.4e2` is accepted** where Go refuses it.
-- **Time fractions finer than a millisecond are lost.**
+- **Time fractions finer than a millisecond are cut, never rounded up:** an instant stays in its second and on its local day, as in the Go server. An output shows milliseconds. Inside one millisecond, two instants keep their order down to about a microsecond; the Go server keeps nanoseconds.
 - **A record that is not JSON makes its whole page unreadable** (`upstream_unavailable`). It cannot reach a parser as one skipped record.
 - **A record longer than 1 MiB makes its whole page unreadable** (`upstream_unavailable`). The Go server has only its byte limits per response and per call.
 - **A page field that the client does not read may nest at most 512 levels.** It is checked as JSON without being parsed, and a deeper one makes the page unreadable. Go's decoder allows deeper nesting.

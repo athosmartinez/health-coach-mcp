@@ -140,7 +140,8 @@ const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:
  * An instant (Go time.Time), in epoch milliseconds: ZERO_TIME when missing or
  * null. The text must be RFC 3339 as Go reads it: upper case T and Z, two
  * digits per field, a real calendar day, no second 60. A fraction finer than
- * a millisecond is kept as a fraction of a millisecond.
+ * a millisecond is kept as a part of a millisecond, cut to about a
+ * microsecond. The result is never after the instant of the text.
  */
 export function time(parent: Obj | undefined, key: string): number {
   const value = field(parent, key);
@@ -156,9 +157,27 @@ export function time(parent: Obj | undefined, key: string): number {
     if (part(9) > 23 || part(10) > 59) throw UNREADABLE;
     offsetMinutes = (match[8] === "-" ? -1 : 1) * (part(9) * 60 + part(10));
   }
-  const fraction = match[7] === undefined ? 0 : Number(`0.${match[7]}`) * 1000;
-  return utcMs(year, month, day) + (hour * 3600 + minute * 60 + second) * 1000 - offsetMinutes * 60_000 + fraction;
+  // The fraction is cut, never rounded: a sum that rounds up can pass the end
+  // of its second (23:59:59.999999999 would become the next day). The whole
+  // milliseconds come from the first three digits, as an integer.
+  const digits = match[7] ?? "";
+  const ms =
+    utcMs(year, month, day) + (hour * 3600 + minute * 60 + second) * 1000 - offsetMinutes * 60_000 + Number(digits.slice(0, 3).padEnd(3, "0"));
+  // The rest, down to the nanosecond (the Go server reads nine digits), is cut
+  // to a step that a double holds exactly next to the milliseconds. So the
+  // sum is exact and stays below the next millisecond.
+  const rest = digits.length > 3 ? Math.floor(Number(`0.${digits.slice(3, 9)}`) * SUB_MS_STEPS) / SUB_MS_STEPS : 0;
+  return Math.abs(ms) < EXACT_SUB_MS ? ms + rest : ms;
 }
+
+/**
+ * The steps of a millisecond that an instant keeps, so two samples inside one
+ * millisecond stay in order: about a microsecond each.
+ */
+const SUB_MS_STEPS = 1024;
+
+/** Below this many milliseconds from 1970 (the year 2248), a double holds every step of SUB_MS_STEPS exactly. */
+const EXACT_SUB_MS = 2 ** 43;
 
 function daysIn(year: number, month: number): number {
   if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;

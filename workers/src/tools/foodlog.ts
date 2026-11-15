@@ -14,7 +14,7 @@ import { type LocalDate, type Zone, addDays, dateOf, instantOf, today } from "..
 import { INTERNAL_ERROR, ToolError } from "../coach/errors";
 import { trimSpace } from "../coach/text";
 import { MAX_NAME_LENGTH, type NewFoodEntry, pointId } from "../googlehealth/nutritionlog";
-import { MAX_ITEM_GRAMS, MAX_ITEM_KCAL } from "../healthdata";
+import { MAX_ITEM_GRAMS, MAX_ITEM_KCAL, MAX_LABEL_RUNES, clean } from "../healthdata";
 import { invalid } from "../store/db";
 import { type Tool, type ToolDefinition, type ToolOutcome, captureAsync, defineTool, register } from "./register";
 import { inputSchema, s } from "./schema";
@@ -71,8 +71,14 @@ const writeTool = (definition: ToolDefinition, body: Body): WriteTool => ({ tool
 /** The meal types the tool takes: the four that nutrition_day orders its meals by. */
 export const MEAL_TYPES = ["BREAKFAST", "LUNCH", "DINNER", "SNACK"] as const;
 
-/** The longest name of an entry, in characters (code points), after the spaces around it are cut. */
-export const MAX_NAME_CHARS = 120;
+/**
+ * The longest name of an entry, in characters (code points), after the spaces
+ * around it are cut. It is the cap of the filter that every food name goes
+ * through when it is read (`clean` in healthdata/decode.ts): nutrition_day
+ * shows at most this many characters of a name, so a longer one would come
+ * back cut.
+ */
+export const MAX_NAME_CHARS = MAX_LABEL_RUNES;
 
 /**
  * The most one entry can hold. These are the bounds past which nutrition_day
@@ -111,17 +117,29 @@ const str = (value: unknown): string => (typeof value === "string" ? value : "")
 /** JSON writes −0 as 0: a result holds the value its JSON text carries. */
 const unsigned = (value: number) => (value === 0 ? 0 : value);
 
-// Control characters, line and paragraph separators, and a surrogate without
-// its pair (which is not text: JSON would carry it as an escape).
-const NOT_IN_A_NAME = /[\p{Cc}\p{Zl}\p{Zp}\p{Cs}]/u;
+/** The error of a name that holds a character the read filter drops. */
+const VISIBLE_ONLY =
+  "name must hold visible characters only: no control or format character (such as a zero-width space, a " +
+  "zero-width joiner or a text direction mark), no line break and no replacement character";
 
-/** The name of the entry, with the spaces around it cut. The error never echoes it. */
+/**
+ * The name of the entry, with the spaces around it cut. The error names the
+ * rule and never echoes the name.
+ *
+ * Only a name that the read filter keeps unchanged is accepted. The filter
+ * (`clean`) drops control characters, format characters (zero-width
+ * characters, text direction overrides), line and paragraph separators, the
+ * replacement character and a surrogate without its pair, and it cuts a name
+ * at MAX_NAME_CHARS. A name that it would change would be logged as one text
+ * and shown by nutrition_day as another: a name of invisible characters would
+ * come back empty, and a direction override would reach Google as it is.
+ */
 function nameOf(value: unknown): string {
   const name = trimSpace(str(value));
   if (name === "") throw invalid("name must not be empty");
   // A code point is at most two UTF-16 units: a text this long needs no count.
   if (name.length > 2 * MAX_NAME_CHARS || [...name].length > MAX_NAME_CHARS) throw invalid(`name must be at most ${MAX_NAME_CHARS} characters`);
-  if (NOT_IN_A_NAME.test(name)) throw invalid("name must not hold control characters or line breaks");
+  if (clean(name) !== name) throw invalid(VISIBLE_ONLY);
   return name;
 }
 
@@ -190,7 +208,8 @@ const NUTRITION_LOG_ADD = writeTool(
       "estimated, for example from a photo or a description. It writes one new entry to Google Health and returns " +
       "its entry_id; keep the id, because nutrition_log_delete needs it. The values are your estimates, not " +
       "measurements: say so to the user, and log only after the user confirms the food and the values. Bounds: " +
-      `name 1 to ${MAX_NAME_CHARS} characters without control characters; kcal 0 to ${MAX_KCAL}; protein_g, carbs_g ` +
+      `name 1 to ${MAX_NAME_CHARS} visible characters (no control or format character, no line break), the name ` +
+      `nutrition_day then shows unchanged; kcal 0 to ${MAX_KCAL}; protein_g, carbs_g ` +
       `and fat_g 0 to ${MAX_MACRO_GRAMS} each, and a macro you leave out is logged as unknown, not as 0. date is ` +
       `today when omitted and at most ${MAX_DAYS_BACK} days before today; time is HH:MM in the coach's time zone, is ` +
       "now when omitted, is required with a date before today and is never after now. Every call adds a new entry, " +
@@ -199,7 +218,10 @@ const NUTRITION_LOG_ADD = writeTool(
     annotations: ADDS,
     inputSchema: inputSchema(
       s.object({
-        name: s.string(`Name of the food or the meal, 1 to ${MAX_NAME_CHARS} characters`),
+        name: s.string(
+          `Name of the food or the meal, 1 to ${MAX_NAME_CHARS} visible characters: no control or format character ` +
+            "(zero-width characters, text direction marks) and no line break",
+        ),
         meal_type: s.string("The meal the food belongs to"),
         kcal: s.number(`Estimated energy in kcal, 0 to ${MAX_KCAL}`),
         "protein_g?": s.number(`Estimated protein in grams, 0 to ${MAX_MACRO_GRAMS}; omit when unknown`),

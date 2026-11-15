@@ -159,7 +159,7 @@ Two tools write to Google Health. `nutrition_log_add` creates one entry of the f
 
 | Input | Rule |
 |---|---|
-| `name` | required text; the spaces around it are cut; 1 to 120 characters (code points); no control character, line or paragraph separator, or half of a surrogate pair |
+| `name` | required text; the spaces around it are cut; 1 to 64 characters (code points); visible characters only: no control character, no format character (a zero-width space or joiner, a text direction mark, a soft hyphen), no line or paragraph separator, no replacement character (U+FFFD) and no half of a surrogate pair |
 | `meal_type` | required: `BREAKFAST`, `LUNCH`, `DINNER` or `SNACK` |
 | `kcal` | required number, 0 to 10,000 |
 | `protein_g`, `carbs_g`, `fat_g` | optional numbers, 0 to 2,000 each; a macro that is left out is not sent: it is unknown, not 0 |
@@ -167,7 +167,8 @@ Two tools write to Google Health. `nutrition_log_add` creates one entry of the f
 | `time` | optional local time, `HH:MM` on a 24-hour clock, in the coach's zone (`HCM_TZ`); now when left out; required with a `date` before today; never after now |
 
 - **The input is strict.** An unknown property, a wrong type or a value out of bounds is `invalid_input`, and nothing is sent. An optional input may be `null`; `date` and `time` may also be `""`. An error names the field and its bound, never the value.
-- **The bounds** are the ones past which the food reads reject a value of an item (`MAX_ITEM_KCAL` and `MAX_ITEM_GRAMS` in `src/healthdata/nutrition.ts`). A single food item cannot pass them. A value that the tool accepts is a value that `nutrition_day` keeps. They are far inside the range Google documents for kcal and for grams, `[0, 100000]`.
+- **The bounds** are the ones past which the food reads reject a value of an item (`MAX_ITEM_KCAL` and `MAX_ITEM_GRAMS` in `src/healthdata/nutrition.ts`). A single food item cannot pass them. A value that the tool accepts is a value that `nutrition_day` keeps, and a name that the tool accepts is the name that `nutrition_day` shows: see the next point. They are far inside the range Google documents for kcal and for grams, `[0, 100000]`.
+- **The name.** Every food name goes through one filter when it is read (`clean` in `src/healthdata/decode.ts`): the filter drops control characters, format characters, line and paragraph separators, U+FFFD and a surrogate without its pair, and it cuts the name at 64 characters. The tool accepts only a name that this filter keeps unchanged. Otherwise a name of zero-width characters would be logged and then shown as an empty name, a text direction override would reach Google as it is, and a name of 120 characters would be shown as its first 64. So an emoji sequence that is joined with a zero-width joiner is refused. The error names the rule and never the name.
 - **A DST change.** A time that the clocks skip is read as the first instant after the gap. A time that happens twice is read as the first of its two instants. This is the rule of the start of a day in `src/coach/date.ts` (`instantOf` next to `bounds`). The output shows the time that was logged.
 - **The output:** `entry_id` (the data point name that Google returned), `date`, `time`, `meal_type`, the numbers that were sent (`null` for a macro that was not), and a `notice` that says the values are the client's estimate. It does not repeat the food name.
 - **Annotations:** not read-only, not destructive, not idempotent, `openWorldHint: true` (it writes to an external service).

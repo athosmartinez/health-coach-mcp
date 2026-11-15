@@ -226,6 +226,16 @@ Google's documentation does not prove that `batchDelete` refuses the name of a d
 - **An add:** check the input, send the create, store the returned name, answer. When the store write fails after Google took the entry, the tool answers `internal_error` with a text of its own: `the entry was created in Google Health, but this server could not record it, so it cannot delete the entry`, hint `do not log the same food again`. The log has `tool_internal_error` with the tool name and the error's type names.
 - **A delete:** an `entry_id` that is not a nutrition-log data point name is `invalid_input`. A name that is not in the table, exactly as stored, is `no_data`. In both cases nothing is sent to Google: not for an id of another data type, another user path or a name with more path parts, and not for the band's own food. After a delete that happened, the row is removed. An HTTP 404 means the entry is already gone: the row is removed and the answer is the same `{entry_id, deleted: true}`. After any other error the row stays, so the delete can be asked again.
 
+### The food reads count the entries of this server
+
+The food reads keep only the items of the Fitbit platform, as the Go server does. An item of another platform is left out: it raises `other_source_food_excluded`, and it makes the kcal delta of `nutrition_day` null. An entry written through the API has the platform `GOOGLE_WEB_API` (the answer of the guide's example). So without one more rule the coach would not count the meals it logged itself.
+
+- **The rule.** The nutrition source (`src/healthdata/nutrition.ts`) also keeps an item whose data point ID is in the table of the entries this server created. Every other item of another platform stays "other source", as before.
+- **By ID, not by name.** The ID is the last path part of the name. A create answers `users/<user id>/…`, and a list can name the user in another form.
+- **By day.** The table is asked for the entries of the days of the read, with one day of margin on each side. It is one store read through an index, and no request to Google.
+- **Every food read has the rule:** `nutrition_day`, `weekly_report` and the food metrics of `metric_series`. The source label of such an item is `GOOGLE_WEB_API`.
+- **This is a deliberate difference from the Go server**, which writes nothing to Google Health and so has no such rule. It is a commit of its own, the last one of its pull request: `feat(workers): count the entries this server logged in the food reads`. To keep the Go rule, revert that commit. The two tools still add and delete, and an entry of this server then reads as food of another source.
+
 ### The request budget of a write
 
 - A write takes one unit of the 45 for each HTTP attempt, like a read. The two tools take turns with the coach tools on the one budget and the one token answer of the MCP HTTP request.
@@ -420,6 +430,7 @@ Writes to Google Health (the Go server has none):
 - **Two tools write the food log.** `nutrition_log_add` and `nutrition_log_delete` exist only here; the Go server is read-only on Google Health. They are the only tools with `openWorldHint: true`. See [Food log writes](#food-log-writes).
 - **The Google Health client is not read-only.** Next to the reads of the Go client, it sends the create of one nutrition-log data point and the delete of nutrition-log data points by name, and no other write.
 - **The store has a table that the Go store does not have:** `nutrition_entries` (migration 5), the entries this server created.
+- **The food reads keep the entries this server created**, although their platform is `GOOGLE_WEB_API` and not Fitbit. The Go server leaves out every item of another platform. An item of another platform that this server did not create is left out here too. See [The food reads count the entries of this server](#the-food-reads-count-the-entries-of-this-server), which also says how to take the rule out.
 
 Logs:
 
@@ -466,7 +477,8 @@ How to measure after a deploy:
 - `workout_review` by `date` of a day whose session lists and heart-rate lists need more than 45 requests cannot succeed: nothing of them is cached. `exercise_id` reviews one session of such a day with one heart-rate list.
 - The two food log tools rest on Google's documentation only: no real call has tested their request shapes. See [What the documentation does not settle](#what-the-documentation-does-not-settle).
 - `nutrition_log_delete` needs the `entry_id` that `nutrition_log_add` returned. `nutrition_day` does not list the ids of its items (its output is the Go server's), so an entry whose id the client did not keep cannot be deleted through this server.
-- An add whose outcome is unknown, or whose row could not be stored, can leave an entry in Google Health that this server does not own. The server cannot delete it.
+- An add whose outcome is unknown, or whose row could not be stored, can leave an entry in Google Health that this server does not own. The server cannot delete it, and the food reads count it as food of another source.
+- The food reads know an entry of this server by its data point ID and by its day (one day of margin). An entry that another app moves by two days or more reads as food of another source.
 - Two MCP HTTP requests at the same time are not ordered, so the same food sent in two requests is logged twice. Inside one request the adds take turns, and each call adds its own entry: the server does not look for an equal entry.
 - An entry cannot be changed: delete it and add it again. An entry can be dated at most 30 days back, and has one of four meal types.
 - A year in which every 31-day window has days without band data, in an account whose 31-day list of the band's steps has four pages or more, makes `metric_series` for `azm`, `total_calories`, `kcal_in` and `protein_g` over that year answer the budget error on every call. Use a shorter range.

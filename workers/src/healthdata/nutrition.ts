@@ -2,6 +2,7 @@
 
 import type { LocalDate } from "../coach/date";
 import { compareText } from "../coach/text";
+import { pointId } from "../googlehealth/nutritionlog";
 import type { Point } from "../metrics/stats";
 import type { Context } from "./cache";
 import { ZERO_TIME, clean, dataSource, decode, float, label, object, objects, root, text, time } from "./decode";
@@ -169,14 +170,32 @@ function readFood(record: unknown) {
 }
 
 /**
+ * Whether the record is a food entry this server created: its data point ID
+ * is one of `own`. The comparison is by ID (the last part of the name): a
+ * create answers `users/<user id>/…`, and a list can name the user in another
+ * form.
+ */
+function createdHere(name: string, own: ReadonlySet<string> | undefined): boolean {
+  if (own === undefined || own.size === 0) return false;
+  const id = pointId(name);
+  return id !== undefined && own.has(id);
+}
+
+/**
  * Reduces one food record. An implausible or repeated nutrient is rejected
  * alone: dropping the whole item would take its calories out of a day that
  * would still look complete.
+ *
+ * `own` holds the data point IDs of the entries this server created. Such an
+ * entry is kept next to the band's own items, although its platform is the
+ * API's (GOOGLE_WEB_API): the coach must count the meals it logged itself.
+ * The Go server writes nothing to Google Health, so it has no such rule; a
+ * record of any other platform is still left out as "other".
  */
-export function parseFood(record: unknown): FoodRead {
+export function parseFood(record: unknown, own?: ReadonlySet<string>): FoodRead {
   const r = decode(() => readFood(record));
   if (r === undefined || !r.present || r.at === ZERO_TIME) return { kind: "undated" };
-  if (r.source.platform !== PRIMARY_PLATFORM) return { kind: "other", at: r.at };
+  if (r.source.platform !== PRIMARY_PLATFORM && !createdHere(r.name, own)) return { kind: "other", at: r.at };
   const nutrients: Partial<Record<Nutrient, number>> = {};
   const rejected = new Set<Nutrient>();
   const set = (key: Nutrient, value: number, high: number) => {
@@ -218,9 +237,16 @@ export async function readNutrition(ctx: Context, from: LocalDate, to: LocalDate
   dayList(from, to);
   const { today } = ctx.clock();
   const out = new Nutrition(from, to);
+  // The entries this server created, with the same day of margin as the list.
+  let own: ReadonlySet<string> | undefined;
+  try {
+    own = ctx.cache.createdFoodIds?.(shift(from, -1), shift(to, 1));
+  } catch (cause) {
+    throw new Error("healthdata: read created entries", { cause });
+  }
   // A day of margin: the API filters on the device's local start time.
   const reads = await ctx.api.list("nutrition-log", shift(from, -1), shift(to, 1), (record) => {
-    const read = parseFood(record);
+    const read = parseFood(record, own);
     if (read.kind === "undated") return read;
     const day = ctx.zone.dateOf(Math.floor(read.kind === "item" ? read.item.at : read.at));
     return day < from || day > to ? undefined : { ...read, day };

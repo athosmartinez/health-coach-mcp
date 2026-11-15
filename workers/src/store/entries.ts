@@ -10,7 +10,7 @@
 
 import { type LocalDate, parseDate } from "../coach/date";
 import { pointId } from "../googlehealth/nutritionlog";
-import type { Db } from "./db";
+import { type Db, text } from "./db";
 
 /**
  * Records an entry that Google Health just created. `name` is the data point
@@ -38,4 +38,18 @@ export function hasEntry(db: Db, name: string): boolean {
 /** Removes the row of an entry that is gone from Google Health. No row is not an error. */
 export function forgetEntry(db: Db, name: string): void {
   db.all("DELETE FROM nutrition_entries WHERE name = ?", name);
+}
+
+/**
+ * The data point IDs of the entries this server created on the local days
+ * [from, to], read through the index of the day. IDs, not names: a list can
+ * name the user in another form than the create did.
+ */
+export function entryIdsBetween(db: Db, from: LocalDate, to: LocalDate): Set<string> {
+  const ids = new Set<string>();
+  for (const row of db.all("SELECT name FROM nutrition_entries WHERE day >= ? AND day <= ?", from, to)) {
+    const id = pointId(text(row.name));
+    if (id !== undefined) ids.add(id);
+  }
+  return ids;
 }

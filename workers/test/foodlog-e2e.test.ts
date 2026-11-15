@@ -160,14 +160,27 @@ describe("the food log writes, from the sign-in to a tool result", () => {
     expect(await storedEntries()).toEqual([{ name: createdName(1), day: TODAY, created_at: "2026-10-16T13:00:00.000000000Z" }]);
 
     // 2. The day read back. An entry written through the API has the platform
-    // GOOGLE_WEB_API, which the food reads leave out as food of another source
-    // (the rule of the Go server): the day shows the band's own snack and
-    // says that other food was left out.
+    // GOOGLE_WEB_API, and the list names it under users/me. The food reads
+    // keep it, next to the band's own snack, because its data point id is in
+    // the table of the entries this server created.
     const review = await ok("nutrition_day", { date: TODAY });
-    expect(review.data).toMatchObject({ date: TODAY, items_logged: 1 });
-    expect(review.data.totals.kcal).toEqual({ value: 200, items_reporting: 1, complete: true });
-    expect(review.data.per_meal.map((meal: { meal_type: string }) => meal.meal_type)).toEqual(["SNACK"]);
-    expect(review.quality_flags).toContain("other_source_food_excluded");
+    expect(review.data).toMatchObject({ date: TODAY, items_logged: 2 });
+    expect(review.data.totals.kcal).toEqual({ value: 631.5, items_reporting: 2, complete: true });
+    expect(review.data.totals.protein_g).toEqual({ value: 33.8, items_reporting: 2, complete: true });
+    // The snack of the band reports no carbohydrate: a partial total.
+    expect(review.data.totals.carb_g).toEqual({ value: 51.3, items_reporting: 1, complete: false });
+    expect(review.data.per_meal.map((meal: { meal_type: string }) => meal.meal_type)).toEqual(["LUNCH", "SNACK"]);
+    expect(review.data.per_meal[0].items).toEqual([
+      {
+        name: "Feijoada completa",
+        time: "2026-10-16T08:15:00-03:00",
+        nutrients: { kcal: 431.5, protein_g: 23.8, carb_g: 51.3, fat_g: 17.5, fiber_g: null, sugar_g: null, sodium_mg: null },
+        rejected_nutrients: [],
+      },
+    ]);
+    // No food was left out as food of another source.
+    expect(review.quality_flags).not.toContain("other_source_food_excluded");
+    expect(review.sources).toContain("GOOGLE_WEB_API");
     expect(g.takeExternal()).toMatchObject({ "nutrition-log": 1 });
 
     // 3. The delete: one batchDelete for that entry, by its name under users/me.

@@ -2,7 +2,7 @@
 // All values are synthetic.
 import { describe, expect, it } from "vitest";
 
-import { forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
+import { entryIdsBetween, forgetEntry, hasEntry, recordEntry } from "../src/store/entries";
 import { fixedClock, withDb } from "./memory-helpers";
 
 const NAME = "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-entry-1";
@@ -69,6 +69,44 @@ describe("the entries this server created", () => {
     withDb((db, sql) => {
       expect(() => recordEntry(db, name, day)).toThrow(message);
       expect(rows(sql)).toEqual([]);
+    }));
+
+  it("lists the data point ids of the entries of a range of days, both ends counted", () =>
+    withDb((db) => {
+      recordEntry(db, "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-a", "2026-10-12");
+      recordEntry(db, "users/me/dataTypes/nutrition-log/dataPoints/syn-b", "2026-10-13");
+      recordEntry(db, "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-c", "2026-10-13");
+      recordEntry(db, "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-d", "2026-10-14");
+      recordEntry(db, "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-e", "2026-10-15");
+      // The ids, without the user part of the names.
+      expect([...entryIdsBetween(db, "2026-10-13", "2026-10-14")].sort()).toEqual(["syn-b", "syn-c", "syn-d"]);
+      expect([...entryIdsBetween(db, "2026-10-12", "2026-10-12")]).toEqual(["syn-a"]);
+      expect(entryIdsBetween(db, "2026-10-16", "2026-10-20").size).toBe(0);
+      expect(entryIdsBetween(db, "2026-10-14", "2026-10-13").size).toBe(0);
+      // A deleted entry is no longer listed.
+      forgetEntry(db, "users/me/dataTypes/nutrition-log/dataPoints/syn-b");
+      expect([...entryIdsBetween(db, "2026-10-13", "2026-10-13")]).toEqual(["syn-c"]);
+    }));
+
+  it("leaves out a row whose name no longer reads as a data point name", () =>
+    withDb((db, sql) => {
+      recordEntry(db, NAME, "2026-10-13");
+      sql.exec("INSERT INTO nutrition_entries (name, day, created_at) VALUES ('not a name', '2026-10-13', 'x')");
+      expect([...entryIdsBetween(db, "2026-10-13", "2026-10-13")]).toEqual(["syn-entry-1"]);
+    }));
+
+  it("reads the entries of a range of days through the index of the day", () =>
+    withDb((db, sql) => {
+      for (let n = 0; n < 300; n++) recordEntry(db, `users/1122334455/dataTypes/nutrition-log/dataPoints/syn-old-${n}`, "2026-09-01");
+      recordEntry(db, NAME, "2026-10-13");
+      recordEntry(db, OTHER, "2026-10-14");
+      const plan = sql.exec<{ detail: string }>("EXPLAIN QUERY PLAN SELECT name FROM nutrition_entries WHERE day >= ? AND day <= ?", "2026-10-12", "2026-10-14").toArray();
+      expect(plan.map((row) => row.detail).join(" ")).toContain("USING INDEX nutrition_entries_by_day");
+      const read = sql.exec("SELECT name FROM nutrition_entries WHERE day >= ? AND day <= ?", "2026-10-12", "2026-10-14");
+      expect(read.toArray()).toHaveLength(2);
+      // The 300 rows of the other days are not read.
+      expect(read.rowsRead).toBeLessThanOrEqual(6);
+      expect(entryIdsBetween(db, "2026-10-12", "2026-10-14").size).toBe(2);
     }));
 
   it("finds an entry through the primary key, and writes three rows for one", () =>

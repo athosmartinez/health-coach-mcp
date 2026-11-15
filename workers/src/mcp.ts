@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
 import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "./google";
+import { registerGuardrails, registerPrompts } from "./prompts";
 import type { GoogleAccountStatus } from "./store";
 import { registerMemory } from "./tools/memory";
 import { registerCoach } from "./tools/moments";
@@ -93,6 +94,9 @@ export function createServer(deps: ServerDeps): McpServer {
 
   registerMemory(server, deps.memory);
   registerCoach(server, deps.coach);
+  registerGuardrails(server);
+  // The prompts call profile_get and the coach tools: this server has both.
+  registerPrompts(server);
 
   return server;
 }

@@ -5,7 +5,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { UTC, Zone, addDays, bounds, dateOf, parseDate, sleepDay, today } from "../src/coach/date";
+import { UTC, Zone, addDays, bounds, dateOf, instantOf, parseDate, sleepDay, today } from "../src/coach/date";
 import { confidence, newEnvelope } from "../src/coach/envelope";
 import { INTERNAL_ERROR, ToolError, errorTypes, toWire, wireText } from "../src/coach/errors";
 import { byteLength, compareText, fields, goJsonLength, lower, trimSpace, truncate } from "../src/coach/text";
@@ -89,6 +89,75 @@ describe("LocalDate", () => {
     const first = new Date("2026-11-01T05:30:00Z"); // 01:30 EDT
     const second = new Date(first.getTime() + HOUR); // 01:30 EST
     for (const t of [first, second]) expect(dateOf(t, NEW_YORK)).toBe("2026-11-01");
+  });
+
+  it.each([
+    ["São Paulo", BRT, "2026-10-16", 11, 30, "2026-10-16T14:30:00Z"],
+    ["São Paulo at midnight", BRT, "2026-10-16", 0, 0, "2026-10-16T03:00:00Z"],
+    ["São Paulo at the last minute", BRT, "2026-10-16", 23, 59, "2026-10-17T02:59:00Z"],
+    ["UTC", UTC, "2026-10-16", 9, 5, "2026-10-16T09:05:00Z"],
+    ["a zone on the half hour", new Zone("Asia/Kolkata"), "2026-10-16", 8, 15, "2026-10-16T02:45:00Z"],
+    ["a zone east of the date line", new Zone("Pacific/Kiritimati"), "2026-10-16", 1, 0, "2026-10-15T11:00:00Z"],
+    ["New York the day before its clocks go forward", NEW_YORK, "2026-03-07", 2, 30, "2026-03-07T07:30:00Z"],
+    ["New York the day after its clocks go back", NEW_YORK, "2026-11-02", 1, 30, "2026-11-02T06:30:00Z"],
+  ])("instantOf reads a wall time in %s", (_name, zone, day, hour, minute, want) => {
+    const t = instantOf(day, hour, minute, zone);
+    expect(t).toEqual(new Date(want));
+    expect(dateOf(t as Date, zone)).toBe(day);
+  });
+
+  it.each([
+    // New York, 2026-03-08: 02:00 to 02:59 do not exist. 03:00 EDT is 07:00 UTC.
+    ["the minute before the gap", NEW_YORK, "2026-03-08", 1, 59, "2026-03-08T06:59:00Z"],
+    ["the first skipped minute", NEW_YORK, "2026-03-08", 2, 0, "2026-03-08T07:00:00Z"],
+    ["a time inside the gap", NEW_YORK, "2026-03-08", 2, 30, "2026-03-08T07:00:00Z"],
+    ["the last skipped minute", NEW_YORK, "2026-03-08", 2, 59, "2026-03-08T07:00:00Z"],
+    ["the first minute after the gap", NEW_YORK, "2026-03-08", 3, 0, "2026-03-08T07:00:00Z"],
+    ["a minute later", NEW_YORK, "2026-03-08", 3, 1, "2026-03-08T07:01:00Z"],
+    // São Paulo, 2018-11-04: 00:00 to 00:59 do not exist. The day starts at 01:00, 03:00 UTC.
+    ["a skipped midnight", BRT, "2018-11-04", 0, 0, "2018-11-04T03:00:00Z"],
+    ["a time in a gap at midnight", BRT, "2018-11-04", 0, 30, "2018-11-04T03:00:00Z"],
+    // Lord Howe Island, 2026-10-04: a gap of 30 minutes, 02:00 to 02:29.
+    ["a time in a gap of half an hour", new Zone("Australia/Lord_Howe"), "2026-10-04", 2, 15, "2026-10-03T15:30:00Z"],
+  ])("instantOf reads %s as the first instant after the gap, as the start of a day", (_name, zone, day, hour, minute, want) => {
+    const t = instantOf(day, hour, minute, zone);
+    expect(t).toEqual(new Date(want));
+    // The instant is on the day that was asked for.
+    expect(dateOf(t as Date, zone)).toBe(day);
+  });
+
+  it("instantOf agrees with bounds on a day whose midnight does not exist", () => {
+    expect(instantOf("2018-11-04", 0, 0, BRT)).toEqual(bounds("2018-11-04", BRT)?.start);
+    expect(instantOf("2026-03-08", 0, 0, NEW_YORK)).toEqual(bounds("2026-03-08", NEW_YORK)?.start);
+    expect(instantOf("2026-11-01", 0, 0, NEW_YORK)).toEqual(bounds("2026-11-01", NEW_YORK)?.start);
+  });
+
+  it.each([
+    // New York, 2026-11-01: 01:00 to 01:59 happen twice, first at UTC-4.
+    ["the minute before the repeated hour", NEW_YORK, "2026-11-01", 0, 59, "2026-11-01T04:59:00Z"],
+    ["the first repeated minute", NEW_YORK, "2026-11-01", 1, 0, "2026-11-01T05:00:00Z"],
+    ["a time inside the repeated hour", NEW_YORK, "2026-11-01", 1, 30, "2026-11-01T05:30:00Z"],
+    ["the last repeated minute", NEW_YORK, "2026-11-01", 1, 59, "2026-11-01T05:59:00Z"],
+    ["the first minute after the repeated hour", NEW_YORK, "2026-11-01", 2, 0, "2026-11-01T07:00:00Z"],
+    // São Paulo, 2018-02-17: 23:00 to 23:59 happen twice, first at UTC-2.
+    ["a time repeated before midnight", BRT, "2018-02-17", 23, 30, "2018-02-18T01:30:00Z"],
+  ])("instantOf reads %s as the first of its instants", (_name, zone, day, hour, minute, want) => {
+    const t = instantOf(day, hour, minute, zone);
+    expect(t).toEqual(new Date(want));
+    expect(dateOf(t as Date, zone)).toBe(day);
+  });
+
+  it.each([
+    ["2026-02-30", 10, 0],
+    ["", 10, 0],
+    ["2026-10-16", 24, 0],
+    ["2026-10-16", 10, 60],
+    ["2026-10-16", -1, 0],
+    ["2026-10-16", 10, -1],
+    ["2026-10-16", 10.5, 0],
+    ["2026-10-16", 10, Number.NaN],
+  ])("instantOf(%j, %d, %d) is not a time", (day, hour, minute) => {
+    expect(instantOf(day, hour, minute, BRT)).toBeUndefined();
   });
 
   it.each([

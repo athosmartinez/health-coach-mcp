@@ -261,7 +261,15 @@ export function foodRec(t: Date, options: FoodOptions = {}): Json {
 }
 
 const API = "https://health.googleapis.com";
-const PATH = /^\/v4\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints(:dailyRollUp)?$/;
+const PATH = /^\/v4\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints(:dailyRollUp|:batchDelete)?$/;
+
+/** The user ID that the fake API writes in the name of a data point it creates. */
+export const FAKE_USER_ID = "1122334455";
+
+/** The OAuth client ID in the data source of a point created through the fake API. */
+export const FAKE_CLIENT_ID = "synthetic-client.apps.example";
+
+const TYPE_URL = "type.googleapis.com/google.devicesandservices.health.v4";
 const FILTER = /^([a-z_]+)\.([a-z_.]+) >= "([^"]+)" AND \1\.\2 < "([^"]+)"$/;
 
 function dateText(date: Json | undefined): string {
@@ -307,10 +315,18 @@ function sampleMs(dataType: string, record: Json | null): number {
  * does (a record without a readable time or day always comes back, so the
  * tests can send unreadable records), pages them by the page size of the
  * request, and counts every HTTP request per data type.
+ *
+ * It also takes the two writes of the food log, as Google's documentation
+ * shows them: the create of one nutrition-log data point, and batchDelete by
+ * name. A created point is listed like any other record, with the data
+ * source of the documented answer (platform GOOGLE_WEB_API).
  */
 export class FakeGoogle {
   private readonly records = new Map<string, Json[]>();
   private readonly rollups = new Map<string, Json[]>();
+  private createdCount = 0;
+  /** The body of every create and delete the API received, in order. */
+  writes: { kind: "create" | "delete"; body: Json }[] = [];
   /** Return every record, ignoring the range, like a sloppy filter. */
   loose = false;
   /** When set, every request gets this answer. */
@@ -362,16 +378,83 @@ export class FakeGoogle {
     return new URL(request.url).origin === API;
   }
 
+  /**
+   * What a request is: the data type for a list, "rollup <type>" for a daily
+   * rollup, "create <type>" and "delete <type>" for the two writes.
+   */
+  kindOf(request: Request): string {
+    const url = new URL(request.url);
+    const [, dataType = "?", suffix] = PATH.exec(url.pathname) ?? [];
+    if (suffix === ":dailyRollUp") return `rollup ${dataType}`;
+    if (suffix === ":batchDelete") return `delete ${dataType}`;
+    return request.method === "POST" ? `create ${dataType}` : dataType;
+  }
+
+  /** The nutrition-log points that were created through the API and not deleted. */
+  createdPoints(): Json[] {
+    return (this.records.get("nutrition-log") ?? []).filter((record) => record?.dataSource?.platform === "GOOGLE_WEB_API");
+  }
+
   /** Answers one request to the API; any other URL fails the test. */
   async respond(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const match = PATH.exec(url.pathname);
     if (url.origin !== API || !match) throw new Error(`unexpected fetch in test: ${request.method} ${url.origin}${url.pathname}`);
     const dataType = match[1] as string;
-    const rollup = match[2] !== undefined;
-    this.sent.push(rollup ? `rollup ${dataType}` : dataType);
+    const kind = this.kindOf(request);
+    this.sent.push(kind);
     if (this.fail) return this.fail();
-    return rollup ? this.rollup(dataType, (await request.json()) as Json) : this.list(dataType, url.searchParams);
+    if (kind.startsWith("rollup ")) return this.rollup(dataType, (await request.json()) as Json);
+    if (kind.startsWith("create ")) return this.create(dataType, (await request.json()) as Json);
+    if (kind.startsWith("delete ")) return this.batchDelete(dataType, (await request.json()) as Json);
+    return this.list(dataType, url.searchParams);
+  }
+
+  private refuse(status: number, grpc: string): Response {
+    return Response.json({ error: { code: status, status: grpc, message: "synthetic refusal" } }, { status });
+  }
+
+  /**
+   * Creates one nutrition-log point and answers the finished Operation of the
+   * documented example. The answer names the point under the user's ID; a
+   * list names it under `users/me`, so the same point has two name forms.
+   */
+  private create(dataType: string, body: Json): Response {
+    this.writes.push({ kind: "create", body });
+    const log = body?.nutritionLog;
+    const interval = log?.interval;
+    const offset = /^-?\d+s$/;
+    const readable =
+      dataType === "nutrition-log" &&
+      typeof log?.foodDisplayName === "string" &&
+      [interval?.startTime, interval?.endTime].every((time) => typeof time === "string" && !Number.isNaN(Date.parse(time))) &&
+      [interval?.startUtcOffset, interval?.endUtcOffset].every((value) => typeof value === "string" && offset.test(value));
+    if (!readable) return this.refuse(400, "INVALID_ARGUMENT");
+    const id = `syn-created-${++this.createdCount}`;
+    const dataSource = { recordingMethod: "UNKNOWN", application: { googleWebClientId: FAKE_CLIENT_ID }, platform: "GOOGLE_WEB_API" };
+    this.add("nutrition-log", { name: `users/me/dataTypes/nutrition-log/dataPoints/${id}`, dataSource, nutritionLog: log });
+    return Response.json({
+      done: true,
+      response: { "@type": `${TYPE_URL}.DataPoint`, name: `users/${FAKE_USER_ID}/dataTypes/nutrition-log/dataPoints/${id}`, dataSource, nutritionLog: log },
+    });
+  }
+
+  /** Deletes the named points. No point with one of the names: HTTP 404. */
+  private batchDelete(dataType: string, body: Json): Response {
+    this.writes.push({ kind: "delete", body });
+    const names: unknown = body?.names;
+    const prefix = `users/me/dataTypes/${dataType}/dataPoints/`;
+    if (!Array.isArray(names) || names.length === 0 || names.some((name) => typeof name !== "string" || !name.startsWith(prefix))) {
+      return this.refuse(400, "INVALID_ARGUMENT");
+    }
+    const all = this.records.get(dataType) ?? [];
+    const gone = all.filter((record) => names.includes(record?.name));
+    if (gone.length === 0) return this.refuse(404, "NOT_FOUND");
+    this.records.set(
+      dataType,
+      all.filter((record) => !gone.includes(record)),
+    );
+    return Response.json({ done: true, response: { "@type": `${TYPE_URL}.BatchDeleteDataPointsResponse`, dataPoints: gone } });
   }
 
   private page(key: string, items: Json[], size: number, token: string | null): Response {

@@ -15,10 +15,11 @@ function tableNames(sql: SqlStorage): string[] {
     .filter((name) => !name.startsWith("sqlite_") && !name.startsWith("_cf_"));
 }
 
-const ALL_TABLES = ["daily_metrics", "google_account", ...MEMORY_TABLES, "schema_version"].sort();
+const ALL_TABLES = ["daily_metrics", "google_account", ...MEMORY_TABLES, "nutrition_entries", "schema_version"].sort();
 
-/** Undoes migrations 4 and 3. The triggers and the FTS5 shadow tables go with their tables. */
+/** Undoes migrations 5, 4 and 3. The triggers and the FTS5 shadow tables go with their tables. */
 function dropMemoryTables(sql: SqlStorage): void {
+  sql.exec("DROP TABLE nutrition_entries");
   sql.exec("DROP TABLE daily_metrics");
   sql.exec("DROP TABLE notes_fts");
   for (const table of ["profile", "targets", "health_items", "lab_results", "preferences", "notes"]) {
@@ -47,7 +48,7 @@ async function row(): Promise<Record<string, SqlStorageValue> | undefined> {
 describe("CoachStore schema", () => {
   it("migrates a new object to the latest version", async () => {
     const stub = coachStore(env);
-    expect(SCHEMA_VERSION).toBe(4);
+    expect(SCHEMA_VERSION).toBe(5);
     expect(await stub.schemaVersion()).toBe(SCHEMA_VERSION);
     await runInDurableObject(stub, async (_instance, state) => {
       expect(tableNames(state.storage.sql)).toEqual(ALL_TABLES);
@@ -100,13 +101,14 @@ describe("CoachStore schema", () => {
   it("adds the metrics cache to an object that already holds the coach memory", async () => {
     await runInDurableObject(freshStore(), async (_instance, state) => {
       const sql = state.storage.sql;
+      sql.exec("DROP TABLE nutrition_entries");
       sql.exec("DROP TABLE daily_metrics");
       sql.exec("UPDATE schema_version SET version = 3 WHERE id = 1");
       sql.exec("INSERT INTO preferences (key, value_json, updated_at) VALUES ('units', '\"metric\"', '2026-10-14T12:00:00.000000000Z')");
 
       migrate(state.storage);
       expect(tableNames(sql)).toEqual(ALL_TABLES);
-      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(4);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(SCHEMA_VERSION);
       // The memory survives the upgrade, and the cache starts empty.
       expect(sql.exec("SELECT key FROM preferences").one()).toEqual({ key: "units" });
       expect(sql.exec("SELECT COUNT(*) AS n FROM daily_metrics").one()).toEqual({ n: 0 });
@@ -116,11 +118,41 @@ describe("CoachStore schema", () => {
     });
   });
 
+  it("adds the table of created food entries to an object that already holds the metrics cache", async () => {
+    await runInDurableObject(freshStore(), async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("DROP TABLE nutrition_entries");
+      sql.exec("UPDATE schema_version SET version = 4 WHERE id = 1");
+      sql.exec(
+        `INSERT INTO daily_metrics (date, metric, value, algo_version, fetched_at, zone)
+         VALUES ('2026-10-10', 'steps', 8000, 1, '2026-10-14T12:00:00.000000000Z', 'America/Sao_Paulo')`,
+      );
+
+      migrate(state.storage);
+      expect(tableNames(sql)).toEqual(ALL_TABLES);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(5);
+      // The cache survives the upgrade, and the table starts empty.
+      expect(sql.exec("SELECT COUNT(*) AS n FROM daily_metrics").one()).toEqual({ n: 1 });
+      expect(sql.exec("SELECT COUNT(*) AS n FROM nutrition_entries").one()).toEqual({ n: 0 });
+      // The account, the name, the day and the creation time: no column for a food name or a nutrient value.
+      // The key is the account with the name: an entry belongs to one Google account.
+      const columns = sql.exec<{ name: string; type: string; notnull: number; pk: number }>("SELECT name, type, \"notnull\", pk FROM pragma_table_info('nutrition_entries')").toArray();
+      expect(columns).toEqual([
+        { name: "sub", type: "TEXT", notnull: 1, pk: 1 },
+        { name: "name", type: "TEXT", notnull: 1, pk: 2 },
+        { name: "day", type: "TEXT", notnull: 1, pk: 0 },
+        { name: "created_at", type: "TEXT", notnull: 1, pk: 0 },
+      ]);
+      const indexes = sql.exec("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'nutrition_entries' AND sql IS NOT NULL").toArray();
+      expect(indexes).toEqual([{ name: "nutrition_entries_by_day", sql: "CREATE INDEX nutrition_entries_by_day ON nutrition_entries (day)" }]);
+    });
+  });
+
   it("rolls a failed migration back and keeps the version", async () => {
     await runInDurableObject(freshStore(), async (_instance, state) => {
       const sql = state.storage.sql;
       // Leave one memory table behind: migration 3 fails when it creates it again.
-      for (const table of ["daily_metrics", "profile", "targets", "health_items", "lab_results", "preferences"]) {
+      for (const table of ["nutrition_entries", "daily_metrics", "profile", "targets", "health_items", "lab_results", "preferences"]) {
         sql.exec(`DROP TABLE ${table}`);
       }
       sql.exec("DROP TABLE notes_fts");

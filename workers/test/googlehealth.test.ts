@@ -476,7 +476,8 @@ describe("local checks", () => {
     expect(tokens.asked).toBe(0);
   });
 
-  it("lets only read requests leave the client", async () => {
+  // test/googlehealth-write.test.ts pins the two writes that also pass.
+  it("lets only the read requests of its allowlist leave the client", async () => {
     class Probe extends GoogleHealthClient {
       probe(method: string, path: string): Promise<unknown> {
         return this.request(method, path);
@@ -499,7 +500,7 @@ describe("local checks", () => {
     ];
     for (const [method, path] of refused) {
       expect(readTarget(method, path), `${method} ${path}`).toBeUndefined();
-      expect((await failure(probe.probe(method, path))).message).toContain("read-only client refuses");
+      expect((await failure(probe.probe(method, path))).message).toContain("the client refuses");
     }
     expect(requests).toHaveLength(0);
 

@@ -51,7 +51,7 @@ function privacyPage(): string {
 <li><strong>googlehealth.health_metrics_and_measurements.readonly</strong> — to read health metrics and measurements.</li>
 <li><strong>googlehealth.sleep.readonly</strong> — to read sleep data.</li>
 <li><strong>googlehealth.nutrition.readonly</strong> — to read nutrition data.</li>
-<li><strong>googlehealth.nutrition.writeonly</strong> — to log food for the owner.</li>
+<li><strong>googlehealth.nutrition.writeonly</strong> — to log food for the owner, and to delete food entries that this server logged.</li>
 </ul>
 <h2>How data is stored and used</h2>
 <p>The Google refresh token is stored only in a Cloudflare Durable Object. It is never logged or shared.</p>

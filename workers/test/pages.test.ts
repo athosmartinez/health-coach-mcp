@@ -36,6 +36,8 @@ describe("public pages", () => {
     expect(body).toContain("googlehealth.sleep.readonly");
     expect(body).toContain("googlehealth.nutrition.readonly");
     expect(body).toContain("googlehealth.nutrition.writeonly");
+    // Both uses of the write scope: the add, and the delete of the server's own entries.
+    expect(body).toContain("to log food for the owner, and to delete food entries that this server logged.");
     expect(body).toContain("Durable Object");
     expect(body).toMatch(/never logged or shared/i);
     expect(body).toMatch(/not sold or shared with third parties/i);

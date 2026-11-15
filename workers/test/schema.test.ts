@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { DATE_PATTERN } from "../src/coach/date";
 import { MEMORY_TOOLS } from "../src/tools/memory";
-import { type JsonSchema, inputSchema, invalidDate, s } from "../src/tools/schema";
+import { type JsonSchema, inputSchema, invalidDate, plainProblem, s } from "../src/tools/schema";
 
 const sample = () =>
   s.object({
@@ -136,6 +136,66 @@ describe("invalidDate", () => {
     expect(found).toBe(`${path}: not a real calendar date, want YYYY-MM-DD`);
     // The value is not echoed.
     expect(found).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+});
+
+// The schema errors of a tool whose arguments are a payload: the text names a
+// declared property and its rule, and never a key or a value of the arguments.
+describe("plainProblem", () => {
+  const schema = inputSchema(
+    s.object({
+      label: { type: "string", maxLength: 5 },
+      kind: s.string(),
+      count: s.integer(),
+      amount: s.number(),
+      "day?": s.date(),
+      "code?": { type: "string", pattern: "^[a-z]{2}$" },
+      "ratio?": s.number(),
+      "flag?": s.boolean(),
+    }),
+    { kind: ["A", "B"] },
+  );
+  const good = { label: "abc", kind: "A", count: 2, amount: 1.5 };
+
+  it("finds no problem in arguments that match", () => {
+    expect(plainProblem(schema, good)).toBeUndefined();
+    expect(plainProblem(schema, { ...good, day: "2026-10-16", code: "ab", ratio: 0.5, flag: true })).toBeUndefined();
+    // Optional properties may be null, and optional texts may be empty.
+    expect(plainProblem(schema, { ...good, day: null, code: "", ratio: null, flag: null })).toBeUndefined();
+    expect(plainProblem(schema, { ...good, day: "" })).toBeUndefined();
+  });
+
+  it.each([
+    ["arguments that are a text", "zz-secret", "the arguments must be an object"],
+    ["arguments that are a list", ["zz-secret"], "the arguments must be an object"],
+    ["null", null, "the arguments must be an object"],
+    ["a property the schema does not have", { ...good, "zz-secret": 1 }, "the arguments hold a property that the tool does not have"],
+    ["a property of Object.prototype as a key", { ...good, toString: 1 }, "the arguments hold a property that the tool does not have"],
+    ["a missing property", { label: "abc", kind: "A", count: 2 }, "amount is required"],
+    ["a text where a number goes", { ...good, amount: "zz-secret" }, "amount must be a number"],
+    ["a fraction where a whole number goes", { ...good, count: 2.5 }, "count must be a whole number"],
+    ["a number where a text goes", { ...good, label: 987654 }, "label must be a text"],
+    ["null in a required property", { ...good, kind: null }, "kind must be a text"],
+    ["a list in an optional number", { ...good, ratio: [987654] }, "ratio must be a number or null"],
+    ["a text in an optional boolean", { ...good, flag: "zz-secret" }, "flag must be true or false or null"],
+    ["an infinite number", { ...good, amount: Number.POSITIVE_INFINITY }, "amount must be a finite number"],
+    ["a value outside the enum", { ...good, kind: "zz-secret" }, "kind must be one of A, B"],
+    ["a text longer than the cap", { ...good, label: "zz-secret" }, "label must be at most 5 characters"],
+    ["a date in another form", { ...good, day: "16/10/2026" }, "day must be a date, YYYY-MM-DD"],
+    ["a text outside its pattern", { ...good, code: "zz-secret" }, "code does not have the format that its description gives"],
+  ])("names the rule for %s, and never the value or the key", (_name, args, message) => {
+    const problem = plainProblem(schema, args);
+    expect(problem).toBe(message);
+    for (const secret of ["zz-secret", "987654", "16/10", "toString"]) expect(problem).not.toContain(secret);
+  });
+
+  it("counts a text in characters, not in UTF-16 units", () => {
+    expect(plainProblem(schema, { ...good, label: "🍚🍚🍚🍚🍚" })).toBeUndefined();
+    expect(plainProblem(schema, { ...good, label: "🍚🍚🍚🍚🍚🍚" })).toBe("label must be at most 5 characters");
+  });
+
+  it("does not refuse an unknown property of an object that is not closed", () => {
+    expect(plainProblem({ type: "object", properties: { a: { type: "string" } } }, { a: "x", extra: 1 })).toBeUndefined();
   });
 });
 

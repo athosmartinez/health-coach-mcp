@@ -7,6 +7,7 @@ import type { Reduce } from "../googlehealth/client";
 import type { DataType } from "../googlehealth/datatypes";
 import { ALGO_VERSION } from "../metrics/stats";
 import type { Db } from "../store/db";
+import { entryIdsBetween } from "../store/entries";
 import { type Metric, type StoredMetric, deleteMetric, metricRange, putMetric } from "../store/metrics";
 import { SETTLE_DAYS, shift } from "./plan";
 
@@ -22,11 +23,17 @@ export interface Fetcher {
   listBetween<T>(dataType: DataType, start: Date, end: Date, reduce: Reduce<T>): Promise<T[]>;
 }
 
-/** The part of the store this package uses. */
+/** The part of the store this package uses: the daily_metrics cache, and the list of the food entries this server created. */
 export interface Cache {
   metricRange(key: string, from: LocalDate, to: LocalDate, algoVersion: number): StoredMetric[];
   putMetric(metric: Metric): void;
   deleteMetric(day: LocalDate, key: string): void;
+  /**
+   * The data point IDs of the food entries this server created in Google
+   * Health on the local days [from, to]. Absent: the server created none, and
+   * the food log holds the band's own items only.
+   */
+  createdFoodIds?(from: LocalDate, to: LocalDate): ReadonlySet<string>;
 }
 
 /** The daily_metrics table of the coach store. */
@@ -35,6 +42,7 @@ export function dbCache(db: Db): Cache {
     metricRange: (key, from, to, algoVersion) => metricRange(db, key, from, to, algoVersion),
     putMetric: (metric) => putMetric(db, metric),
     deleteMetric: (day, key) => deleteMetric(db, day, key),
+    createdFoodIds: (from, to) => entryIdsBetween(db, from, to),
   };
 }
 

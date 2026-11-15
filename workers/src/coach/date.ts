@@ -118,6 +118,35 @@ export function bounds(d: LocalDate, zone: Zone): { start: Date; end: Date } | u
   return { start: new Date(startOfDay(day, zone)), end: new Date(startOfDay(day + 86_400_000, zone)) };
 }
 
+/**
+ * The instant of the wall time `hour`:`minute` on the local day `d`, or
+ * undefined when `d` is not a real date or the time is not on a 24-hour clock.
+ *
+ * On the day of a DST change a wall time can be missing, or can happen twice.
+ * A time that the change skips reads as the first instant after the gap: the
+ * rule of the start of a day whose midnight does not exist (startOfDay). A
+ * time that happens twice reads as the first of its two instants, as the
+ * start of a day is its first instant.
+ */
+export function instantOf(d: LocalDate, hour: number, minute: number, zone: Zone): Date | undefined {
+  const day = civil(d);
+  if (day === undefined) return undefined;
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return undefined;
+  const wall = day + (hour * 60 + minute) * 60_000;
+  // A zone is at most 14 hours from UTC, so the instant lies within a day of
+  // `wall` read as UTC. The offsets a day before and a day after it are the
+  // ones on each side of a change near it.
+  const candidates = [wall - zone.offsetMs(wall - 86_400_000), wall - zone.offsetMs(wall + 86_400_000)];
+  const real = candidates.filter((t) => t + zone.offsetMs(t) === wall);
+  if (real.length > 0) return new Date(Math.min(...real));
+  // No instant shows this wall time. The earlier candidate lies before the
+  // change: step forward to it (zone changes fall on minute boundaries).
+  let t = Math.min(...candidates);
+  const before = zone.offsetMs(t);
+  for (let i = 0; i < 24 * 60 && zone.offsetMs(t) === before; i++) t += 60_000;
+  return new Date(t);
+}
+
 /** The date `n` days later (negative `n` goes back), or undefined when `d` is not a real date. */
 export function addDays(d: LocalDate, n: number): LocalDate | undefined {
   const day = civil(d);

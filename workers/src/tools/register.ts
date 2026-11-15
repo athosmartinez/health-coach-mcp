@@ -20,7 +20,7 @@ import {
 
 import { INTERNAL_ERROR, type WireError, errorTypes, toWire, wireText } from "../coach/errors";
 import { truncate } from "../coach/text";
-import { type JsonSchema, invalidDate, nonFiniteNumber } from "./schema";
+import { type JsonSchema, NOT_MATCHED, invalidDate, nonFiniteNumber, plainProblem } from "./schema";
 
 /**
  * What a tool body produces: its output, or the error the client reads. A
@@ -57,17 +57,39 @@ function validator(schema: JsonSchema): (value: unknown) => string | undefined {
   };
 }
 
+export interface ToolOptions {
+  /**
+   * False: a schema error of this tool repeats nothing that the client sent.
+   *
+   * The validator's own text names an unknown property by its key, and for
+   * some rules it quotes the value. That text reaches only the caller, and
+   * the tools of the Go server keep it. A tool whose arguments are a payload
+   * (a food name, values, an entry id) sets this to false: its error names a
+   * property that the schema declares and the rule that failed, and has a
+   * fixed text for an unknown property. The input schema of such a tool must
+   * be flat (see `plainProblem`).
+   */
+  echo?: boolean;
+}
+
 /**
  * Compiles a tool definition. Call it at module scope: createServer runs on
  * every request, and the validators must not be rebuilt each time.
  */
-export function defineTool(definition: ToolDefinition): Tool {
+export function defineTool(definition: ToolDefinition, options: ToolOptions = {}): Tool {
   const matchesInput = validator(definition.inputSchema);
   const matchesOutput = validator(definition.outputSchema);
+  const quiet = (args: unknown): string | undefined =>
+    plainProblem(definition.inputSchema, args) ??
+    // The full validator still decides. What only it finds has a fixed text: its own text can quote the arguments.
+    (matchesInput(args) === undefined ? undefined : NOT_MATCHED) ??
+    // Every key is a declared one by now, and neither text below holds a value.
+    nonFiniteNumber(args) ??
+    invalidDate(definition.inputSchema, args);
   return {
     ...definition,
     // After the schema: the names echoed below are then the schema's own.
-    checkInput: (args) => matchesInput(args) ?? nonFiniteNumber(args) ?? invalidDate(definition.inputSchema, args),
+    checkInput: options.echo === false ? quiet : (args) => matchesInput(args) ?? nonFiniteNumber(args) ?? invalidDate(definition.inputSchema, args),
     checkOutput: matchesOutput,
   };
 }

@@ -92,3 +92,23 @@ export function entryIdsBetween(db: Db, from: LocalDate, to: LocalDate): Set<str
   }
   return ids;
 }
+
+/**
+ * The stored name of each entry this server created on the local days
+ * [from, to] for the account that is linked now, keyed by data point ID.
+ * The name is the one the create answered: `hasEntry` matches it exactly.
+ * A list can name the same point with the user written as `me` or by an ID,
+ * so the key is the ID, not the whole name. Two stored names with one ID
+ * keep the lesser name. An entry of another account is left out.
+ */
+export function entryNamesBetween(db: Db, from: LocalDate, to: LocalDate): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const row of db.all(ENTRY_NAMES_BETWEEN, from, to)) {
+    const name = text(row.name);
+    const id = pointId(name);
+    if (id === undefined) continue;
+    const kept = names.get(id);
+    if (kept === undefined || name < kept) names.set(id, name);
+  }
+  return names;
+}

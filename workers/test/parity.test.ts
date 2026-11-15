@@ -50,6 +50,29 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * nutrition_day as the Go server lists it. The Worker adds `entry_id` to each
+ * food item and one sentence to the description; everything else is the Go tool.
+ */
+function withoutEntryId(tool: ListedTool | undefined): ListedTool | undefined {
+  if (!tool) return undefined;
+  const copy = structuredClone(tool);
+  copy.description = goTools.get("nutrition_day")?.description;
+  const output = copy.outputSchema as {
+    properties?: {
+      data?: {
+        properties?: {
+          per_meal?: { items?: { properties?: { items?: { items?: { properties?: Record<string, unknown>; required?: string[] } } } } };
+        };
+      };
+    };
+  };
+  const item = output.properties?.data?.properties?.per_meal?.items?.properties?.items?.items;
+  if (item?.properties) delete item.properties.entry_id;
+  if (item?.required) item.required = item.required.filter((field) => field !== "entry_id");
+  return copy;
+}
+
 /** JSON with the keys of every object sorted, to show a difference as text. */
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, node: unknown) =>
@@ -83,9 +106,16 @@ describe("parity with the Go server's tools/list", () => {
     expect(Object.keys(worker ?? {}).sort()).toEqual(["annotations", "description", "inputSchema", "name", "outputSchema"]);
     expect(Object.keys(go ?? {}).sort()).toEqual(Object.keys(worker ?? {}).sort());
 
-    expect(worker?.description).toBe(go?.description);
     expect(worker?.annotations).toEqual(go?.annotations);
     expect(worker?.inputSchema).toEqual(go?.inputSchema);
+    if (name === "nutrition_day") {
+      // The Worker adds entry_id to each food item, and one sentence that says where it comes from.
+      const sentence = " An item this server logged has entry_id, the id nutrition_log_delete accepts; an item from another app, or logged for another linked Google account, has entry_id null.";
+      expect(worker?.description).toBe(`${go?.description}${sentence}`);
+      expect(canonical(withoutEntryId(worker))).toBe(canonical(go));
+      return;
+    }
+    expect(worker?.description).toBe(go?.description);
     expect(worker?.outputSchema).toEqual(go?.outputSchema);
     expect(canonical(worker)).toBe(canonical(go));
   });

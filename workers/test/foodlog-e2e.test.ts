@@ -178,6 +178,8 @@ describe("the food log writes, from the sign-in to a tool result", () => {
         time: "2026-10-16T08:15:00-03:00",
         nutrients: { kcal: 431.5, protein_g: 23.8, carb_g: 51.3, fat_g: 17.5, fiber_g: null, sugar_g: null, sodium_mg: null },
         rejected_nutrients: [],
+        // The name the create answered. The list names the same point under users/me.
+        entry_id: createdName(1),
       },
     ]);
     // No food was left out as food of another source.
@@ -241,7 +243,7 @@ describe("one error of each kind that a write can give, as the client reads it",
     expect(await fails("nutrition_log_delete", { entry_id: `users/${FAKE_USER_ID}/dataTypes/exercise/dataPoints/syn-run` })).toEqual({
       code: "invalid_input",
       message: "entry_id is not the id of a food log entry",
-      hint: "use the entry_id that nutrition_log_add returned",
+      hint: "use the entry_id that nutrition_log_add returned or that nutrition_day lists",
     });
     expect(g.external).toEqual([]);
     expect(await storedEntries()).toEqual([]);

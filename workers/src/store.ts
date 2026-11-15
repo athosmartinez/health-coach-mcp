@@ -103,6 +103,11 @@ const MIGRATIONS: readonly string[] = [
   // Go store's final columns in its order. The cache is disposable. `zone` is
   // the IANA zone a value was computed in: sleep start minutes and the day a
   // night belongs to depend on it, so a row from another zone is a miss.
+  //
+  // The index is the Worker's own (the Go store has none). Every cache read
+  // is one metric over a range of days. The primary key starts with the date,
+  // so without the index such a read scans the rows of all the metrics of
+  // those days, and rows read are a daily quota of the plan.
   `CREATE TABLE daily_metrics (
     date TEXT NOT NULL, metric TEXT NOT NULL,   -- metric from the closed list in store/metrics.ts
     value REAL NOT NULL, n_samples INTEGER, source TEXT,
@@ -110,7 +115,8 @@ const MIGRATIONS: readonly string[] = [
     fetched_at TEXT NOT NULL,
     zone TEXT,
     PRIMARY KEY (date, metric)
-  )`,
+  );
+  CREATE INDEX daily_metrics_by_metric ON daily_metrics (metric, date)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

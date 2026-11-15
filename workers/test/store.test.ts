@@ -110,6 +110,9 @@ describe("CoachStore schema", () => {
       // The memory survives the upgrade, and the cache starts empty.
       expect(sql.exec("SELECT key FROM preferences").one()).toEqual({ key: "units" });
       expect(sql.exec("SELECT COUNT(*) AS n FROM daily_metrics").one()).toEqual({ n: 0 });
+      // The step creates the table and its index together.
+      const indexes = sql.exec("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'daily_metrics' AND sql IS NOT NULL").toArray();
+      expect(indexes).toEqual([{ name: "daily_metrics_by_metric", sql: "CREATE INDEX daily_metrics_by_metric ON daily_metrics (metric, date)" }]);
     });
   });
 

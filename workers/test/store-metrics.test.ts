@@ -1,5 +1,5 @@
 // Ports of the metrics cache cases of internal/store/store_test.go.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { type LocalDate, addDays } from "../src/coach/date";
 import { CorruptRowError } from "../src/store/db";
@@ -18,6 +18,10 @@ import {
 import { addNote, searchNotes } from "../src/store/notes";
 import { FIXED_NOW, codeOf, toolError, withDb } from "./memory-helpers";
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("metrics cache", () => {
   it("has the Go store's final columns, in the same order", () =>
     withDb((_db, sql) => {
@@ -26,6 +30,45 @@ describe("metrics cache", () => {
         .toArray()
         .map((row) => row.name);
       expect(columns).toEqual(["date", "metric", "value", "n_samples", "source", "algo_version", "fetched_at", "zone"]);
+    }));
+
+  // Rows read are a daily quota of the plan (5 million on Workers Free), and
+  // a recovery read asks for 10 keys, each over the whole range.
+  it("reads one key over a year through its index: the rows of the other 14 keys are not read", () =>
+    withDb((db, sql) => {
+      const first: LocalDate = "2025-10-01";
+      const days = 366;
+      const exec = vi.spyOn(sql, "exec");
+      for (let i = 0; i < days; i++) {
+        const date = addDays(first, i) as LocalDate;
+        for (const key of METRIC_KEYS) putMetric(db, { date, key, value: i, algoVersion: 3, zone: "America/Sao_Paulo" });
+      }
+      expect(db.count("SELECT COUNT(*) FROM daily_metrics")).toBe(days * METRIC_KEYS.length);
+      // One cached value writes its row and its two index entries (the primary key and the index).
+      expect(exec.mock.results.at(-2)?.value.rowsWritten).toBe(3);
+
+      exec.mockClear();
+      const last = addDays(first, days - 1) as LocalDate;
+      const rows = metricRange(db, "hrv_rmssd_ms", first, last, 3);
+      expect(rows).toHaveLength(days);
+      expect(rows.map((row) => row.date)).toEqual(Array.from({ length: days }, (_unused, i) => addDays(first, i)));
+      expect(exec).toHaveBeenCalledTimes(1);
+      const [query, ...bindings] = exec.mock.calls[0] as [string, ...SqlStorageValue[]];
+      // One row for each day of the key, and the step that finds the end of
+      // the range: not the 5,490 rows of the table.
+      expect(exec.mock.results[0]?.value.rowsRead).toBe(days + 1);
+
+      const plan = sql
+        .exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, ...bindings)
+        .toArray()
+        .map((step) => step.detail);
+      // The index gives the days in order: no scan of the table and no sort.
+      expect(plan).toEqual(["SEARCH daily_metrics USING INDEX daily_metrics_by_metric (metric=? AND date>? AND date<?)"]);
+
+      // A short range of a full table reads only its own days.
+      exec.mockClear();
+      expect(metricRange(db, "steps", addDays(first, 100) as LocalDate, addDays(first, 106) as LocalDate, 3)).toHaveLength(7);
+      expect(exec.mock.results[0]?.value.rowsRead).toBe(8);
     }));
 
   it("lists the Go server's closed metric keys", () => {

@@ -26,10 +26,19 @@ import { inputSchema, s } from "./schema";
 
 /** The part of the Google Health client the exercise log tools use. */
 export interface ExerciseLogApi {
-  /** Creates one session and returns the data point name Google gave it. Never sent again when its outcome is unknown. */
-  createExercise(session: NewExerciseSession): Promise<string>;
-  /** Deletes the session with this data point ID. "gone": Google has no such session. */
-  deleteExercise(id: string): Promise<"deleted" | "gone">;
+  /**
+   * Creates one session and returns the data point name Google gave it. Never
+   * sent again when its outcome is unknown. `account` is the Google account
+   * the session will be recorded for: the create goes out only with a token
+   * of that account.
+   */
+  createExercise(session: NewExerciseSession, account: string | undefined): Promise<string>;
+  /**
+   * Deletes the session with this data point ID. "gone": Google has no such
+   * session. `account` is the Google account whose session it is: the delete
+   * goes out only with a token of that account.
+   */
+  deleteExercise(id: string, account: string): Promise<"deleted" | "gone">;
 }
 
 /** What the exercise log tools need. */
@@ -404,9 +413,11 @@ const EXERCISE_LOG_ADD = writeTool(
     // A session belongs to the local day it starts on, as the exercise reads place it.
     const day = dateOf(start, deps.zone);
     // The session will belong to the account that is linked now. Without a
-    // link the create answers auth_expired, and nothing is sent.
+    // link the create answers auth_expired, and nothing is sent. The client
+    // sends the create only with a token of this account: the token answer of
+    // the MCP HTTP request can be older than the link.
     const owner = deps.entries.owner();
-    const entryId = await deps.api.createExercise(session);
+    const entryId = await deps.api.createExercise(session, owner);
 
     // Google holds the session from here on. Without its row the server does
     // not own it: say so, instead of an error that reads as "nothing happened".
@@ -468,7 +479,8 @@ const EXERCISE_LOG_DELETE = writeTool(
     // would hide the step that makes the delete work. So the answer is the
     // one of a token request without a link, for every id, and no request is
     // sent. It says nothing about which entries exist.
-    if (deps.entries.owner() === undefined) throw notLinkedError();
+    const owner = deps.entries.owner();
+    if (owner === undefined) throw notLinkedError();
     // Only a session of this server is deleted, and the check comes before
     // any request: Google's documentation does not prove that it would refuse
     // the delete of a session the band or another app wrote. A session that
@@ -482,7 +494,9 @@ const EXERCISE_LOG_DELETE = writeTool(
       );
     }
     // "gone" is the state the delete asks for: the row goes in both cases.
-    await deps.api.deleteExercise(id);
+    // The entry is this account's own, so the delete goes out only with a
+    // token of this account.
+    await deps.api.deleteExercise(id, owner);
     try {
       deps.entries.forget(entryId);
     } catch (cause) {

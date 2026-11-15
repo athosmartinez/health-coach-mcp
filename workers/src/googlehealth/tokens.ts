@@ -15,6 +15,12 @@ import type { TokenResult, TokenSource } from "./client";
  * while the renewal is in flight. So one MCP HTTP request sends at most
  * 2 × TOKEN_REQUESTS token requests, which the spare subrequests cover.
  *
+ * The answer is not checked against the linked account again either: when
+ * another Google account signs in during the request, the later calls still
+ * get the token of the account before. The answer names the account of its
+ * token (`sub`), and a write that is bound to an account compares the two
+ * (GoogleHealthClient.request).
+ *
  * The answer is not checked against the clock again: a token is good for at
  * least a minute when the store hands it out, and one that expires during a
  * longer request is rejected by Google and renewed like any rejected token.

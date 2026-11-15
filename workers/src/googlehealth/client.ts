@@ -118,10 +118,23 @@ export const MAX_RESPONSE_BYTES = 16 << 20;
 /** Bounds the responses of one call across all its pages and chunks. */
 export const MAX_CALL_BYTES = 32 << 20;
 
-/** What CoachStore.googleAccessToken() answers. */
+/**
+ * What CoachStore.googleAccessToken() answers. `sub` is the Google account
+ * the token belongs to. A source that does not know it leaves it out, and a
+ * write that is bound to an account is then never sent.
+ */
 export type TokenResult =
-  | { ok: true; accessToken: string }
+  | { ok: true; accessToken: string; sub?: string }
   | { ok: false; code: "auth_expired" | "upstream_unavailable" | "internal_error" | "not_linked" };
+
+/**
+ * The Google account (its `sub`) a write is bound to: the one whose entries
+ * the tool checked before the write. Undefined when the store held no link
+ * then. A request with a bound goes out only with a token of that account.
+ */
+interface AccountBound {
+  account: string | undefined;
+}
 
 /**
  * Supplies access tokens. `invalidate` reports a token the API rejected, so
@@ -313,18 +326,28 @@ export class GoogleHealthClient {
    * again only after an answer that proves Google did not accept it, and a
    * name is returned only when Google's answer holds the name of an exercise
    * data point.
+   *
+   * `account` is the Google account the caller will record the session for
+   * (undefined when none was linked). The create is sent only with a token of
+   * that account: the tool reads the account from the store and the client
+   * takes the token on its own, and one MCP HTTP request keeps one token
+   * answer, so the two can belong to different accounts after a sign-in.
    */
-  async createExercise(session: NewExerciseSession): Promise<string> {
-    return this.create("exercise", EXERCISE_CREATE_PATH, exerciseCreateBody(session), exercisePointId);
+  async createExercise(session: NewExerciseSession, account: string | undefined): Promise<string> {
+    return this.create("exercise", EXERCISE_CREATE_PATH, exerciseCreateBody(session), exercisePointId, { account });
   }
 
   /**
    * Deletes the exercise data point with this ID. The rules are the ones of
    * deleteNutritionLog: "gone" only for Google's own NOT_FOUND, and the
    * caller decides which points may be deleted.
+   *
+   * `account` is the Google account whose session the caller checked. The
+   * delete is sent only with a token of that account: a data point ID of one
+   * account must never be deleted with the token of another.
    */
-  async deleteExercise(id: string): Promise<"deleted" | "gone"> {
-    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id));
+  async deleteExercise(id: string, account: string): Promise<"deleted" | "gone"> {
+    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id), { account });
   }
 
   /**
@@ -332,8 +355,14 @@ export class GoogleHealthClient {
    * point name of the data type of the request: an answer that names a point
    * of another data type gives no name.
    */
-  private async create(dataType: WriteDataType, path: string, body: unknown, idOf: (name: string) => string | undefined): Promise<string> {
-    const reply = await this.request("POST", path, undefined, JSON.stringify(body));
+  private async create(
+    dataType: WriteDataType,
+    path: string,
+    body: unknown,
+    idOf: (name: string) => string | undefined,
+    bound?: AccountBound,
+  ): Promise<string> {
+    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound);
     const answer = readCreateAnswer(reply.text, idOf);
     if (answer.ok) return answer.name;
     logFault(dataType, "create", answer.fault, answer.code);
@@ -341,8 +370,8 @@ export class GoogleHealthClient {
   }
 
   /** Sends one delete and reads its Operation. */
-  private async remove(dataType: WriteDataType, path: string, body: unknown): Promise<"deleted" | "gone"> {
-    const reply = await this.request("POST", path, undefined, JSON.stringify(body));
+  private async remove(dataType: WriteDataType, path: string, body: unknown, bound?: AccountBound): Promise<"deleted" | "gone"> {
+    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound);
     if (reply.status === 404) return "gone";
     const answer = readDeleteAnswer(reply.text);
     if (answer.ok) return "deleted";
@@ -435,8 +464,13 @@ export class GoogleHealthClient {
    * ends there, and its error says that the entry may exist. A delete names
    * the point to remove, so it keeps the rules of a read; a 404 that Google's
    * API answers (NOT_FOUND) comes back to the caller as an answer.
+   *
+   * With `bound`, every attempt compares the account of the token it is about
+   * to send with the account of the bound, also after a renewal: a renewal
+   * can answer the token of an account that signed in meanwhile. A request
+   * without a bound is not compared.
    */
-  protected async request(method: string, path: string, query?: string, body?: string): Promise<Reply> {
+  protected async request(method: string, path: string, query?: string, body?: string, bound?: AccountBound): Promise<Reply> {
     const allowed = requestTarget(method, path, query);
     if (allowed === undefined) throw new Error(`googlehealth: the client refuses ${method} ${path}`);
     // The data type of the request: every log line, message and hint below names this one.
@@ -445,6 +479,8 @@ export class GoogleHealthClient {
     const limit = kind === "read" ? this.maxResponseBytes : Math.min(this.maxResponseBytes, MAX_WRITE_RESPONSE_BYTES);
     const unavailable = (message: string, cause?: unknown) => unavailableFor(allowed, message, cause);
     let refreshed = false;
+    // Whether an attempt of this request was sent.
+    let sent = false;
     // Set by every failure that can be retried.
     let last: ToolError | undefined;
     for (let failures = 0; ; ) {
@@ -453,8 +489,17 @@ export class GoogleHealthClient {
       // range holds more than one call reads; a write that was never tried
       // was not sent, and its error says so.
       if (this.budget.remaining === 0) throw last ?? this.outOfBudget(allowed);
-      const token = await this.accessToken();
+      const held = await this.accessToken();
+      const token = held.accessToken;
+      // A token of another account, or of an account nobody names, would write
+      // to an account the caller did not check. Nothing is sent, and no unit
+      // of the budget is taken.
+      if (bound !== undefined && (held.sub === undefined || held.sub !== bound.account)) {
+        console.warn("google health write not sent: the linked account changed", { data_type: dataType, operation: kind });
+        throw accountChanged(kind, sent);
+      }
       if (!this.budget.take()) throw last ?? this.outOfBudget(allowed);
+      sent = true;
 
       let reply: Reply;
       let status = 0;
@@ -569,11 +614,11 @@ export class GoogleHealthClient {
     return tooMuch(target.dataType, undefined, this.budget.sharedBefore ? OWN_REQUEST_HINT : SHORTER_RANGE_HINT);
   }
 
-  /** The access token, or the tool error of a token source that cannot give one. */
-  private async accessToken(): Promise<string> {
+  /** The access token and the account it belongs to, or the tool error of a token source that cannot give one. */
+  private async accessToken(): Promise<Extract<TokenResult, { ok: true }>> {
     if (this.budget.tokenFailure) throw this.budget.tokenFailure;
     const result = await this.tokens.accessToken();
-    if (result.ok) return result.accessToken;
+    if (result.ok) return result;
     const failure = tokenError(result.code);
     this.budget.tokenFailure = failure;
     throw failure;
@@ -793,7 +838,11 @@ function outcomeUnknown(dataType: WriteDataType, message: string, cause?: unknow
   return new ToolError("upstream_unavailable", message, MAY_EXIST_HINTS[dataType], cause === undefined ? undefined : { cause });
 }
 
-/** The hint of a write that the request budget had no unit for. */
+/**
+ * The hint of a write that was not sent for a reason of its MCP HTTP request:
+ * the request budget had no unit for it, or the linked Google account changed
+ * during the request.
+ */
 export const WRITE_OWN_REQUEST_HINT = "send this call in a request of its own";
 
 const NO_UNIT_LEFT = "this MCP request already sent all the Google Health requests one request may send";
@@ -802,6 +851,24 @@ const NOT_SENT: Readonly<Record<WriteKind, string>> = {
   create: `${NO_UNIT_LEFT}: the entry was not sent`,
   delete: `${NO_UNIT_LEFT}: the delete was not sent`,
 };
+
+const ACCOUNT_CHANGED ="the linked Google account changed during this MCP request";
+
+/**
+ * A write that is bound to one Google account, and whose token belongs to
+ * another: it is not sent. Like a write the budget has no unit for, it is
+ * invalid_input: nothing is wrong at Google or with the sign-in, and the same
+ * call works in a request of its own, which reads the account and the token
+ * together. The text names no account and no token.
+ *
+ * `sentBefore`: an attempt went out before the token changed, with the token
+ * of the account the write is bound to. Google rejected that token, or
+ * answered a failure that can be retried.
+ */
+function accountChanged(kind: Target["kind"], sentBefore: boolean): ToolError {
+  const what = kind === "create" ? "the entry" : kind === "delete" ? "the delete" : "the request";
+  return new ToolError("invalid_input", `${ACCOUNT_CHANGED}: ${what} was not sent${sentBefore ? " again" : ""}`, WRITE_OWN_REQUEST_HINT);
+}
 
 /**
  * A write that Google answered with a 4xx other than a rejected token, a

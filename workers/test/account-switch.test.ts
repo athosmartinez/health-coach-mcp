@@ -10,7 +10,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 import type { CoachStore } from "../src/store";
-import { STORED_TOKEN, day, daysOfData, googleMock, link, linkedStore } from "./e2e-helpers";
+import { RENEWED_TOKEN, STORED_TOKEN, batch, day, daysOfData, googleMock, link, linkedStore, newToken } from "./e2e-helpers";
 import { OWNER_SUB } from "./helpers";
 import { objectTool } from "./memory-helpers";
 
@@ -407,6 +407,122 @@ describe("the workout sessions this server created, when a Google account is lin
     expect(g.google.createdPoints("exercise")).toHaveLength(1);
     expect(await owners(stub)).toEqual([]);
     expect(g.logLines("error")).toEqual([["tool_internal_error", { tool: "exercise_log_add", error_types: "ToolError > Error" }]]);
+  });
+
+  // The tool reads the linked account from the store, and the client takes the
+  // token on its own. One MCP HTTP request keeps one token answer, so the two
+  // can belong to different accounts. A session write is sent only when they
+  // are the same account.
+  describe("a write whose token belongs to another account than the one the tool checked", () => {
+    const notSent = (what: string) => ({
+      ok: false,
+      error: {
+        code: "invalid_input",
+        message: `the linked Google account changed during this MCP request: ${what} was not sent`,
+        hint: "send this call in a request of its own",
+      },
+    });
+    const SECRETS = [OTHER_TOKEN, STORED_TOKEN, RENEWED_TOKEN, OTHER_SUB, OWNER_SUB, "other@example.com", "Capoeira", "431.5", "syn-created"];
+
+    /** The other account signs in during the first Google Health request from now on. The mock runs inside the object, so it reaches the store through a stub of its own. */
+    function signInDuringTheNextRead(stub: DurableObjectStub<CoachStore>): void {
+      const id = stub.id.toString();
+      let done = false;
+      g.healthReply = async () => {
+        if (done) return undefined;
+        done = true;
+        await env.COACH_STORE.get(env.COACH_STORE.idFromString(id)).linkGoogleAccount(other());
+        return undefined;
+      };
+    }
+
+    it("does not create a session, when the account changes during an earlier call of the same request", async () => {
+      const stub = await linkedStore();
+      signInDuringTheNextRead(stub);
+      // The read takes the token of the first account, and the request keeps it for the add.
+      const [review, added] = await batch(stub, [
+        ["workout_review", {}],
+        ["exercise_log_add", WORKOUT],
+      ]);
+      expect(review?.ok).toBe(true);
+      // The add read the second account from the store: its token is not of that account.
+      expect(await linkedSub(stub)).toBe(OTHER_SUB);
+      expect(added).toEqual(notSent("the entry"));
+      const calls = g.takeExternal();
+      expect(calls.exercise).toBeGreaterThan(0);
+      expect(calls["create exercise"] ?? 0).toBe(0);
+      expect(calls.token ?? 0).toBe(0);
+      expect(new Set(g.auths)).toEqual(new Set([`Bearer ${STORED_TOKEN}`]));
+      // Google holds no session, and no row says that one exists.
+      expect(g.google.createdPoints("exercise")).toEqual([]);
+      expect(await owners(stub)).toEqual([]);
+      expect(g.logLines("warn")).toEqual([["google health write not sent: the linked account changed", { data_type: "exercise", operation: "create" }]]);
+      for (const secret of SECRETS) expect(g.logged(), secret).not.toContain(secret);
+
+      // A request of its own reads the account and the token together: the session is the second account's.
+      g.auths = [];
+      const again = await objectTool(stub, "exercise_log_add", WORKOUT);
+      if (!again.ok) throw new Error(JSON.stringify(again.error));
+      expect(g.auths).toEqual([`Bearer ${OTHER_TOKEN}`]);
+      expect(await owners(stub)).toEqual([{ sub: OTHER_SUB, name: again.output.entry_id }]);
+    });
+
+    it("does not delete a session, when the account changes during an earlier call of the same request", async () => {
+      const stub = await linkedStore();
+      // A session of the second account. Then the first account is the linked one again.
+      await stub.linkGoogleAccount(other());
+      const entryId = await sessionOfTheFirstAccount(stub);
+      expect(await owners(stub)).toEqual([{ sub: OTHER_SUB, name: entryId }]);
+      await stub.linkGoogleAccount(link());
+      g.auths = [];
+      g.clearLogs();
+
+      signInDuringTheNextRead(stub);
+      const [review, removed] = await batch(stub, [
+        ["workout_review", {}],
+        ["exercise_log_delete", { entry_id: entryId }],
+      ]);
+      expect(review?.ok).toBe(true);
+      // The delete found the session as the linked account's own, and its token is the first account's.
+      expect(removed).toEqual(notSent("the delete"));
+      const calls = g.takeExternal();
+      expect(calls["delete exercise"] ?? 0).toBe(0);
+      expect(new Set(g.auths)).toEqual(new Set([`Bearer ${STORED_TOKEN}`]));
+      expect(g.google.createdPoints("exercise")).toHaveLength(1);
+      expect(await owners(stub)).toEqual([{ sub: OTHER_SUB, name: entryId }]);
+      for (const secret of SECRETS) expect(g.logged(), secret).not.toContain(secret);
+
+      // In a request of its own, the second account deletes its session with its own token.
+      g.auths = [];
+      expect(await objectTool(stub, "exercise_log_delete", { entry_id: entryId })).toEqual({ ok: true, output: { entry_id: entryId, deleted: true } });
+      expect(g.auths).toEqual([`Bearer ${OTHER_TOKEN}`]);
+    });
+
+    it("does not delete a session with the token of an account that signs in while the token is renewed", async () => {
+      const stub = await linkedStore();
+      const entryId = await sessionOfTheFirstAccount(stub);
+      // The stored access token is past its expiry: the delete starts with a renewal.
+      await runInDurableObject(stub, (_instance, state) => {
+        state.storage.sql.exec("UPDATE google_account SET access_token_expires_at = 0");
+      });
+      const id = stub.id.toString();
+      // The other account signs in while Google's token endpoint answers.
+      g.tokenReply = async () => {
+        await env.COACH_STORE.get(env.COACH_STORE.idFromString(id)).linkGoogleAccount(other());
+        return newToken(RENEWED_TOKEN);
+      };
+      g.auths = [];
+      g.clearLogs();
+      // The store answers the token of the account that is linked now. The session is the first account's.
+      expect(await objectTool(stub, "exercise_log_delete", { entry_id: entryId })).toEqual(notSent("the delete"));
+      expect(await linkedSub(stub)).toBe(OTHER_SUB);
+      expect(g.takeExternal()).toEqual({ total: 1, token: 1 });
+      expect(g.auths).toEqual([]);
+      // Google still holds the session, and the row of the first account stays.
+      expect(g.google.createdPoints("exercise")).toHaveLength(1);
+      expect(await owners(stub)).toEqual([{ sub: OWNER_SUB, name: entryId }]);
+      for (const secret of SECRETS) expect(g.logged(), secret).not.toContain(secret);
+    });
   });
 
   // The exercise reads keep a session of the API only when it is the linked account's own.

@@ -100,6 +100,10 @@ function deleted(): Response {
   });
 }
 
+/** The `sub` of the Google account the tokens of FakeTokens belong to, and of another account. Neither may reach an error or a log line. */
+const ACCOUNT = "300000000000000000003";
+const OTHER_ACCOUNT = "400000000000000000004";
+
 /** Hands out at-0, at-1, ... and renews after `invalidate` of the current token, like the CoachStore object. */
 class FakeTokens implements TokenSource {
   n = 0;
@@ -107,6 +111,8 @@ class FakeTokens implements TokenSource {
   asked = 0;
   invalidated: string[] = [];
   failure: TokenResult | undefined;
+  /** The account each token belongs to, by its number: ACCOUNT when the test names none. Null: an answer without a `sub`. */
+  subs: (string | null)[] = [];
 
   async accessToken(): Promise<TokenResult> {
     this.asked++;
@@ -115,7 +121,8 @@ class FakeTokens implements TokenSource {
       this.n++;
       this.stale = false;
     }
-    return { ok: true, accessToken: `at-${this.n}` };
+    const sub = this.subs[this.n];
+    return sub === null ? { ok: true, accessToken: `at-${this.n}` } : { ok: true, accessToken: `at-${this.n}`, sub: sub ?? ACCOUNT };
   }
 
   invalidate(rejected: string): boolean {
@@ -160,7 +167,7 @@ const SESSION_JSON =
   '"displayName":"Capoeira angola","activeDuration":"4500s","metricsSummary":{"caloriesKcal":431.5},"notes":"Roda de sexta"}}';
 
 /** Nothing of the session, of a token or of Google's answer. */
-const SECRETS = ["Capoeira", "angola", "431.5", "Roda", "sexta", "at-0", "at-1", BODY_MARK, "7711", "syn-point", "1122334455", "synthetic-client"];
+const SECRETS = ["Capoeira", "angola", "431.5", "Roda", "sexta", "at-0", "at-1", BODY_MARK, "7711", "syn-point", "1122334455", "synthetic-client", ACCOUNT, OTHER_ACCOUNT];
 
 /** The error a call fails with. */
 async function failure(run: Promise<unknown>): Promise<Error> {
@@ -495,7 +502,7 @@ describe("the body of an exercise create", () => {
     const { client, tokens, budget } = testClient();
     const session = { ...SESSION, ...change };
     expect(() => createBody(session)).toThrow(/^googlehealth: /);
-    const error = await failure(client.createExercise(session));
+    const error = await failure(client.createExercise(session, ACCOUNT));
     // The tool checks its input first: this is a caller bug.
     expect(error).not.toBeInstanceOf(ToolError);
     expect(toWire(error).code).toBe("internal_error");
@@ -545,7 +552,7 @@ describe("createExercise", () => {
   it("sends one POST with the session and returns the name of the finished Operation", async () => {
     const requests = fakeApi(() => created());
     const { client, tokens, budget, waits } = testClient();
-    expect(await client.createExercise(SESSION)).toBe(POINT);
+    expect(await client.createExercise(SESSION, ACCOUNT)).toBe(POINT);
     expect(requests).toEqual([{ method: "POST", url: "https://health.googleapis.com/v4/users/me/dataTypes/exercise/dataPoints", path: CREATE_PATH, auth: "Bearer at-0", text: SESSION_JSON }]);
     expect(budget.used).toBe(1);
     expect(tokens.asked).toBe(1);
@@ -565,7 +572,7 @@ describe("createExercise", () => {
   ])("does not accept an answer that names %s: the entry may exist, and no id is made up", async (_name, name) => {
     const requests = fakeApi(() => created(name));
     const { client, waits } = testClient();
-    const error = await failure(client.createExercise(SESSION));
+    const error = await failure(client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health returned no usable id for the entry", hint: MAY_EXIST_HINTS.exercise });
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
@@ -601,7 +608,7 @@ describe("createExercise", () => {
   it.each([408, 500, 503])("is never sent again after HTTP %i: the entry may exist", async (status) => {
     const requests = fakeApi(() => apiError(status, "UNAVAILABLE", { "retry-after": "1" }));
     const { client, budget, waits } = testClient();
-    const error = await failure(client.createExercise(SESSION));
+    const error = await failure(client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health API is unavailable", hint: MAY_EXIST_HINTS.exercise });
     expect(requests).toHaveLength(1);
     expect(budget.used).toBe(1);
@@ -614,7 +621,7 @@ describe("createExercise", () => {
       throw new TypeError(`connection reset while sending ${BODY_MARK}`);
     });
     const { client, waits } = testClient();
-    const error = await failure(client.createExercise(SESSION));
+    const error = await failure(client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health API could not be reached", hint: MAY_EXIST_HINTS.exercise });
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
@@ -625,8 +632,8 @@ describe("createExercise", () => {
   it("is an entry that may exist when the Operation is not finished or carries an error", async () => {
     fakeApi((n) => (n === 1 ? json(200, { name: "operations/syn-1", metadata: { note: BODY_MARK } }) : json(200, { done: true, error: { code: 3, message: BODY_MARK } })));
     const { client } = testClient();
-    expect(toWire(await failure(client.createExercise(SESSION)))).toEqual({ code: "upstream_unavailable", message: "Google Health has not finished creating the entry", hint: MAY_EXIST_HINTS.exercise });
-    expect(toWire(await failure(client.createExercise(SESSION)))).toEqual({ code: "upstream_unavailable", message: "Google Health reported an error for the entry", hint: MAY_EXIST_HINTS.exercise });
+    expect(toWire(await failure(client.createExercise(SESSION, ACCOUNT)))).toEqual({ code: "upstream_unavailable", message: "Google Health has not finished creating the entry", hint: MAY_EXIST_HINTS.exercise });
+    expect(toWire(await failure(client.createExercise(SESSION, ACCOUNT)))).toEqual({ code: "upstream_unavailable", message: "Google Health reported an error for the entry", hint: MAY_EXIST_HINTS.exercise });
     expect(warnings()).toEqual([
       ["google health write answer not usable", { data_type: "exercise", operation: "create", reason: "not_done" }],
       ["google health write answer not usable", { data_type: "exercise", operation: "create", reason: "operation_error", google_code: 3 }],
@@ -637,7 +644,7 @@ describe("createExercise", () => {
   it("is sent again after a 429, and answers that the entry was not created when every attempt is refused", async () => {
     const requests = fakeApi((n) => (n < 3 ? apiError(429, "RESOURCE_EXHAUSTED") : created()));
     const first = testClient();
-    expect(await first.client.createExercise(SESSION)).toBe(POINT);
+    expect(await first.client.createExercise(SESSION, ACCOUNT)).toBe(POINT);
     expect(requests).toHaveLength(3);
     expect(new Set(requests.map((request) => request.text))).toEqual(new Set([SESSION_JSON]));
     expect(first.waits).toEqual([1000, 2000]);
@@ -645,7 +652,7 @@ describe("createExercise", () => {
 
     vi.mocked(globalThis.fetch).mockRestore();
     const again = fakeApi(() => apiError(429, "RESOURCE_EXHAUSTED"));
-    const error = await failure(testClient().client.createExercise(SESSION));
+    const error = await failure(testClient().client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health API is unavailable", hint: NOT_CREATED_HINT });
     expect(again).toHaveLength(MAX_ATTEMPTS);
     expectNoSecret(error);
@@ -654,7 +661,7 @@ describe("createExercise", () => {
   it("renews a rejected token once and sends the session again", async () => {
     const requests = fakeApi((n) => (n === 1 ? apiError(401, "UNAUTHENTICATED") : created()));
     const { client, tokens, budget } = testClient();
-    expect(await client.createExercise(SESSION)).toBe(POINT);
+    expect(await client.createExercise(SESSION, ACCOUNT)).toBe(POINT);
     expect(requests.map((request) => request.auth)).toEqual(["Bearer at-0", "Bearer at-1"]);
     expect(tokens.invalidated).toEqual(["at-0"]);
     expect(budget.used).toBe(2);
@@ -665,7 +672,7 @@ describe("createExercise", () => {
     const requests = fakeApi(() => created());
     const tokens = new FakeTokens();
     tokens.failure = { ok: false, code: "not_linked" };
-    const error = await failure(testClient({}, tokens).client.createExercise(SESSION));
+    const error = await failure(testClient({}, tokens).client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "auth_expired", message: "not signed in to Google Health", hint: RECONNECT_HINT });
     expect(requests).toHaveLength(0);
   });
@@ -673,7 +680,7 @@ describe("createExercise", () => {
   it("answers scope_missing for a 403 with the write scope of its own data type in the hint", async () => {
     const requests = fakeApi(() => apiError(403, "PERMISSION_DENIED"));
     const { client, waits } = testClient();
-    const error = await failure(client.createExercise(SESSION));
+    const error = await failure(client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "scope_missing", message: "Google Health denied the write of exercise data", hint: EXERCISE_SCOPE_HINT });
     expect(EXERCISE_SCOPE_HINT).toContain("Disconnect and reconnect this connector");
     expect(requests).toHaveLength(1);
@@ -682,14 +689,14 @@ describe("createExercise", () => {
     const food = await failure(client.createNutritionLog(FOOD));
     expect(toWire(food)).toEqual({ code: "scope_missing", message: "Google Health denied the write of nutrition-log data", hint: FOOD_SCOPE_HINT });
     // And the delete of each data type has the hint of its own type.
-    expect(toWire(await failure(client.deleteExercise("syn-point-9f3a")))).toEqual({ code: "scope_missing", message: "Google Health denied the write of exercise data", hint: EXERCISE_SCOPE_HINT });
+    expect(toWire(await failure(client.deleteExercise("syn-point-9f3a", ACCOUNT)))).toEqual({ code: "scope_missing", message: "Google Health denied the write of exercise data", hint: EXERCISE_SCOPE_HINT });
     expect(toWire(await failure(client.deleteNutritionLog("syn-point-9f3a")))).toEqual({ code: "scope_missing", message: "Google Health denied the write of nutrition-log data", hint: FOOD_SCOPE_HINT });
     expectNoSecret(error);
   });
 
   it("does not send a create the budget has no unit for, and says so", async () => {
     const requests = fakeApi(() => created());
-    const error = await failure(testClient({ budget: new RequestBudget(0) }).client.createExercise(SESSION));
+    const error = await failure(testClient({ budget: new RequestBudget(0) }).client.createExercise(SESSION, ACCOUNT));
     expect(toWire(error)).toEqual({
       code: "invalid_input",
       message: "this MCP request already sent all the Google Health requests one request may send: the entry was not sent",
@@ -717,7 +724,7 @@ describe("createExercise", () => {
         },
       }),
     );
-    const error = await failure(kind === "create" ? testClient().client.createExercise(SESSION) : testClient().client.deleteExercise("syn-point-9f3a"));
+    const error = await failure(kind === "create" ? testClient().client.createExercise(SESSION, ACCOUNT) : testClient().client.deleteExercise("syn-point-9f3a", ACCOUNT));
     const loggedMessage = (warnings()[0]?.[1] as { google_message?: string } | undefined)?.google_message ?? "";
     expect(loggedMessage.startsWith(head)).toBe(true);
     expect(loggedMessage.endsWith("…")).toBe(true);
@@ -741,7 +748,7 @@ describe("deleteExercise", () => {
   it("sends one POST to batchDelete of the exercise data type with the name of the point under users/me", async () => {
     const requests = fakeApi(() => deleted());
     const { client, budget } = testClient();
-    expect(await client.deleteExercise("syn-point-9f3a")).toBe("deleted");
+    expect(await client.deleteExercise("syn-point-9f3a", ACCOUNT)).toBe("deleted");
     expect(requests).toEqual([
       {
         method: "POST",
@@ -758,7 +765,7 @@ describe("deleteExercise", () => {
   it.each(["", "a/b", POINT, "a b", "a\nb", "x".repeat(129)])("refuses the ID %j before any request", async (id) => {
     const requests = fakeApi(() => deleted());
     const { client, tokens } = testClient();
-    const error = await failure(client.deleteExercise(id));
+    const error = await failure(client.deleteExercise(id, ACCOUNT));
     expect(error).not.toBeInstanceOf(ToolError);
     expect(requests).toHaveLength(0);
     expect(tokens.asked).toBe(0);
@@ -767,7 +774,7 @@ describe("deleteExercise", () => {
   it("takes Google's own 404, with the status NOT_FOUND, as a point that is already gone", async () => {
     const requests = fakeApi(() => apiError(404, "NOT_FOUND"));
     const { client, waits } = testClient();
-    expect(await client.deleteExercise("syn-point-9f3a")).toBe("gone");
+    expect(await client.deleteExercise("syn-point-9f3a", ACCOUNT)).toBe("gone");
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
     expect(logged()).toBe("[]");
@@ -775,7 +782,7 @@ describe("deleteExercise", () => {
 
   it("takes a 404 that is not Google's NOT_FOUND as a refused delete, not as a point that is gone", async () => {
     const requests = fakeApi(() => new Response(`<html><title>Error 404 (Not Found)</title>${BODY_MARK} NOT_FOUND</html>`, { status: 404, headers: { "content-type": "text/html" } }));
-    const error = await failure(testClient().client.deleteExercise("syn-point-9f3a"));
+    const error = await failure(testClient().client.deleteExercise("syn-point-9f3a", ACCOUNT));
     expect(toWire(error)).toEqual({ code: "invalid_input", message: "Google Health refused the delete", hint: "the entry was not deleted" });
     expect(requests).toHaveLength(1);
     expect(warnings()).toEqual([["google health request rejected", { data_type: "exercise", http_status: 404, google_status: "" }]]);
@@ -790,13 +797,13 @@ describe("deleteExercise", () => {
       return deleted();
     });
     const first = testClient();
-    expect(await first.client.deleteExercise("syn-point-9f3a")).toBe("deleted");
+    expect(await first.client.deleteExercise("syn-point-9f3a", ACCOUNT)).toBe("deleted");
     expect(requests).toHaveLength(4);
     expect(first.waits).toEqual([1000, 2000, 4000]);
 
     vi.mocked(globalThis.fetch).mockRestore();
     const again = fakeApi(() => apiError(503, "UNAVAILABLE"));
-    const error = await failure(testClient().client.deleteExercise("syn-point-9f3a"));
+    const error = await failure(testClient().client.deleteExercise("syn-point-9f3a", ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health API is unavailable", hint: DELETE_AGAIN_HINT });
     expect(again).toHaveLength(MAX_ATTEMPTS);
     // The hint of a food log delete still names its own tool.
@@ -807,7 +814,7 @@ describe("deleteExercise", () => {
 
   it("answers unavailable, with the exercise data type in the log, for an Operation that cannot be used", async () => {
     fakeApi(() => json(200, { done: true, error: { code: 5, message: BODY_MARK } }));
-    const error = await failure(testClient().client.deleteExercise("syn-point-9f3a"));
+    const error = await failure(testClient().client.deleteExercise("syn-point-9f3a", ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health reported an error for the delete", hint: DELETE_AGAIN_HINT });
     expect(warnings()).toEqual([["google health write answer not usable", { data_type: "exercise", operation: "delete", reason: "operation_error", google_code: 5 }]]);
     expectNoSecret(error);
@@ -815,12 +822,90 @@ describe("deleteExercise", () => {
 
   it("does not send a delete the budget has no unit for, and says so", async () => {
     const requests = fakeApi(() => deleted());
-    const error = await failure(testClient({ budget: new RequestBudget(0) }).client.deleteExercise("syn-point-9f3a"));
+    const error = await failure(testClient({ budget: new RequestBudget(0) }).client.deleteExercise("syn-point-9f3a", ACCOUNT));
     expect(toWire(error)).toEqual({
       code: "invalid_input",
       message: "this MCP request already sent all the Google Health requests one request may send: the delete was not sent",
       hint: "send this call in a request of its own",
     });
     expect(requests).toHaveLength(0);
+  });
+});
+
+// The tool reads the account from the store, and the client takes the token on
+// its own. An exercise write names the account the tool checked, and goes out
+// only with a token of that account.
+describe("the Google account of an exercise write", () => {
+  const CHANGED = "the linked Google account changed during this MCP request";
+  const OWN_REQUEST = "send this call in a request of its own";
+  const NOT_SENT_LINE = (operation: string) => ["google health write not sent: the linked account changed", { data_type: "exercise", operation }];
+
+  const WRITES = [
+    ["create", (client: GoogleHealthClient, account: string | undefined) => client.createExercise(SESSION, account), "the entry"],
+    ["delete", (client: GoogleHealthClient, account: string | undefined) => client.deleteExercise("syn-point-9f3a", account as string), "the delete"],
+  ] as const;
+
+  it.each(WRITES)("a %s is not sent with the token of another account", async (kind, write, what) => {
+    const requests = fakeApi(() => (kind === "create" ? created() : deleted()));
+    const { client, tokens, budget, waits } = testClient();
+    const error = await failure(write(client, OTHER_ACCOUNT));
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: `${CHANGED}: ${what} was not sent`, hint: OWN_REQUEST });
+    // No fetch, no unit of the budget, no retry.
+    expect(requests).toHaveLength(0);
+    expect(budget.used).toBe(0);
+    expect(waits).toEqual([]);
+    expect(tokens.asked).toBe(1);
+    expect(tokens.invalidated).toEqual([]);
+    expect(warnings()).toEqual([NOT_SENT_LINE(kind)]);
+    expectNoSecret(error);
+  });
+
+  it.each(WRITES)("a %s is not sent with a token that names no account", async (kind, write, what) => {
+    const requests = fakeApi(() => (kind === "create" ? created() : deleted()));
+    const tokens = new FakeTokens();
+    tokens.subs = [null];
+    const error = await failure(write(testClient({}, tokens).client, ACCOUNT));
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: `${CHANGED}: ${what} was not sent`, hint: OWN_REQUEST });
+    expect(requests).toHaveLength(0);
+    expectNoSecret(error);
+  });
+
+  it("a create for a store without a link is not sent with the token of an account that signed in meanwhile", async () => {
+    const requests = fakeApi(() => created());
+    const error = await failure(testClient().client.createExercise(SESSION, undefined));
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: `${CHANGED}: the entry was not sent`, hint: OWN_REQUEST });
+    expect(requests).toHaveLength(0);
+  });
+
+  it.each(WRITES)("a %s is not sent again when the renewed token belongs to another account", async (kind, write, what) => {
+    // Google rejects the first token. The renewal answers the token of the account that signed in meanwhile.
+    const requests = fakeApi((n) => (n === 1 ? apiError(401, "UNAUTHENTICATED") : kind === "create" ? created() : deleted()));
+    const tokens = new FakeTokens();
+    tokens.subs = [ACCOUNT, OTHER_ACCOUNT];
+    const { client, budget } = testClient({}, tokens);
+    const error = await failure(write(client, ACCOUNT));
+    expect(toWire(error)).toEqual({ code: "invalid_input", message: `${CHANGED}: ${what} was not sent again`, hint: OWN_REQUEST });
+    // The one attempt went out with the token of the account of the write.
+    expect(requests.map((request) => request.auth)).toEqual(["Bearer at-0"]);
+    expect(tokens.invalidated).toEqual(["at-0"]);
+    expect(budget.used).toBe(1);
+    expect(warnings()).toEqual([["google health token rejected; renewing", { data_type: "exercise", http_status: 401 }], NOT_SENT_LINE(kind)]);
+    expectNoSecret(error);
+  });
+
+  it("the food log writes and the reads name no account, and are not compared", async () => {
+    const requests = fakeApi((_n, request) => {
+      if (request.method === "GET") return json(200, {});
+      return request.path === FOOD_DELETE_PATH ? deleted() : created(FOOD_POINT);
+    });
+    const tokens = new FakeTokens();
+    // A token source that says no account, as before the answer carried one.
+    tokens.subs = [null];
+    const { client } = testClient({}, tokens);
+    expect(await client.createNutritionLog(FOOD)).toBe(FOOD_POINT);
+    expect(await client.deleteNutritionLog("syn-point-9f3a")).toBe("deleted");
+    expect(await client.list("exercise", "2026-10-16", "2026-10-16", (record) => record)).toEqual([]);
+    expect(requests.map((request) => request.auth)).toEqual(["Bearer at-0", "Bearer at-0", "Bearer at-0"]);
+    expect(logged()).toBe("[]");
   });
 });

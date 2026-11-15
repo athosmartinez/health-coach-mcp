@@ -74,6 +74,10 @@ const ACCOUNT = "300000000000000000003";
 function session(options: FakeOptions = {}) {
   const created: NewExerciseSession[] = [];
   const removed: string[] = [];
+  /** The account each write named to the client, in order. */
+  const accounts: (string | undefined)[] = [];
+  /** How many times a tool read the linked account. */
+  const reads = { owner: 0 };
   const rows = new Map<string, string>();
   /** The account each row was recorded for. */
   const owners = new Map<string, string>();
@@ -82,21 +86,26 @@ function session(options: FakeOptions = {}) {
   const linked: { account: string | undefined } = { account: options.account === null ? undefined : (options.account ?? ACCOUNT) };
   const deps: ExerciseLogDeps = {
     api: {
-      createExercise: async (one) => {
+      createExercise: async (one, account) => {
         steps.push("create");
         created.push(one);
+        accounts.push(account);
         return options.create ? options.create(one) : entryName(created.length);
       },
-      deleteExercise: async (id) => {
+      deleteExercise: async (id, account) => {
         steps.push("delete");
         removed.push(id);
+        accounts.push(account);
         return options.remove ? options.remove(id) : "deleted";
       },
     },
     // The rules of the store: a session is recorded for the linked account,
     // and only the sessions of the linked account are known.
     entries: {
-      owner: () => linked.account,
+      owner: () => {
+        reads.owner++;
+        return linked.account;
+      },
       record: (name, onDay, owner) => {
         steps.push("record");
         if (options.failRecord) throw new DiskError();
@@ -132,6 +141,8 @@ function session(options: FakeOptions = {}) {
   return {
     created,
     removed,
+    accounts,
+    reads,
     rows,
     owners,
     linked,
@@ -697,6 +708,9 @@ describe("exercise_log_add", () => {
       const s = session();
       const out = await s.ok("exercise_log_add", WORKOUT);
       expect([...s.owners]).toEqual([[out.entry_id, ACCOUNT]]);
+      // The create names that account to the client, which sends it only with a token of that account.
+      expect(s.accounts).toEqual([ACCOUNT]);
+      expect(s.reads.owner).toBe(1);
       // The account is the server's own business: it is in no result and no log line.
       expect(JSON.stringify(out)).not.toContain(ACCOUNT);
       expect(g.logged()).not.toContain(ACCOUNT);
@@ -713,6 +727,22 @@ describe("exercise_log_add", () => {
       expect(raced.steps).toEqual(["create", "record"]);
       expect(raced.rows.size).toBe(0);
       for (const secret of [ACCOUNT, other]) expect(g.logged()).not.toContain(secret);
+    });
+
+    it("names no account to the client when none is linked, and passes on the error of a create that was not sent", async () => {
+      // The client refuses the write when its token is not of the named account, and sends nothing.
+      const notSent = new ToolError("invalid_input", "the linked Google account changed during this MCP request: the entry was not sent", "send this call in a request of its own");
+      const s = session({
+        account: null,
+        create: async () => {
+          throw notSent;
+        },
+      });
+      expect(await s.fails("exercise_log_add", WORKOUT)).toEqual({ code: "invalid_input", message: notSent.message, hint: notSent.hint });
+      expect(s.accounts).toEqual([undefined]);
+      // Nothing was created, so nothing is recorded.
+      expect(s.steps).toEqual(["create"]);
+      expect(s.rows.size).toBe(0);
     });
   });
 });
@@ -854,9 +884,26 @@ describe("exercise_log_delete", () => {
 
     // The first account is linked again: the session is its own again, and the delete happens.
     s.linked.account = ACCOUNT;
+    s.accounts.length = 0;
+    s.reads.owner = 0;
     expect(await s.ok("exercise_log_delete", { entry_id: entryId })).toEqual({ entry_id: entryId, deleted: true });
     expect(s.removed).toEqual(["syn-entry-1"]);
     expect(s.rows.size).toBe(0);
+    // The account is read once, and the delete names it to the client: the one the "not linked" check and the ownership check saw.
+    expect(s.reads.owner).toBe(1);
+    expect(s.accounts).toEqual([ACCOUNT]);
+  });
+
+  it("keeps the row when the client does not send the delete because its token is of another account", async () => {
+    const notSent = new ToolError("invalid_input", "the linked Google account changed during this MCP request: the delete was not sent", "send this call in a request of its own");
+    const { s, entryId } = await withEntry({
+      remove: async () => {
+        throw notSent;
+      },
+    });
+    expect(await s.fails("exercise_log_delete", { entry_id: entryId })).toEqual({ code: "invalid_input", message: notSent.message, hint: notSent.hint });
+    expect(s.steps).toEqual(["has", "delete"]);
+    expect([...s.rows.keys()]).toEqual([entryId]);
   });
 
   it.each([

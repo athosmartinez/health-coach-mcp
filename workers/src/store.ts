@@ -205,9 +205,14 @@ export type AccessTokenErrorCode = GoogleErrorCode | "not_linked";
 /**
  * Result of {@link CoachStore.googleAccessToken}. A result rather than a throw:
  * errors crossing Durable Object RPC lose their type and fields.
+ *
+ * `sub` is the Google account the token belongs to: the row it was read from,
+ * or the row whose refresh token renewed it. It is not always the account
+ * that is linked when the caller uses the token, so a write that is bound to
+ * one account compares the two.
  */
 export type AccessTokenResult =
-  | { ok: true; accessToken: string; expiresAt: number }
+  | { ok: true; accessToken: string; expiresAt: number; sub: string }
   | { ok: false; code: AccessTokenErrorCode; message: string };
 
 export type TokenState = "ok" | AccessTokenErrorCode;
@@ -440,11 +445,13 @@ export class CoachStore extends DurableObject<Env> {
       if (!row) return notLinked();
       if (row.access_token && row.access_token_expires_at !== null) {
         if (row.access_token_expires_at - ACCESS_TOKEN_MARGIN_MS > Date.now()) {
-          return { ok: true, accessToken: row.access_token, expiresAt: row.access_token_expires_at };
+          return { ok: true, accessToken: row.access_token, expiresAt: row.access_token_expires_at, sub: row.sub };
         }
       }
       if (!this.refreshing) {
-        this.refreshing = this.refresh(row.refresh_token).finally(() => {
+        // The renewal answers the account of its own row: a caller that joins
+        // a renewal in flight may have read the row of another link.
+        this.refreshing = this.refresh(row.refresh_token, row.sub).finally(() => {
           this.refreshing = null;
         });
       }
@@ -514,7 +521,8 @@ export class CoachStore extends DurableObject<Env> {
       .toArray()[0];
   }
 
-  private async refresh(refreshToken: string): Promise<AccessTokenResult> {
+  /** Renews the access token of the link that holds `refreshToken`. `sub` is the account of that link. */
+  private async refresh(refreshToken: string, sub: string): Promise<AccessTokenResult> {
     const result = await refreshAccessToken(
       { clientId: this.env.GOOGLE_CLIENT_ID, clientSecret: this.env.GOOGLE_CLIENT_SECRET },
       refreshToken,
@@ -539,7 +547,9 @@ export class CoachStore extends DurableObject<Env> {
       Date.now(),
       refreshToken,
     );
-    return { ok: true, accessToken: result.accessToken, expiresAt: result.expiresAt };
+    // Google issued the token for the refresh token that was sent, so it is
+    // that account's token also when another link replaced the row meanwhile.
+    return { ok: true, accessToken: result.accessToken, expiresAt: result.expiresAt, sub };
   }
 }
 

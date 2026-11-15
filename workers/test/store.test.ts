@@ -304,6 +304,65 @@ describe("CoachStore Google token", () => {
     expect(await row()).toMatchObject({ refresh_token: "new-sign-in-refresh", access_token: "new-sign-in-access" });
   });
 
+  // A write that is bound to one Google account compares it with the account of the token.
+  describe("the account of an access token", () => {
+    const OTHER_SUB = "200000000000000000002";
+    const other = (overrides: Partial<GoogleLink> = {}) =>
+      link({ sub: OTHER_SUB, email: "other@example.com", refreshToken: "other-refresh", accessToken: "other-access", ...overrides });
+    /** A token endpoint that waits for `release`, then answers a token named after the refresh token it was asked with. */
+    function gatedGoogle() {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      mockGoogle(async (form) => {
+        await gate;
+        return Response.json({ access_token: `renewed-with-${form.get("refresh_token")}`, expires_in: 3599 });
+      });
+      return () => release();
+    }
+
+    it("is the linked account, for a stored token and for a renewed one", async () => {
+      mockGoogle(() => Response.json({ access_token: "renewed-access-token", expires_in: 3599 }));
+      const stub = coachStore(env);
+      await stub.linkGoogleAccount(link());
+      expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: GOOGLE_ACCESS_TOKEN, sub: OWNER_SUB });
+      await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN);
+      expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token", sub: OWNER_SUB });
+      await stub.linkGoogleAccount(other());
+      expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "other-access", sub: OTHER_SUB });
+    });
+
+    it("is the new account, when another account signs in while the token of the first is renewed", async () => {
+      const release = gatedGoogle();
+      const stub = coachStore(env);
+      await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
+      const pending = stub.googleAccessToken();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await stub.linkGoogleAccount(other());
+      release();
+      // The renewed token of the first account is dropped: the answer is the stored token of the second, under its own account.
+      expect(await pending).toMatchObject({ ok: true, accessToken: "other-access", sub: OTHER_SUB });
+    });
+
+    it("is the account of the renewal, not of the row the caller read, when the caller joins a renewal of a replaced link", async () => {
+      const release = gatedGoogle();
+      const stub = coachStore(env);
+      await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
+      const first = stub.googleAccessToken();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      // The second account signs in with an access token that needs a renewal too.
+      await stub.linkGoogleAccount(other({ accessTokenExpiresAt: 0 }));
+      const second = stub.googleAccessToken();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      release();
+      // The second caller read the row of the new link and joined the renewal of the old one:
+      // the token it gets is the first account's, and the answer says so.
+      expect(await second).toMatchObject({ ok: true, accessToken: `renewed-with-${GOOGLE_REFRESH_TOKEN}`, sub: OWNER_SUB });
+      // The first caller saw the link replaced, and renewed the token of the new one.
+      expect(await first).toMatchObject({ ok: true, accessToken: "renewed-with-other-refresh", sub: OTHER_SUB });
+      expect(await row()).toMatchObject({ sub: OTHER_SUB, access_token: "renewed-with-other-refresh" });
+    });
+  });
+
   it("maps a body cut off after HTTP 200 to upstream_unavailable", async () => {
     mockGoogle(
       () =>

@@ -259,54 +259,61 @@ export async function readActivity(ctx: Context, from: LocalDate, to: LocalDate,
   let nextWide = 0;
   const unchecked: Window[] = []; // wide windows whose "band worn" check is still to do
   const written: LocalDate[] = []; // days this call cached
-  for (const window of read.kcal ? windows(need, KCAL_WINDOW_DAYS) : wide) {
-    for (let w = wide[nextWide]; w !== undefined && w.first <= window.last; w = wide[++nextWide]) {
-      if (read.steps) {
-        // A row is sent only for a day with steps: a missing count is a
-        // renamed field, not zero steps.
-        await rollup("steps", w.first, w.last, (row) => required(optionalInt64s(object(row, "steps"), "countSum")), MAX_DAY_STEPS, steps);
+  try {
+    for (const window of read.kcal ? windows(need, KCAL_WINDOW_DAYS) : wide) {
+      for (let w = wide[nextWide]; w !== undefined && w.first <= window.last; w = wide[++nextWide]) {
+        if (read.steps) {
+          // A row is sent only for a day with steps: a missing count is a
+          // renamed field, not zero steps.
+          await rollup("steps", w.first, w.last, (row) => required(optionalInt64s(object(row, "steps"), "countSum")), MAX_DAY_STEPS, steps);
+        }
+        if (read.azm) {
+          await rollup("active-zone-minutes", w.first, w.last, zoneMinutes, MAX_DAY_AZM, azm);
+          unchecked.push(w);
+        }
       }
-      if (read.azm) {
-        await rollup("active-zone-minutes", w.first, w.last, zoneMinutes, MAX_DAY_AZM, azm);
-        unchecked.push(w);
+      if (read.kcal) {
+        await rollup("total-calories", window.first, window.last, (row) => required(float(object(row, "totalCalories"), "kcalSum")), MAX_DAY_KCAL, kcal);
+      }
+      for (const w of unchecked.splice(0)) {
+        // The steps records are listed only for the days without a
+        // zone-minutes row.
+        const lacking = w.days.filter((day) => !azm.has(day));
+        for (const list of windows(lacking, WORN_WINDOW_DAYS)) {
+          for (const day of await wornDays(ctx, list.first, list.last)) worn.add(day);
+        }
+      }
+      for (const day of window.days) {
+        const clean = isClean(day);
+        const v = dayOf(day, clean);
+        if (!v || day > settled || !clean) continue;
+        // A steps or total-calories row is cached only for a day the band
+        // recorded: its zone-minutes value was read now (a row, or the 0 of a
+        // worn day), or its row is already in the cache. A day without band
+        // data is read again on every call, as in the Go server, which serves a
+        // cached day only with its zone-minutes row. So band data that arrives
+        // after the day settled (a late sync) replaces the totals, also for a
+        // caller that reads steps or total calories alone.
+        const recorded = v.azm !== null || cached.get(KEY_AZM)?.has(day) === true;
+        if (read.steps && v.steps !== null && recorded) ctx.put({ date: day, key: KEY_STEPS, value: v.steps, source: ROLLUP_SOURCE });
+        if (read.azm && v.azm !== null) ctx.put({ date: day, key: KEY_AZM, value: v.azm, source: ROLLUP_SOURCE });
+        if (read.kcal && v.totalKcal !== null && recorded) ctx.put({ date: day, key: KEY_TOTAL_CALORIES, value: v.totalKcal, source: ROLLUP_SOURCE });
+        written.push(day);
       }
     }
-    if (read.kcal) {
-      await rollup("total-calories", window.first, window.last, (row) => required(float(object(row, "totalCalories"), "kcalSum")), MAX_DAY_KCAL, kcal);
-    }
-    for (const w of unchecked.splice(0)) {
-      // The steps records are listed only for the days without a
-      // zone-minutes row.
-      const lacking = w.days.filter((day) => !azm.has(day));
-      for (const list of windows(lacking, WORN_WINDOW_DAYS)) {
-        for (const day of await wornDays(ctx, list.first, list.last)) worn.add(day);
-      }
-    }
-    for (const day of window.days) {
-      const clean = isClean(day);
-      const v = dayOf(day, clean);
-      if (!v || day > settled || !clean) continue;
-      // A steps or total-calories row is cached only for a day the band
-      // recorded: its zone-minutes value was read now (a row, or the 0 of a
-      // worn day), or its row is already in the cache. A day without band
-      // data is read again on every call, as in the Go server, which serves a
-      // cached day only with its zone-minutes row. So band data that arrives
-      // after the day settled (a late sync) replaces the totals, also for a
-      // caller that reads steps or total calories alone.
-      const recorded = v.azm !== null || cached.get(KEY_AZM)?.has(day) === true;
-      if (read.steps && v.steps !== null && recorded) ctx.put({ date: day, key: KEY_STEPS, value: v.steps, source: ROLLUP_SOURCE });
-      if (read.azm && v.azm !== null) ctx.put({ date: day, key: KEY_AZM, value: v.azm, source: ROLLUP_SOURCE });
-      if (read.kcal && v.totalKcal !== null && recorded) ctx.put({ date: day, key: KEY_TOTAL_CALORIES, value: v.totalKcal, source: ROLLUP_SOURCE });
-      written.push(day);
+  } finally {
+    // A row dropped in a later window makes its whole run of missing days
+    // unclean, so the days of that run that an earlier window cached are
+    // taken out of the cache. Also when a window after it fails (a request
+    // that stays unavailable, or the budget error): the call then ends with
+    // that error, and the same call again must not find those days cached.
+    for (const day of written) {
+      if (!isClean(day)) for (const key of keys) ctx.del(day, key);
     }
   }
 
-  // A row dropped in a later window makes its whole run of missing days
-  // unclean. So the days are built once every window is read, and the days
-  // of that run that an earlier window cached are taken out of the cache.
-  for (const day of written) {
-    if (!isClean(day)) for (const key of keys) ctx.del(day, key);
-  }
+  // The days are built once every window is read: a run is clean or not as a
+  // whole.
   for (const day of need) {
     const v = dayOf(day, isClean(day));
     if (v) a.days.set(day, v);

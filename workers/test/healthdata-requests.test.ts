@@ -2,7 +2,7 @@
 // source returns stay the Go server's; these tests count the HTTP requests of
 // the fake API per data type, and check the plan, the windows, the narrow
 // options, the request budget and the log lines.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { type LocalDate, Zone, addDays } from "../src/coach/date";
 import { ToolError } from "../src/coach/errors";
@@ -516,6 +516,99 @@ describe("request counts: activity", () => {
       expect(a.days.get("2026-09-18")?.totalKcal).toBe(2217);
       for (const key of ACTIVITY_KEYS) expect(metricRange(db, key, "2026-09-01", "2026-09-20", ALGO_VERSION), key).toEqual([]);
     }));
+
+  describe("when a later window fails", () => {
+    const [from, to] = ["2026-09-01", "2026-10-10"];
+    const cachedDays = (db: Db, key: string) => metricRange(db, key, from, to, ALGO_VERSION).map((row) => row.date);
+    const kcalCalls = () => h.google.takeCalls().filter((call) => call.startsWith("rollup total-calories"));
+
+    /**
+     * 40 settled days with 09-10 cached: two runs of missing days, and three
+     * total-calories windows (09-01, 09-15 and 09-29). The band counted steps
+     * on 09-12 without zone minutes.
+     */
+    async function twoRuns(db: Db): Promise<void> {
+      fill(h.google, from, to, { noZoneMinutes: (index) => index === 11 });
+      await newData(db).activity("2026-09-10", "2026-09-10");
+      h.google.takeCalls();
+    }
+
+    /** Answers 503 to every total-calories rollup that starts on 2026-09-29: the third window. */
+    function failThirdWindow(): void {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const request = new Request(input, init);
+        if (request.method === "POST" && request.url.includes("/total-calories/")) {
+          const body = (await request.clone().json()) as { range: { start: { date: { month: number; day: number } } } };
+          const start = body.range.start.date;
+          if (start.month === 9 && start.day === 29) return Response.json({ error: { code: 503, status: "UNAVAILABLE" } }, { status: 503 });
+        }
+        return h.google.respond(request);
+      });
+    }
+
+    const unreadableRow = { civilStartTime: { date: { year: 2026, month: 9, day: 18 } }, totalCalories: { kcalSum: "a lot" } };
+    const firstRun = dayList("2026-09-01", "2026-09-10");
+
+    it.each([
+      ["a request that stays unavailable", (db: Db) => newData(db), { code: "upstream_unavailable" }],
+      // The steps and zone-minutes rollups, the steps list of 09-12 and two
+      // total-calories windows: the third window is not sent.
+      ["the budget error", (db: Db) => oneRequest(db, new RequestBudget(5)), { ...BUDGET_ERROR, message: "the date range holds more total-calories data than one call reads" }],
+    ])("takes the days of an unclean run out of the cache also when the call ends with %s", (name, source, error) =>
+      inStore(async (db) => {
+        await twoRuns(db);
+        // A row of the second window cannot be read: the second run is unclean.
+        h.google.addRollup("total-calories", unreadableRow);
+        if (name !== "the budget error") failThirdWindow();
+        const failed = await source(db)
+          .activity(from, to)
+          .catch((e: unknown) => e);
+        expect(failed).toBeInstanceOf(ToolError);
+        expect((failed as ToolError).wire()).toMatchObject(error);
+        // The windows that the fake API answered: the third one got no answer from it.
+        expect(kcalCalls()).toEqual(["rollup total-calories 2026-09-01..2026-09-14", "rollup total-calories 2026-09-15..2026-09-28"]);
+        // The first window cached 09-11..09-14 before the second one dropped
+        // the row. They are gone; the clean run before them stays.
+        for (const key of ACTIVITY_KEYS) expect(cachedDays(db, key), key).toEqual(firstRun);
+
+        // The same call again reads the whole unclean run from Google.
+        vi.restoreAllMocks();
+        h.google.install();
+        const again = await newData(db).activity(from, to);
+        expect(kcalCalls()).toEqual([
+          "rollup total-calories 2026-09-11..2026-09-24",
+          "rollup total-calories 2026-09-25..2026-10-08",
+          "rollup total-calories 2026-10-09..2026-10-10",
+        ]);
+        expect(again.skipped).toBe(1);
+        // As in the Go server: a run with a dropped row gets no 0 for its zone minutes.
+        expect(again.days.get("2026-09-12")).toEqual({ steps: 6011, azm: null, totalKcal: 2211, worn: true, partial: false });
+        expect(again.days.size).toBe(40);
+        for (const key of ACTIVITY_KEYS) expect(cachedDays(db, key), key).toEqual(firstRun);
+      }),
+    );
+
+    it("keeps the days of the finished windows in the cache when every row was readable", () =>
+      inStore(async (db) => {
+        await twoRuns(db);
+        failThirdWindow();
+        await expect(newData(db).activity(from, to)).rejects.toMatchObject({ code: "upstream_unavailable" });
+        const finished = dayList(from, "2026-09-28");
+        for (const key of ACTIVITY_KEYS) expect(cachedDays(db, key), key).toEqual(finished);
+        // The same call again starts at the third window.
+        vi.restoreAllMocks();
+        h.google.install();
+        h.google.takeCalls();
+        const again = await newData(db).activity(from, to);
+        expect(h.google.takeCalls()).toEqual([
+          "rollup steps 2026-09-29..2026-10-10",
+          "rollup active-zone-minutes 2026-09-29..2026-10-10",
+          "rollup total-calories 2026-09-29..2026-10-10",
+        ]);
+        expect(again.days.get("2026-09-12")).toEqual({ steps: 6011, azm: 0, totalKcal: 2211, worn: true, partial: false });
+        expect(h.logged()).not.toContain("6011");
+      }));
+  });
 
   it("applies a dropped row without a day to every run of its request", () =>
     inStore(async (db) => {

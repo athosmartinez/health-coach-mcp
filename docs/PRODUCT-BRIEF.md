@@ -17,7 +17,7 @@ Starting a gym + diet routine.
 
 ## 3. Why now
 - Fitbit Air + new **Google Health API v4** (OAuth, webhooks, 40 data types, nutrition included).
-- Legacy Fitbit Web API shuts down on 2026-10-30 — the right moment to build directly on v4.
+- Legacy Fitbit Web API support ends on 2026-09-30 and the API shuts down on 2026-11-02 — the right moment to build directly on v4.
 - MCP has become the standard: one server serves Claude Code, Desktop, claude.ai, other LLMs and agents.
 
 ## 4. 10-star version

@@ -1,4 +1,4 @@
-// The shape every coach-moment tool returns (Go: internal/coach/envelope.go).
+// The shape every coach-moment tool returns.
 
 /** Tells the model how much to trust a number. */
 export type ConfidenceLevel = "low" | "medium" | "high";

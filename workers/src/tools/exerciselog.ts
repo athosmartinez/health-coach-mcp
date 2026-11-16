@@ -1,6 +1,5 @@
 // exercise_log_add and exercise_log_delete: the two tools that write the
-// exercise log of Google Health. The Go server has neither: it only reads
-// Google Health.
+// exercise log of Google Health.
 //
 // They follow the contract of the two food log tools (foodlog.ts): their
 // bodies run inside the CoachStore Durable Object and take turns with the

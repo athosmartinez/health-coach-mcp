@@ -1,4 +1,4 @@
-// Shared pieces of the coach memory store (Go: internal/store/store.go): the
+// Shared pieces of the coach memory store: the
 // SQL handle with its clock, stored timestamps, and the validation helpers.
 
 import { type LocalDate, parseDate } from "../coach/date";

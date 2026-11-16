@@ -1,11 +1,11 @@
 // The coach's MCP prompts, one per coaching moment, and the coach://guardrails
-// resource with the rules every moment follows (Go: internal/prompts).
+// resource with the rules every moment follows.
 //
 // The prompts and the resource are static text: they read no health data and
 // write no log line. Their handlers are set on the low-level server, not with
 // McpServer.registerPrompt and registerResource: those add `required: false`
 // to each prompt argument and write their own text for a prompt or a resource
-// that does not exist, and the Go server's answers are the contract here
+// that does not exist, and the frozen fixture is the contract here
 // (test/fixtures/go-prompts.json).
 
 import { type McpServer, ProtocolError, ProtocolErrorCode, ResourceNotFoundError } from "@modelcontextprotocol/server";
@@ -29,7 +29,7 @@ const GUARDRAILS_RESOURCE = {
 /** Adds the coach://guardrails resource. */
 export function registerGuardrails(server: McpServer): void {
   const low = server.server;
-  // As the Go server advertises it. The list never changes while a server lives.
+  // The resource list is advertised with listChanged. The list never changes while a server lives.
   low.registerCapabilities({ resources: { listChanged: true } });
   low.setRequestHandler("resources/list", () => ({ resources: [GUARDRAILS_RESOURCE] }));
   low.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [] }));
@@ -54,7 +54,7 @@ export interface Moment {
   task: string;
 }
 
-/** The moments, in the order of the Go source. */
+/** The moments, in briefing, nutrition, workout, then weekly order. */
 export const MOMENTS: readonly Moment[] = [
   {
     name: "morning_briefing",
@@ -110,7 +110,7 @@ export const MOMENTS: readonly Moment[] = [
 
 const byName = new Map(MOMENTS.map((moment) => [moment.name, moment]));
 
-/** The prompts as prompts/list shows them: by name, as the Go server lists them. */
+/** The prompts as prompts/list shows them: sorted by name. */
 const LISTED = [...MOMENTS]
   .sort((a, b) => compareText(a.name, b.name))
   .map((moment) => ({

@@ -1,20 +1,19 @@
-// String helpers with the Go server's semantics. The store limits and the
-// normalization rules are defined on UTF-8 bytes and on Go's white space set,
-// which differ from JavaScript's `length` and `trim()`.
+// String helpers. The store limits and the normalization rules are defined on
+// UTF-8 bytes and on a white-space set that differs from JavaScript's
+// `length` and `trim()`.
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** UTF-8 length of `s`, as Go's `len(string)`. */
+/** UTF-8 length of `s`. */
 export function byteLength(s: string): number {
   return encoder.encode(s).length;
 }
 
 /**
- * UTF-8 length of JSON text as Go's encoding/json writes it. Go escapes "<",
- * ">" and "&" (6 bytes instead of 1) and U+2028, U+2029 (6 bytes instead of
- * 3); JSON.stringify writes all five as they are. The Go server measures its
- * size limits on that text, so the same value must pass or fail on both.
+ * UTF-8 length of JSON text with "<", ">", "&", U+2028 and U+2029 counted as
+ * the six-byte escapes. JSON.stringify writes all five as they are. Size
+ * limits use this length.
  */
 export function goJsonLength(json: string): number {
   let extra = 0;
@@ -25,7 +24,7 @@ export function goJsonLength(json: string): number {
   return byteLength(json) + extra;
 }
 
-// Go's unicode.IsSpace. JavaScript's \s adds U+FEFF and leaves out U+0085.
+// White space for trimming. JavaScript's \s adds U+FEFF and leaves out U+0085.
 const SPACE = "\\t\\n\\v\\f\\r \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000";
 const EDGES = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "g");
 const RUN = new RegExp(`[${SPACE}]+`);

@@ -1,4 +1,4 @@
-// metric_series (Go: internal/tools/series.go, CAPABILITY §4.1).
+// metric_series (CAPABILITY §4.1).
 //
 // The Go server reads the whole source of a metric (every recovery value,
 // every daily total). A year of that is more Google requests than one MCP

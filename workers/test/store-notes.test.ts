@@ -1,4 +1,4 @@
-// Ports of the note cases of internal/store/memory_test.go and store_test.go.
+// Coach notes.
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

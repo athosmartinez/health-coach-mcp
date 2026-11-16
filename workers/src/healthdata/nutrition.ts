@@ -1,4 +1,4 @@
-// The food log (Go: internal/healthdata/nutrition.go).
+// The food log.
 
 import type { LocalDate } from "../coach/date";
 import { compareText } from "../coach/text";

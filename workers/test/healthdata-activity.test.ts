@@ -1,5 +1,4 @@
-// Ports of internal/healthdata/activity_test.go: daily activity totals, and
-// weight and body fat.
+// Daily activity totals, and weight and body fat.
 import { describe, expect, it } from "vitest";
 
 import { toWire } from "../src/coach/errors";

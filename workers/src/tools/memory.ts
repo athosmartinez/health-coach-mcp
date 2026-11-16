@@ -1,4 +1,4 @@
-// The coach memory tools (Go: internal/tools/memory.go, CAPABILITY §4.2).
+// The coach memory tools (CAPABILITY §4.2).
 //
 // The whole MCP request is served inside the CoachStore Durable Object, so the
 // definitions (schemas, descriptions, annotations) and the bodies both run
@@ -505,7 +505,7 @@ const notesSearch: Body = ({ db, zone }, args) => ({
 
 // --- definitions ---
 
-/** The 11 coach memory tools, in the order the Go server registers them. */
+/** The 11 coach memory tools, in registration order. */
 export const MEMORY_TOOLS: readonly Tool[] = [
   tool(
     {

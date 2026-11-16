@@ -1,5 +1,5 @@
-// Ports of internal/tools/schema_test.go. The Go test for a type with no JSON
-// schema (a channel) has no equivalent: the builders only produce schemas.
+// JSON schema builders. A type with no JSON schema has no builder: the
+// builders only produce schemas.
 import { describe, expect, it } from "vitest";
 
 import { DATE_PATTERN } from "../src/coach/date";

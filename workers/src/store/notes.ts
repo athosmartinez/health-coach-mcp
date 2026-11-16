@@ -1,4 +1,4 @@
-// Coach notes with full-text search (Go: internal/store/notes.go).
+// Coach notes with full-text search.
 
 import { type LocalDate, UTC, type Zone, bounds, parseDate } from "../coach/date";
 import { ToolError } from "../coach/errors";

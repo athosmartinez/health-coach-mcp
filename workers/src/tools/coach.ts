@@ -1,4 +1,4 @@
-// What the coach-moment tools share (Go: internal/tools/coach.go, CAPABILITY
+// What the coach-moment tools share (CAPABILITY
 // §4.1): their dependencies, the date rule, the quality flags, the notices,
 // rounding, and a night's signals against its baseline.
 //

@@ -1,4 +1,4 @@
-// Ports of internal/tools/series_test.go. Each test serves metric_series over
+// metric_series. Each test serves it over
 // a synthetic health source, with "now" at 2026-10-16 08:00 in São Paulo.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

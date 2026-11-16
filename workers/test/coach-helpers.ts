@@ -1,6 +1,6 @@
-// Shared by the coach-moment tool tests: a health source over synthetic values
-// (it mirrors fakeHealth of internal/tools/coach_test.go), the fixtures of the
-// Go tool tests, and a session that serves the tools as the Worker does.
+// Shared by the coach-moment tool tests: a health source over synthetic values,
+// the fixtures of the coach tool tests, and a session that serves the tools as
+// the Worker does.
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { expect } from "vitest";
 

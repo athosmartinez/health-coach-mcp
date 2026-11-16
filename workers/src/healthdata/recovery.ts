@@ -1,4 +1,4 @@
-// Nights and resting heart rate (Go: internal/healthdata/recovery.go).
+// Nights and resting heart rate.
 
 import { type LocalDate, type Zone, parseDate } from "../coach/date";
 import { compareText } from "../coach/text";

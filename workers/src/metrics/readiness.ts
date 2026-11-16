@@ -1,4 +1,4 @@
-// The morning readiness rule (Go: internal/metrics/readiness.go).
+// The morning readiness rule.
 
 import { type ConfidenceLevel, confidence } from "../coach/envelope";
 import { MIN_BASELINE_NIGHTS, REL_TOL, finite } from "./stats";

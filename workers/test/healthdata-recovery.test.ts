@@ -1,5 +1,4 @@
-// Ports of internal/healthdata/recovery_test.go: the nights, the HRV rules,
-// resting heart rate and what is cached.
+// Nights, the HRV rules, resting heart rate and what is cached.
 import { describe, expect, it } from "vitest";
 
 import { UTC, Zone, addDays } from "../src/coach/date";

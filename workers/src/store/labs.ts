@@ -1,4 +1,4 @@
-// Lab results (Go: internal/store/labs.go).
+// Lab results.
 
 import type { LocalDate } from "../coach/date";
 import { byteLength, compareText, fields, lower, quote, trimSpace } from "../coach/text";

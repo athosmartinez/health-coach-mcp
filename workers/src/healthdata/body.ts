@@ -1,4 +1,4 @@
-// Weight and body fat (Go: internal/healthdata/activity.go, the Body part).
+// Weight and body fat.
 
 import type { LocalDate } from "../coach/date";
 import { compareText } from "../coach/text";

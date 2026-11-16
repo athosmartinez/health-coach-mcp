@@ -1,6 +1,8 @@
 # Product Brief — Health Coach MCP
 
 > Status: discovery · 2026-10-13 · source: product-lens interview
+>
+> Shipped since: the TypeScript Cloudflare Worker in `workers/`, on the Workers Free plan, and in use. It is a remote MCP server (OAuth, Streamable HTTP). The Go stack in §10 was the original decision; that implementation was removed. The server also logs meals and completed workouts back to Google Health.
 
 ## 1. Who it's for
 The owner. One user, one Google Health account, one Fitbit Air (in use for 1 week).
@@ -45,13 +47,12 @@ plus a **memory of its own** for profile and history. The LLM interprets; the MC
 - **Lab test input:** lab PDF (extraction), via chat, or an editable YAML/JSON file.
 
 ### Deployment
-- Phase 1: **local on the Mac**.
-- Phase 2: **cloud**, for WhatsApp/Telegram and proactive (cron) routines.
-- So: containerizable from day one, configurable storage, stdio **and** Streamable HTTP transport.
+- The discovery plan was local first, then a cloud host, with stdio and Streamable HTTP.
+- What shipped is the Cloudflare Worker: remote Streamable HTTP at `/mcp`, OAuth 2.1, one allowlisted Google account.
 
 ## 6. Anti-goals
 - **Multi-user / product for others.** Single-user; no tenants, signup or billing.
-- **Not writing to Google Health** in the MVP (the coach writes only to its own memory).
+- **Not writing to Google Health** in the original MVP (the coach writes only to its own memory). The shipped server does write nutrition-log entries and exercise sessions, and only those, and a delete removes only an entry it created.
 
 Not excluded, but **outside the MVP by default** (decide later): own UI/dashboard, other
 wearables, proactive WhatsApp channel (comes with phase 2).
@@ -80,12 +81,12 @@ from the Fitbit Air (sleep, HRV, nutrition log). If it reads, the next lane is
 `product-capability` (capability contract: tools, schemas, storage) → plan → implementation.
 
 ## 10. Decisions
-- **Stack: Go** (2026-10-13).
-  - MCP: official SDK `github.com/modelcontextprotocol/go-sdk` (stdio for phase 1, Streamable HTTP for phase 2).
-  - Google Health API: reuse the client/OAuth from `ghealth` (`Google-Health-API/google-health-cli`, Apache 2.0).
-  - Storage: SQLite via `modernc.org/sqlite` (pure Go, no cgo); Postgres optional in phase 2.
+- **Stack: Go** (2026-10-13), the original choice. The implementation that shipped, and the only one in the repository, is the TypeScript Worker.
+  - MCP: official SDK `github.com/modelcontextprotocol/go-sdk` (stdio for phase 1, Streamable HTTP for phase 2). The Worker uses `@modelcontextprotocol/server` and `agents/mcp` over Streamable HTTP.
+  - Google Health API: reuse the client/OAuth from `ghealth` (`Google-Health-API/google-health-cli`, Apache 2.0). The adapted files are `workers/src/googlehealth/client.ts` and `datatypes.ts` (see `NOTICE`).
+  - Storage: SQLite via `modernc.org/sqlite` (pure Go, no cgo); Postgres optional in phase 2. The Worker stores coach memory in a SQLite Durable Object.
   - Lab PDFs: extraction done by the agent/LLM; the MCP only validates and stores the structured values.
-  - Why: single binary, small container, simple concurrency for parallel fetches.
+  - Why Go was chosen: single binary, small container, simple concurrency for parallel fetches. The Worker exists because the coach is a remote connector on the Workers Free plan.
 
 ## 11. Open questions
 - Phase 2 cloud: which provider (VPS/Docker, Cloud Run, Supabase)?

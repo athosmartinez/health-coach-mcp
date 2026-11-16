@@ -1,4 +1,4 @@
-// The daily_metrics cache (Go: internal/store/metrics.go). The cache is
+// The daily_metrics cache. The cache is
 // disposable: the source of truth is the Google Health API.
 
 import { type LocalDate, addDays } from "../coach/date";

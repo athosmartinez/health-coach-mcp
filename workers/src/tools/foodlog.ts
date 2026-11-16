@@ -1,6 +1,6 @@
 // nutrition_log_add and nutrition_log_delete: the two tools that write the
-// food log of Google Health. The Go server has neither: it only reads Google
-// Health. The two tools that write the exercise log are in exerciselog.ts.
+// food log of Google Health. The two tools that write the exercise log are in
+// exerciselog.ts.
 //
 // Like the coach-moment tools, their bodies run inside the CoachStore Durable
 // Object and take turns with them, on the request budget and the token answer

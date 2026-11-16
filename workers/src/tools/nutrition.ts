@@ -1,4 +1,4 @@
-// nutrition_day (Go: internal/tools/nutrition.go, CAPABILITY §4.1).
+// nutrition_day (CAPABILITY §4.1).
 
 import type { LocalDate } from "../coach/date";
 import { ToolError } from "../coach/errors";

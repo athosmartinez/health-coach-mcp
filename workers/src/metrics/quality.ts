@@ -1,4 +1,4 @@
-// Data-quality flags (Go: internal/metrics/quality.go). They travel with the
+// Data-quality flags. They travel with the
 // data they describe; suspicious data is flagged, never hidden or corrected.
 
 import { type LocalDate, parseDate } from "../coach/date";

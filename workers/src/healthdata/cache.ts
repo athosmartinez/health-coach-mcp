@@ -1,5 +1,5 @@
 // What every source shares: the API client, the daily_metrics cache, the zone
-// and the clock (Go: the Data struct of internal/healthdata/recovery.go).
+// and the clock.
 
 import { type LocalDate, type Zone, today } from "../coach/date";
 import { errorTypes } from "../coach/errors";

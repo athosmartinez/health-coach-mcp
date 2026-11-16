@@ -1,6 +1,5 @@
-// Ports of internal/tools/coach_test.go (the tool listing) and of the helper
-// cases of briefing_test.go (rounding, efficiency), plus the rules of the
-// helpers the coach-moment tools share.
+// The coach tool listing and the helpers the coach-moment tools share
+// (rounding, efficiency).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { UTC, Zone } from "../src/coach/date";

@@ -1,6 +1,5 @@
-// Ports of the record parser cases of internal/healthdata/*_test.go, and the
-// rules the Worker adds: a record arrives parsed, so the Go server's JSON
-// decoding rules are applied to values.
+// Record parsers. A record arrives parsed, so the decoding rules are applied
+// to values.
 import { describe, expect, it } from "vitest";
 
 import { parseBodyFat, parseWeight } from "../src/healthdata/body";

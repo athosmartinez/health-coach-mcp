@@ -1,5 +1,4 @@
-// Steps, Active Zone Minutes and total calories per day (Go:
-// internal/healthdata/activity.go, the Activity part).
+// Steps, Active Zone Minutes and total calories per day.
 
 import type { LocalDate } from "../coach/date";
 import { compareText } from "../coach/text";

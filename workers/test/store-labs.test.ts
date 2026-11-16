@@ -1,5 +1,4 @@
-// Ports of internal/store/labs_test.go and of the lab cases of
-// internal/store/memory_test.go and store_test.go.
+// Lab results, including the lab cases of the memory store.
 import { describe, expect, it } from "vitest";
 
 import { CorruptRowError, formatStamp } from "../src/store/db";

@@ -1,5 +1,5 @@
 // Turns Google Health records into the coach's daily values, through the
-// daily_metrics cache (Go: internal/healthdata). It decides what is cached;
+// daily_metrics cache. It decides what is cached;
 // the API client fetches and the metrics package does the math.
 
 import type { LocalDate, Zone } from "../coach/date";

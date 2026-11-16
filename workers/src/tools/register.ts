@@ -1,5 +1,4 @@
-// The only way to add a tool (Go: internal/tools/register.go, plus the
-// tool-call log and the error contract of internal/server/middleware.go).
+// The only way to add a tool, including the tool-call log and the error contract.
 //
 // Every tool goes through `register`, because it guarantees the error contract:
 //   - any error reaches the client as the JSON {code,message,hint} in the text

@@ -9,12 +9,12 @@
   // outbound fetches (Client ID Metadata Documents, Google) off same-zone
   // routing; workers-oauth-provider advertises CIMD only with it.
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-  // 8788 leaves the Go server's 127.0.0.1:8787 free.
+  // 8788 is the local dev port.
   "dev": {
     "port": 8788
   },
-  // The IANA zone that defines a "day" (today, a note's creation day). Same
-  // rule as the Go server's HCM_TZ: "Local" and unknown names are rejected.
+  // The IANA zone that defines a "day" (today, a note's creation day).
+  // "Local" and unknown names are rejected.
   "vars": {
     "HCM_TZ": "America/Sao_Paulo"
   },

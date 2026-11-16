@@ -1,10 +1,9 @@
-// Reads one Google Health record with the rules of the Go server's JSON
-// decoding (Go: the record structs of internal/healthdata). A record arrives
-// already parsed, so the rules are applied to values instead of to text:
+// Reads one Google Health record. A record arrives already parsed, so the
+// rules are applied to values instead of to text:
 //
 // - a missing field and a JSON null both leave the field unset;
 // - a value of the wrong JSON type makes the whole record unreadable, also in
-//   a field the caller would not have used (Go decodes the whole struct first);
+//   a field the caller would not have used;
 // - an unknown field is ignored.
 //
 // Every reader throws UNREADABLE for a value it cannot take. A parser catches

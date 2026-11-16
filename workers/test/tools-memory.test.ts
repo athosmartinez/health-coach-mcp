@@ -1,4 +1,4 @@
-// Ports of internal/tools/memory_test.go. Each test serves the tools on a new
+// The coach memory tools. Each test serves the tools on a new
 // store, with "now" at 2026-10-14 01:30 UTC = 2026-10-13 22:30 in São Paulo.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

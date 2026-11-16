@@ -1,4 +1,4 @@
-// Profile, targets, health history and preferences (Go: internal/store/memory.go).
+// Profile, targets, health history and preferences.
 // Records use the JSON field names of the tool outputs; an absent optional
 // field is left out, never null or "".
 

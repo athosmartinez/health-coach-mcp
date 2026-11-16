@@ -1,5 +1,5 @@
-// Ports of internal/store/memory_test.go (profile, targets, health items,
-// preferences) and of the schema and error cases of internal/store/store_test.go.
+// Profile, targets, health items and preferences, and the schema and error
+// cases of the store.
 // Each test runs in its own Durable Object, with the clock fixed at 2026-10-14 12:00 UTC.
 import { afterEach, describe, expect, it, vi } from "vitest";
 

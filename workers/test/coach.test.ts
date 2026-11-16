@@ -1,6 +1,6 @@
-// Ports of internal/coach/*_test.go and of the HCM_TZ cases of
-// internal/config/config_test.go. LocalDate decoding ("" = omitted, a bad date
-// rejected while the arguments are read) is covered in register.test.ts.
+// Local dates, the coach zone, and the HCM_TZ cases. LocalDate decoding
+// ("" = omitted, a bad date rejected while the arguments are read) is covered
+// in register.test.ts.
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";

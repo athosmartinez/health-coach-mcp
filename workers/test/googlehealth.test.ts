@@ -1,6 +1,5 @@
-// Ports of internal/googlehealth/client_test.go and review_test.go, and the
-// Worker's own rules: the request budget, the byte limits, the record mapper
-// and the token source of the CoachStore object.
+// The Google Health client: reads, the request budget, the byte limits, the
+// record mapper and the token source of the CoachStore object.
 import { runInDurableObject } from "cloudflare:test";
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

@@ -1,5 +1,4 @@
-// Ports of internal/healthdata/exercise_test.go: workout sessions and their
-// max heart rate.
+// Workout sessions and their max heart rate.
 import { describe, expect, it } from "vitest";
 
 import { MAX_DISPLAY_NAME_CHARS, MAX_KCAL, MAX_SESSION_SECONDS, type NewExerciseSession, createBody } from "../src/googlehealth/exerciselog";

@@ -1,4 +1,4 @@
-// Ports of internal/tools/workout_test.go. Each test serves workout_review
+// workout_review. Each test serves it
 // over a synthetic health source, with "now" at 2026-10-16 08:00 in São Paulo
 // (a Friday).
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";

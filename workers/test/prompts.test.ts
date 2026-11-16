@@ -1,12 +1,11 @@
 /// <reference types="vite/client" />
-// The MCP prompts and the coach://guardrails resource: ports of
-// internal/prompts/prompts_test.go, and parity with the Go server.
+// The MCP prompts and the coach://guardrails resource, and parity with the
+// frozen prompt snapshot.
 //
-// fixtures/go-prompts.json holds what the Go server answers over stdio for
-// prompts/list, each prompts/get, resources/list and resources/read. To
-// generate it again, from workers/:
-//
-//   (cd .. && make build) && node scripts/go-prompts.mjs
+// fixtures/go-prompts.json is a frozen snapshot of the former Go server's
+// answers for prompts/list, each prompts/get, resources/list and
+// resources/read. It is the source of truth for this comparison: do not
+// regenerate it.
 //
 // Every request here is served by the CoachStore object on /mcp, as in
 // production. The prompts are static text: no Google account is linked, and no

@@ -1,4 +1,4 @@
-// Workout sessions (Go: internal/healthdata/exercise.go).
+// Workout sessions.
 
 import type { LocalDate } from "../coach/date";
 import { pointId } from "../googlehealth/exerciselog";

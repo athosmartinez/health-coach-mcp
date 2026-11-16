@@ -251,7 +251,7 @@ export class CoachStore extends DurableObject<Env> {
       try {
         return timeZone(this.env);
       } catch {
-        // The Go server refuses to start with a bad HCM_TZ. A Worker has no
+        // A bad HCM_TZ cannot stop the process: a Worker has no
         // start, so every tool that needs the zone fails instead of using a
         // zone nobody chose.
         console.error("config_error", { variable: "HCM_TZ" });

@@ -1,4 +1,4 @@
-// Local calendar days and the zone that defines them (Go: internal/coach/date.go).
+// Local calendar days and the zone that defines them.
 
 /** A calendar day, YYYY-MM-DD, in the configured time zone. Validate with {@link parseDate}. */
 export type LocalDate = string;

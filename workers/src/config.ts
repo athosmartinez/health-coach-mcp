@@ -1,4 +1,4 @@
-// Runtime settings from the Worker's variables (Go: internal/config).
+// Runtime settings from the Worker's variables.
 
 import { Zone } from "./coach/date";
 import { lower, trimSpace } from "./coach/text";

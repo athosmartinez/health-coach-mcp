@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GOOGLE_HEALTH_SCOPES } from "../src/google";
 import { ACCESS_TOKEN_MARGIN_MS, coachStore, type GoogleLink, migrate, SCHEMA_VERSION } from "../src/store";
-import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, mockGoogle, OWNER_EMAIL, OWNER_SUB } from "./helpers";
+import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, type GoogleCalls, mockGoogle, OWNER_EMAIL, OWNER_SUB } from "./helpers";
 import { freshStore, MEMORY_TABLES } from "./memory-helpers";
 
 function tableNames(sql: SqlStorage): string[] {
@@ -44,6 +44,20 @@ async function row(): Promise<Record<string, SqlStorageValue> | undefined> {
   return runInDurableObject(coachStore(env), async (_instance, state) =>
     state.storage.sql.exec("SELECT * FROM google_account").toArray()[0],
   );
+}
+
+/**
+ * Waits until the token endpoint has received the first renewal, so the
+ * renewal is in flight. Polls from the test: a promise resolved inside the
+ * Durable Object would resume the test in the object's I/O context.
+ */
+async function renewalStarted(calls: GoogleCalls): Promise<void> {
+  await vi.waitFor(() => expect(calls.token).toHaveLength(1), { interval: 1 });
+}
+
+/** Calls on one stub arrive in order: once a later call answers, every earlier call has reached the object. */
+async function callsArrived(stub: ReturnType<typeof coachStore>): Promise<void> {
+  await stub.schemaVersion();
 }
 
 describe("CoachStore schema", () => {
@@ -288,7 +302,7 @@ describe("CoachStore Google token", () => {
   ])("answers for the new link when a renewal with $name races a sign-in", async ({ reply }) => {
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => (release = resolve));
-    mockGoogle(async () => {
+    const calls = mockGoogle(async () => {
       await gate;
       return reply();
     });
@@ -296,7 +310,8 @@ describe("CoachStore Google token", () => {
     await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
     const pending = stub.googleAccessToken();
     const pendingStatus = stub.googleAccountStatus();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await renewalStarted(calls);
+    await callsArrived(stub);
     await stub.linkGoogleAccount(link({ refreshToken: "new-sign-in-refresh", accessToken: "new-sign-in-access" }));
     release();
     expect(await pending).toMatchObject({ ok: true, accessToken: "new-sign-in-access" });
@@ -313,11 +328,11 @@ describe("CoachStore Google token", () => {
     function gatedGoogle() {
       let release: () => void = () => {};
       const gate = new Promise<void>((resolve) => (release = resolve));
-      mockGoogle(async (form) => {
+      const calls = mockGoogle(async (form) => {
         await gate;
         return Response.json({ access_token: `renewed-with-${form.get("refresh_token")}`, expires_in: 3599 });
       });
-      return () => release();
+      return { release: () => release(), calls };
     }
 
     it("is the linked account, for a stored token and for a renewed one", async () => {
@@ -332,11 +347,11 @@ describe("CoachStore Google token", () => {
     });
 
     it("is the new account, when another account signs in while the token of the first is renewed", async () => {
-      const release = gatedGoogle();
+      const { release, calls } = gatedGoogle();
       const stub = coachStore(env);
       await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
       const pending = stub.googleAccessToken();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await renewalStarted(calls);
       await stub.linkGoogleAccount(other());
       release();
       // The renewed token of the first account is dropped: the answer is the stored token of the second, under its own account.
@@ -344,15 +359,15 @@ describe("CoachStore Google token", () => {
     });
 
     it("is the account of the renewal, not of the row the caller read, when the caller joins a renewal of a replaced link", async () => {
-      const release = gatedGoogle();
+      const { release, calls } = gatedGoogle();
       const stub = coachStore(env);
       await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
       const first = stub.googleAccessToken();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await renewalStarted(calls);
       // The second account signs in with an access token that needs a renewal too.
       await stub.linkGoogleAccount(other({ accessTokenExpiresAt: 0 }));
       const second = stub.googleAccessToken();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await callsArrived(stub);
       release();
       // The second caller read the row of the new link and joined the renewal of the old one:
       // the token it gets is the first account's, and the answer says so.

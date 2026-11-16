@@ -876,7 +876,7 @@ const NOT_SENT: Readonly<Record<WriteKind, string>> = {
   delete: `${NO_UNIT_LEFT}: the delete was not sent`,
 };
 
-const ACCOUNT_CHANGED ="the linked Google account changed during this MCP request";
+const ACCOUNT_CHANGED = "the linked Google account changed during this MCP request";
 
 /**
  * A write that is bound to one Google account, and whose token belongs to

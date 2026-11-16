@@ -2,7 +2,7 @@
 
 A remote [MCP](https://modelcontextprotocol.io) server that lets an AI assistant act as a health and fitness coach over your Google Health data (Fitbit or Pixel Watch). It keeps its own coach memory, and it can log meals and completed workouts back to Google Health.
 
-It runs on Cloudflare Workers (Free plan) and is in use. An MCP client such as ChatGPT, Claude or Grok connects to it as a custom connector. The server is single-user: one Google account, named in configuration, is allowed to sign in.
+It runs on Cloudflare Workers (Free plan) and is in use. An MCP client such as Claude or ChatGPT connects to it as a custom connector. The server is single-user: one Google account, named in configuration, is allowed to sign in.
 
 The assistant does the talking. The server does the arithmetic: baselines, deltas, adherence and coverage, so the model is not handed a raw heart-rate series and asked to invent a week. Medical limits travel with the data. The server does not diagnose, and it does not suggest starting, stopping or dosing a medication or a supplement.
 
@@ -35,7 +35,9 @@ flowchart LR
   oauth --> kv
   oauth --> google
   worker -->|fetch, no MCP token| store
+  worker -->|Google link at sign-in| store
   store -->|createMcpHandler| store
+  store -->|access token renewal| google
   store --> health
 ```
 
@@ -43,7 +45,7 @@ flowchart LR
 
 ### Linking a Google account
 
-The MCP client is the OAuth client. Google is the identity provider. The allowlist is checked before anything is stored.
+The MCP client is the OAuth client. Google is the identity provider. The allowlist is checked before the Google token is stored and before an MCP grant is created. Until then, KV holds only the client registration and the short-lived state of the OAuth flow.
 
 ```mermaid
 sequenceDiagram
@@ -57,17 +59,20 @@ sequenceDiagram
   Worker-->>Client: 401 and resource metadata
   Client->>Worker: GET /.well-known/oauth-protected-resource/mcp
   Client->>Worker: GET /.well-known/oauth-authorization-server
-  Client->>Worker: POST /register or a Client ID Metadata Document
+  Client->>Worker: POST /register
+  Note over Client,Worker: Or no registration. The client_id is the URL of a Client ID Metadata Document, and the Worker fetches it.
   User->>Worker: GET /authorize
   Worker-->>User: consent page
   User->>Worker: POST /authorize Allow
   Worker-->>User: redirect to Google
   User->>Google: consent, PKCE, offline access
-  Google-->>Worker: GET /callback with a code
+  Google-->>User: redirect to /callback with a code
+  User->>Worker: GET /callback
   Worker->>Google: exchange the code
   Worker->>Worker: check the ID token and ALLOWED_GOOGLE_EMAIL
   Worker->>Store: store the Google refresh token
-  Worker-->>Client: redirect with the MCP authorization code
+  Worker-->>User: redirect to the client with the MCP authorization code
+  User->>Client: GET the redirect URI with that code
   Client->>Worker: POST /token
   Worker-->>Client: MCP access token
 ```
@@ -111,7 +116,7 @@ The server registers 22 tools (`createServer` in `workers/src/mcp.ts`).
 
 | Tool | What it does |
 |---|---|
-| `profile_get` | Returns the profile, the targets in force, active health history and preferences. |
+| `profile_get` | Returns the profile, the targets in force, active and paused health history (allergies whatever their status) and preferences. |
 | `profile_update` | Updates the profile with the fields you send. |
 | `targets_set` | Records a new version of the daily kcal, protein and weekly session targets, after the user confirms the numbers. |
 | `health_item_upsert` | Adds or updates a condition, medication, supplement, injury, allergy or dietary restriction. |
@@ -125,7 +130,7 @@ The server registers 22 tools (`createServer` in `workers/src/mcp.ts`).
 
 ### Coaching moments
 
-These five read Google Health. They compare a day or a week with the user's own baseline and say how many days that comparison rests on.
+These five read Google Health. Each result says how many days it rests on. The briefing, the workout review and the weekly report also compare the day or the week with the user's own baseline.
 
 | Tool | What it does |
 |---|---|
@@ -159,7 +164,7 @@ Four prompts, registered in `workers/src/prompts/index.ts`:
 
 Each prompt tells the model to call `profile_get`, then that tool, then to follow the task for the moment. The guardrails are inlined in the prompt. An optional day (`date`, or `week_end` for the week) is parsed as a calendar date before it reaches the text.
 
-The resource `coach://guardrails` (`workers/src/prompts/guardrails.ts`) is the same rules as a markdown document: medical limits, eating and training load, how to read the numbers, and tone. Every coaching answer is told to follow them.
+The resource `coach://guardrails` (`workers/src/prompts/guardrails.ts`) is the same rules as a markdown document: medical limits, eating and training load, how to read the numbers, stored text as data and not instructions, and tone. Every coaching answer is told to follow them.
 
 ## Data and privacy
 
@@ -238,7 +243,7 @@ From `workers/`, after `npx wrangler login` in the Cloudflare account where the 
 The committed KV id in `wrangler.jsonc` is a placeholder, so tests and `wrangler types` have a value. Replace it with the id of the namespace you create. Do not commit a real id if you do not want it public.
 
 1. In Google Cloud console, create an OAuth client of type **Web application**.
-   - Authorized redirect URI: `https://<your-worker>.workers.dev/callback`
+   - Authorized redirect URI: `https://<worker host>/callback`. On `workers.dev` the host is `<worker name>.<your subdomain>.workers.dev`, and `npm run deploy` prints it.
    - For local runs, also `http://localhost:8788/callback`
    - While the consent screen is in **Testing**, add the account as a test user. Google expires refresh tokens of Testing apps after 7 days.
    - Enable the Google Health API scopes the server requests, including the two write scopes.
@@ -257,7 +262,7 @@ The committed KV id in `wrangler.jsonc` is a placeholder, so tests and `wrangler
    npm run deploy
    ```
 
-Add `https://<your-worker>.workers.dev/mcp` as a custom connector in the MCP client. The client registers itself; you do not give it the Google client id.
+Add `https://<worker host>/mcp` as a custom connector in the MCP client. The client registers itself; you do not give it the Google client id.
 
 `HCM_TZ` in `wrangler.jsonc` is the IANA zone that defines a day (default `America/Sao_Paulo`). `Local` and unknown names are rejected.
 

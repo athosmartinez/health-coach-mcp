@@ -34,12 +34,12 @@ coverage and source, so any model gives consistent advice.
 | # | Invariant | Origin |
 |---|---|---|
 | I1 | Every aggregate metric returns `n_days` (coverage) and `confidence` (`low` < 7 days, `medium` 7–20, `high` ≥ 21 for 28d baselines). | 1 week of history today |
-| I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` or daily rollup (both merge overlaps; the daily rollup is one total per local day) or filter on the primary source (`Google Fitbit Air`). | Real data: steps arrive from Fitbit Air **and** `com.apple.health.*` |
+| I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` or daily rollup (both merge overlaps; the daily rollup is one total per local day) or filter on the primary source (`Google Fitbit Air`). | Steps can arrive from Fitbit Air **and** `com.apple.health.*` |
 | I3 | A missing day is `null`, never `0`. | ghealth behavior (presence-aware types) |
-| I4 | The "day" is the **local day** in the configured time zone (default `America/Sao_Paulo`); sleep belongs to the day it **ends**. | Timestamps arrive `-03:00`; sleep runs 23:00→09:24 |
+| I4 | The "day" is the **local day** in the configured time zone (default `America/Sao_Paulo`); sleep belongs to the day it **ends**. | Timestamps arrive `-03:00`; a night starts on one local day and ends on the next |
 | I5 | Units: kg, kcal, g, bpm, ms, min. Conversion happens in the MCP, not in the LLM. | `weightGrams`, `rootMeanSquareOfSuccessiveDifferencesMilliseconds` |
 | I6 | Targets (kcal, protein, weekly workouts) are **versioned** with `effective_from`; adherence uses the target in force on that day. | Targets will change during recomposition |
-| I7 | Suspicious data comes back with `quality_flags`, it isn't hidden or "fixed". E.g. average HR of 81 bpm in 60 min of jiu-jitsu → `low_hr_for_activity`. | Real data: Jiu-jitsu 60 min, avg HR 81 |
+| I7 | Suspicious data comes back with `quality_flags`, it isn't hidden or "fixed". E.g. average HR of 81 bpm in 60 min of jiu-jitsu → `low_hr_for_activity`. | A session can report an average HR far below what its activity type implies |
 
 ### Architecture preferences (changeable)
 - TypeScript on Cloudflare Workers: MCP over Streamable HTTP, OAuth 2.1 (`workers-oauth-provider`), coach memory and the daily cache in a SQLite Durable Object (`CoachStore`), OAuth clients and grants in KV (`OAUTH_KV`). Google Health client adapted from `ghealth` (Apache-2.0, see `NOTICE`).

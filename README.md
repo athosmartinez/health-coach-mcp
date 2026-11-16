@@ -279,6 +279,6 @@ NOTICE            Apache-2.0 attribution for the adapted Google Health client
 
 ## License
 
-This repository has no top-level license file.
+MIT, see [LICENSE](LICENSE). The adapted files below keep their own license.
 
 `workers/src/googlehealth/client.ts` and `workers/src/googlehealth/datatypes.ts` are adapted from [google-health-cli](https://github.com/Google-Health-API/google-health-cli), Copyright 2026 Google LLC, Apache License 2.0. Those files keep the original license header. `NOTICE` lists them.

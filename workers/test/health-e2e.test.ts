@@ -92,10 +92,10 @@ const googleError = (status: number, grpc: string) => () =>
   Response.json({ error: { code: status, message: `${BODY_MARK} for ${GOOGLE_ACCESS_TOKEN}`, status: grpc } }, { status });
 
 describe("the Google Health read side, from the sign-in to a tool result", () => {
-  it("lists the 20 tools, the 4 prompts and the guardrails resource after the sign-in", async () => {
+  it("lists the 22 tools, the 4 prompts and the guardrails resource after the sign-in", async () => {
     const { tools } = await mcp("tools/list");
     expect(tools.map((tool: { name: string }) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(22);
     // The five coach tools only read. Only the two tools of the food log change
     // Google Health: test/foodlog-e2e.test.ts covers them.
     for (const name of COACH_TOOL_NAMES) {

@@ -15,16 +15,19 @@
 // (required, enum, type).
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { OVERLAP_IN_WEEK } from "../src/tools/weekly";
+import { LOGGED_SESSIONS } from "../src/tools/workout";
 import fixtureText from "./fixtures/go-tools-list.json?raw";
 import { rpc, signInAsOwner } from "./helpers";
-import { COACH_TOOL_NAMES, MEMORY_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
+import { COACH_TOOL_NAMES, EXERCISE_LOG_TOOL_NAMES, MEMORY_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
 
 /**
- * Tools the Go server does not have, sorted: the account status of the
- * Worker's own sign-in, and the two tools that write the food log (the Go
- * server never writes to Google Health).
+ * Tools the Go server does not have, sorted: the two tools that write the
+ * exercise log, the account status of the Worker's own sign-in, and the two
+ * tools that write the food log (the Go server never writes to Google
+ * Health).
  */
-const NOT_IN_THE_GO_SERVER = ["google_account_status", "nutrition_log_add", "nutrition_log_delete"];
+const NOT_IN_THE_GO_SERVER = ["exercise_log_add", "exercise_log_delete", "google_account_status", "nutrition_log_add", "nutrition_log_delete"];
 
 interface ListedTool {
   name: string;
@@ -73,6 +76,24 @@ function withoutEntryId(tool: ListedTool | undefined): ListedTool | undefined {
   return copy;
 }
 
+/**
+ * workout_review as the Go server lists it. The Worker adds `entry_id` to each
+ * session and, at the end of the description, the sentences about the
+ * sessions it logged; everything else is the Go tool.
+ */
+function withoutSessionEntryId(tool: ListedTool | undefined): ListedTool | undefined {
+  if (!tool) return undefined;
+  const copy = structuredClone(tool);
+  copy.description = goTools.get("workout_review")?.description;
+  const output = copy.outputSchema as {
+    properties?: { data?: { properties?: { sessions?: { items?: { properties?: Record<string, unknown>; required?: string[] } } } } };
+  };
+  const session = output.properties?.data?.properties?.sessions?.items;
+  if (session?.properties) delete session.properties.entry_id;
+  if (session?.required) session.required = session.required.filter((field) => field !== "entry_id");
+  return copy;
+}
+
 /** JSON with the keys of every object sorted, to show a difference as text. */
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, node: unknown) =>
@@ -115,6 +136,28 @@ describe("parity with the Go server's tools/list", () => {
       expect(canonical(withoutEntryId(worker))).toBe(canonical(go));
       return;
     }
+    if (name === "workout_review") {
+      // The Worker adds entry_id to each session, and says what a session it logged looks like and which flag it can carry.
+      expect(worker?.description).toBe(`${go?.description}${LOGGED_SESSIONS}`);
+      expect(LOGGED_SESSIONS).toContain("A session this server logged has entry_id, the id exercise_log_delete accepts");
+      expect(LOGGED_SESSIONS).toContain("overlaps_band_session marks a logged session that overlaps a band session in time");
+      expect(LOGGED_SESSIONS).toContain("In the result's quality_flags it also covers the sessions of the week");
+      // The field is there, required and nullable, before it is taken out for the comparison.
+      const session = (worker?.outputSchema as any).properties.data.properties.sessions.items;
+      expect(session.properties.entry_id).toEqual({ type: ["null", "string"], description: expect.stringContaining("exercise_log_delete") });
+      expect(session.required).toContain("entry_id");
+      expect(canonical(withoutSessionEntryId(worker))).toBe(canonical(go));
+      return;
+    }
+    if (name === "weekly_report") {
+      // The Worker counts the sessions it logged, and says which flag marks a week that may count a workout twice.
+      expect(worker?.description).toBe(`${go?.description}${OVERLAP_IN_WEEK}`);
+      expect(OVERLAP_IN_WEEK).toContain("overlaps_band_session in quality_flags marks a week in which a session this server logged overlaps a band session in time");
+      // Everything else is the Go tool.
+      expect(worker?.outputSchema).toEqual(go?.outputSchema);
+      expect(canonical({ ...worker, description: go?.description })).toBe(canonical(go));
+      return;
+    }
     expect(worker?.description).toBe(go?.description);
     expect(worker?.outputSchema).toEqual(go?.outputSchema);
     expect(canonical(worker)).toBe(canonical(go));
@@ -129,12 +172,14 @@ describe("parity with the Go server's tools/list", () => {
     expect([...workerTools.keys()].filter((name) => !goTools.has(name)).sort()).toEqual(NOT_IN_THE_GO_SERVER);
     expect(goTools.size).toBe(17);
     expect(workerTools.size).toBe(goTools.size + NOT_IN_THE_GO_SERVER.length);
-    expect(workerTools.size).toBe(20);
+    expect(NOT_IN_THE_GO_SERVER).toHaveLength(5);
+    expect(workerTools.size).toBe(22);
   });
 
   it("lists the write tools as not in the Go server, which only reads Google Health", () => {
     expect(WRITE_TOOL_NAMES).toEqual(["nutrition_log_add", "nutrition_log_delete"]);
-    for (const name of WRITE_TOOL_NAMES) {
+    expect(EXERCISE_LOG_TOOL_NAMES).toEqual(["exercise_log_add", "exercise_log_delete"]);
+    for (const name of [...WRITE_TOOL_NAMES, ...EXERCISE_LOG_TOOL_NAMES]) {
       expect(NOT_IN_THE_GO_SERVER, name).toContain(name);
       expect(goTools.has(name), `${name} in the Go fixture`).toBe(false);
       expect(workerTools.has(name), `${name} in the Worker`).toBe(true);

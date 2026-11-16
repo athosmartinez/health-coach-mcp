@@ -15,10 +15,11 @@ function tableNames(sql: SqlStorage): string[] {
     .filter((name) => !name.startsWith("sqlite_") && !name.startsWith("_cf_"));
 }
 
-const ALL_TABLES = ["daily_metrics", "google_account", ...MEMORY_TABLES, "nutrition_entries", "schema_version"].sort();
+const ALL_TABLES = ["daily_metrics", "exercise_entries", "google_account", ...MEMORY_TABLES, "nutrition_entries", "schema_version"].sort();
 
-/** Undoes migrations 5, 4 and 3. The triggers and the FTS5 shadow tables go with their tables. */
+/** Undoes migrations 6, 5, 4 and 3. The triggers and the FTS5 shadow tables go with their tables. */
 function dropMemoryTables(sql: SqlStorage): void {
+  sql.exec("DROP TABLE exercise_entries");
   sql.exec("DROP TABLE nutrition_entries");
   sql.exec("DROP TABLE daily_metrics");
   sql.exec("DROP TABLE notes_fts");
@@ -48,7 +49,7 @@ async function row(): Promise<Record<string, SqlStorageValue> | undefined> {
 describe("CoachStore schema", () => {
   it("migrates a new object to the latest version", async () => {
     const stub = coachStore(env);
-    expect(SCHEMA_VERSION).toBe(5);
+    expect(SCHEMA_VERSION).toBe(6);
     expect(await stub.schemaVersion()).toBe(SCHEMA_VERSION);
     await runInDurableObject(stub, async (_instance, state) => {
       expect(tableNames(state.storage.sql)).toEqual(ALL_TABLES);
@@ -101,6 +102,7 @@ describe("CoachStore schema", () => {
   it("adds the metrics cache to an object that already holds the coach memory", async () => {
     await runInDurableObject(freshStore(), async (_instance, state) => {
       const sql = state.storage.sql;
+      sql.exec("DROP TABLE exercise_entries");
       sql.exec("DROP TABLE nutrition_entries");
       sql.exec("DROP TABLE daily_metrics");
       sql.exec("UPDATE schema_version SET version = 3 WHERE id = 1");
@@ -121,6 +123,7 @@ describe("CoachStore schema", () => {
   it("adds the table of created food entries to an object that already holds the metrics cache", async () => {
     await runInDurableObject(freshStore(), async (_instance, state) => {
       const sql = state.storage.sql;
+      sql.exec("DROP TABLE exercise_entries");
       sql.exec("DROP TABLE nutrition_entries");
       sql.exec("UPDATE schema_version SET version = 4 WHERE id = 1");
       sql.exec(
@@ -130,7 +133,7 @@ describe("CoachStore schema", () => {
 
       migrate(state.storage);
       expect(tableNames(sql)).toEqual(ALL_TABLES);
-      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(5);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(SCHEMA_VERSION);
       // The cache survives the upgrade, and the table starts empty.
       expect(sql.exec("SELECT COUNT(*) AS n FROM daily_metrics").one()).toEqual({ n: 1 });
       expect(sql.exec("SELECT COUNT(*) AS n FROM nutrition_entries").one()).toEqual({ n: 0 });
@@ -148,11 +151,46 @@ describe("CoachStore schema", () => {
     });
   });
 
+  it("adds the table of logged workout sessions to an object that already holds the food entries", async () => {
+    await runInDurableObject(freshStore(), async (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("DROP TABLE exercise_entries");
+      sql.exec("UPDATE schema_version SET version = 5 WHERE id = 1");
+      sql.exec(
+        "INSERT INTO nutrition_entries (sub, name, day, created_at) VALUES (?, ?, '2026-10-13', '2026-10-14T12:00:00.000000000Z')",
+        OWNER_SUB,
+        "users/1122334455/dataTypes/nutrition-log/dataPoints/syn-entry-1",
+      );
+
+      migrate(state.storage);
+      expect(tableNames(sql)).toEqual(ALL_TABLES);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(6);
+      // The food entries survive the upgrade, and the new table starts empty.
+      expect(sql.exec("SELECT COUNT(*) AS n FROM nutrition_entries").one()).toEqual({ n: 1 });
+      expect(sql.exec("SELECT COUNT(*) AS n FROM exercise_entries").one()).toEqual({ n: 0 });
+      // The columns and the key of the food entries: no column for an activity name, the notes or a value.
+      const columnsOf = (table: string) => sql.exec(`SELECT name, type, "notnull", pk FROM pragma_table_info('${table}')`).toArray();
+      expect(columnsOf("exercise_entries")).toEqual([
+        { name: "sub", type: "TEXT", notnull: 1, pk: 1 },
+        { name: "name", type: "TEXT", notnull: 1, pk: 2 },
+        { name: "day", type: "TEXT", notnull: 1, pk: 0 },
+        { name: "created_at", type: "TEXT", notnull: 1, pk: 0 },
+      ]);
+      expect(columnsOf("exercise_entries")).toEqual(columnsOf("nutrition_entries"));
+      const indexes = sql.exec("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'exercise_entries' AND sql IS NOT NULL").toArray();
+      expect(indexes).toEqual([{ name: "exercise_entries_by_day", sql: "CREATE INDEX exercise_entries_by_day ON exercise_entries (day)" }]);
+
+      // Running it again is a no-op.
+      migrate(state.storage);
+      expect(sql.exec<{ version: number }>("SELECT version FROM schema_version").one().version).toBe(6);
+    });
+  });
+
   it("rolls a failed migration back and keeps the version", async () => {
     await runInDurableObject(freshStore(), async (_instance, state) => {
       const sql = state.storage.sql;
       // Leave one memory table behind: migration 3 fails when it creates it again.
-      for (const table of ["nutrition_entries", "daily_metrics", "profile", "targets", "health_items", "lab_results", "preferences"]) {
+      for (const table of ["exercise_entries", "nutrition_entries", "daily_metrics", "profile", "targets", "health_items", "lab_results", "preferences"]) {
         sql.exec(`DROP TABLE ${table}`);
       }
       sql.exec("DROP TABLE notes_fts");
@@ -264,6 +302,65 @@ describe("CoachStore Google token", () => {
     expect(await pending).toMatchObject({ ok: true, accessToken: "new-sign-in-access" });
     expect(await pendingStatus).toMatchObject({ linked: true, token: "ok" });
     expect(await row()).toMatchObject({ refresh_token: "new-sign-in-refresh", access_token: "new-sign-in-access" });
+  });
+
+  // A write that is bound to one Google account compares it with the account of the token.
+  describe("the account of an access token", () => {
+    const OTHER_SUB = "200000000000000000002";
+    const other = (overrides: Partial<GoogleLink> = {}) =>
+      link({ sub: OTHER_SUB, email: "other@example.com", refreshToken: "other-refresh", accessToken: "other-access", ...overrides });
+    /** A token endpoint that waits for `release`, then answers a token named after the refresh token it was asked with. */
+    function gatedGoogle() {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      mockGoogle(async (form) => {
+        await gate;
+        return Response.json({ access_token: `renewed-with-${form.get("refresh_token")}`, expires_in: 3599 });
+      });
+      return () => release();
+    }
+
+    it("is the linked account, for a stored token and for a renewed one", async () => {
+      mockGoogle(() => Response.json({ access_token: "renewed-access-token", expires_in: 3599 }));
+      const stub = coachStore(env);
+      await stub.linkGoogleAccount(link());
+      expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: GOOGLE_ACCESS_TOKEN, sub: OWNER_SUB });
+      await stub.invalidateGoogleAccessToken(GOOGLE_ACCESS_TOKEN);
+      expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "renewed-access-token", sub: OWNER_SUB });
+      await stub.linkGoogleAccount(other());
+      expect(await stub.googleAccessToken()).toMatchObject({ ok: true, accessToken: "other-access", sub: OTHER_SUB });
+    });
+
+    it("is the new account, when another account signs in while the token of the first is renewed", async () => {
+      const release = gatedGoogle();
+      const stub = coachStore(env);
+      await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
+      const pending = stub.googleAccessToken();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await stub.linkGoogleAccount(other());
+      release();
+      // The renewed token of the first account is dropped: the answer is the stored token of the second, under its own account.
+      expect(await pending).toMatchObject({ ok: true, accessToken: "other-access", sub: OTHER_SUB });
+    });
+
+    it("is the account of the renewal, not of the row the caller read, when the caller joins a renewal of a replaced link", async () => {
+      const release = gatedGoogle();
+      const stub = coachStore(env);
+      await stub.linkGoogleAccount(link({ accessTokenExpiresAt: 0 }));
+      const first = stub.googleAccessToken();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      // The second account signs in with an access token that needs a renewal too.
+      await stub.linkGoogleAccount(other({ accessTokenExpiresAt: 0 }));
+      const second = stub.googleAccessToken();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      release();
+      // The second caller read the row of the new link and joined the renewal of the old one:
+      // the token it gets is the first account's, and the answer says so.
+      expect(await second).toMatchObject({ ok: true, accessToken: `renewed-with-${GOOGLE_REFRESH_TOKEN}`, sub: OWNER_SUB });
+      // The first caller saw the link replaced, and renewed the token of the new one.
+      expect(await first).toMatchObject({ ok: true, accessToken: "renewed-with-other-refresh", sub: OTHER_SUB });
+      expect(await row()).toMatchObject({ sub: OTHER_SUB, access_token: "renewed-with-other-refresh" });
+    });
   });
 
   it("maps a body cut off after HTTP 200 to upstream_unavailable", async () => {

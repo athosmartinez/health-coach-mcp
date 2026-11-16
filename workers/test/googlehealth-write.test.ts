@@ -231,11 +231,11 @@ const DELETE_AGAIN_HINT = "the entry may still exist; call nutrition_log_delete 
 const WRITE_SCOPE_HINT = `${RECONNECT_HINT} Allow the permission to add nutrition data (googlehealth.nutrition.writeonly), and check that the Google Health API is enabled in the Cloud project.`;
 
 describe("the allowlist of the client", () => {
-  it("has exactly two writes, both for nutrition-log", () => {
+  it("has exactly two writes for nutrition-log, and names that data type with each", () => {
     expect(CREATE_PATH).toBe("/users/me/dataTypes/nutrition-log/dataPoints");
     expect(DELETE_PATH).toBe("/users/me/dataTypes/nutrition-log/dataPoints:batchDelete");
-    expect(writeTarget("POST", CREATE_PATH)).toBe("create");
-    expect(writeTarget("POST", DELETE_PATH)).toBe("delete");
+    expect(writeTarget("POST", CREATE_PATH)).toEqual({ dataType: "nutrition-log", kind: "create" });
+    expect(writeTarget("POST", DELETE_PATH)).toEqual({ dataType: "nutrition-log", kind: "delete" });
     // Neither is a read.
     expect(readTarget("POST", CREATE_PATH)).toBeUndefined();
     expect(readTarget("POST", DELETE_PATH)).toBeUndefined();

@@ -2,9 +2,14 @@
 // max heart rate.
 import { describe, expect, it } from "vitest";
 
-import { MAX_HR_SESSIONS } from "../src/healthdata";
-import { FLAG_LOW_HR_FOR_ACTIVITY, FLAG_MANUAL_ENTRY, FLAG_NO_HR_DATA } from "../src/metrics/quality";
-import { HOUR, MINUTE, SECOND, at, exerciseRec, harness, hrSample, inStore, newData, plus, samplesEvery2s } from "./healthdata-helpers";
+import { MAX_DISPLAY_NAME_CHARS, MAX_KCAL, MAX_SESSION_SECONDS, type NewExerciseSession, createBody } from "../src/googlehealth/exerciselog";
+import { type Cache, MAX_HR_SESSIONS, MAX_SESSION_KCAL, dbCache } from "../src/healthdata";
+import { parseExercise } from "../src/healthdata/exercise";
+import { FLAG_LOW_HR_FOR_ACTIVITY, FLAG_MANUAL_ENTRY, FLAG_NO_HR_DATA, FLAG_OVERLAPS_BAND_SESSION } from "../src/metrics/quality";
+import type { Db } from "../src/store/db";
+import { recordEntry } from "../src/store/entries";
+import { MAX_NAME_CHARS } from "../src/tools/foodlog";
+import { DiskError, HOUR, MINUTE, SECOND, at, exerciseRec, failingCache, harness, hrSample, inStore, newData, plus, samplesEvery2s } from "./healthdata-helpers";
 
 const h = harness();
 
@@ -205,5 +210,231 @@ describe("exercises", () => {
       await expect(data.exercises(D10, "2026-10-09", false)).rejects.toThrow(/^healthdata: range ends/);
       h.google.fail = unavailable;
       await expect(data.exercises(D10, D10, false)).rejects.toMatchObject({ code: "upstream_unavailable" });
+    }));
+});
+
+// The Worker's own rule: the Go server writes nothing to Google Health, so it
+// has no session of its own to keep.
+describe("the sessions this server created", () => {
+  /** The name the create answered, which the store holds, and the name a list gives the same point. */
+  const stored = (id: string) => `users/1122334455/dataTypes/exercise/dataPoints/${id}`;
+  const listed = (id: string) => `users/me/dataTypes/exercise/dataPoints/${id}`;
+  /** A session as a list shows one that was written through the API: the API's platform, entered by hand. */
+  const apiRec = (id: string, start: Date, end: Date, options: Partial<Parameters<typeof exerciseRec>[2]> = {}) =>
+    exerciseRec(start, end, { type: "OTHER", platform: "GOOGLE_WEB_API", method: "MANUAL", name: listed(id), ...options });
+  const own = (db: Db, id: string, day = D10) => recordEntry(db, stored(id), day, undefined, "exercise");
+  const LOGGED = [FLAG_MANUAL_ENTRY, FLAG_NO_HR_DATA];
+
+  /** 2026-10-16 07:10 to 08:25 in São Paulo, as the client writes a session. */
+  const WRITTEN: NewExerciseSession = {
+    exerciseType: "OTHER",
+    displayName: "Capoeira angola",
+    start: new Date("2026-10-16T10:10:00Z"),
+    end: new Date("2026-10-16T11:25:00Z"),
+    startUtcOffsetSeconds: -10_800,
+    endUtcOffsetSeconds: -10_800,
+    kcal: 431.5,
+    notes: "Roda de sexta",
+  };
+
+  it("keeps the body that the client writes, with its calories and its length, only as a session this server created", () => {
+    const record = { name: listed("syn-own"), ...createBody(WRITTEN) };
+    // The body says GOOGLE_WEB_API, the platform of the documented answer: without its id, such a session is another source.
+    expect(parseExercise(record)).toEqual({ kind: "other", start: Date.parse("2026-10-16T10:10:00Z") });
+    expect(parseExercise(record, new Set(["syn-other"]))).toEqual({ kind: "other", start: Date.parse("2026-10-16T10:10:00Z") });
+    expect(parseExercise(record, new Set(["syn-own"]))).toEqual({
+      kind: "session",
+      session: {
+        id: listed("syn-own"),
+        type: "OTHER",
+        name: "Capoeira angola",
+        start: Date.parse("2026-10-16T10:10:00Z"),
+        end: Date.parse("2026-10-16T11:25:00Z"),
+        activeMin: 75,
+        kcal: 431.5,
+        azm: 0,
+        hr: null,
+        manual: true,
+        source: "GOOGLE_WEB_API",
+      },
+    });
+  });
+
+  it("has the bounds of a written session: a value the client writes is a value the reader keeps", () => {
+    expect(MAX_KCAL).toBe(MAX_SESSION_KCAL);
+    expect(MAX_DISPLAY_NAME_CHARS).toBe(MAX_NAME_CHARS);
+    const start = new Date("2026-10-15T03:00:00Z");
+    // The longest session, the most calories, the longest name.
+    const longest = createBody({ ...WRITTEN, start, end: new Date(start.getTime() + MAX_SESSION_SECONDS * 1000), kcal: MAX_KCAL, displayName: "a".repeat(MAX_DISPLAY_NAME_CHARS) });
+    expect(parseExercise({ name: listed("syn-own"), ...longest }, new Set(["syn-own"]))).toMatchObject({
+      kind: "session",
+      session: { activeMin: 1440, kcal: 10_000, name: "a".repeat(64) },
+    });
+    // Without calories the session has none: unknown, not zero.
+    const bare = createBody({ ...WRITTEN, kcal: undefined });
+    expect(parseExercise({ name: listed("syn-own"), ...bare }, new Set(["syn-own"]))).toMatchObject({ kind: "session", session: { kcal: null } });
+  });
+
+  it("keeps a session of the API's platform only when this server created it", () =>
+    inStore(async (db) => {
+      own(db, "syn-own");
+      h.google.add(
+        "exercise",
+        apiRec("syn-own", at(D10, 12, 0), at(D10, 12, 45), { kcal: 250.5 }),
+        // Written through the API by another app, and a session of another platform.
+        apiRec("syn-foreign", at(D10, 13, 0), at(D10, 14, 0)),
+        exerciseRec(at(D10, 9, 0), at(D10, 10, 0), { type: "RUNNING", platform: "HEALTH_KIT" }),
+      );
+      const ex = await newData(db).exercises(D10, D10, true);
+      expect(ex.sessions).toEqual([
+        {
+          id: listed("syn-own"),
+          day: D10,
+          type: "OTHER",
+          name: "OTHER",
+          start: at(D10, 12, 0),
+          end: at(D10, 12, 45),
+          activeMin: 45,
+          kcal: 250.5,
+          azm: 0,
+          hr: null,
+          // Entered by hand through the tool.
+          manual: true,
+          source: "GOOGLE_WEB_API",
+          flags: LOGGED,
+        },
+      ]);
+      expect(ex).toMatchObject({ otherSource: 2, skipped: 0 });
+      // The stored name by data point id: what workout_review returns as entry_id.
+      expect([...ex.ownNames]).toEqual([["syn-own", stored("syn-own")]]);
+      // A session without heart rate costs no heart-rate request.
+      expect(between(h.google.takeCalls())).toEqual([]);
+
+      // A source without the table of logged sessions keeps the rule of the Go server.
+      const bare = await newData(db, { cache: failingCache(db, {}) }).exercises(D10, D10, false);
+      expect(bare).toMatchObject({ sessions: [], otherSource: 3 });
+      expect(bare.ownNames.size).toBe(0);
+    }));
+
+  it("has no heart rate for a logged session of the API's platform, whatever its record carries", () =>
+    inStore(async (db) => {
+      for (const id of ["syn-a", "syn-b", "syn-c"]) own(db, id);
+      const [start, end] = [at(D10, 19, 0), at(D10, 20, 0)];
+      h.google.add(
+        "exercise",
+        // An average heart rate with its zones, and one that no band reports: neither is the band's reading.
+        apiRec("syn-a", start, end, { avgHR: 150, zones: ZONES }),
+        apiRec("syn-b", at(D10, 7, 0), at(D10, 8, 0), { avgHR: 300 }),
+        // The other checks of a session stay: this one reports more calories than a session can hold.
+        apiRec("syn-c", at(D10, 9, 0), at(D10, 10, 0), { kcal: 10_000.5 }),
+      );
+      h.google.add("heart-rate", ...samplesEvery2s(start, end, 160));
+      const ex = await newData(db).exercises(D10, D10, true);
+      expect(ex.sessions.map((session) => [session.id, session.hr, session.manual, session.flags])).toEqual([
+        [listed("syn-b"), null, true, LOGGED],
+        [listed("syn-a"), null, true, LOGGED],
+      ]);
+      expect(ex).toMatchObject({ skipped: 1, otherSource: 0, maxHROmitted: 0 });
+      expect(between(h.google.takeCalls())).toEqual([]);
+    }));
+
+  it("marks a logged session as manual also when a list shows it under the band's platform", () =>
+    inStore(async (db) => {
+      own(db, "syn-own");
+      // Google's pages do not say how a list shows a session that was written through the API.
+      h.google.add("exercise", apiRec("syn-own", at(D10, 19, 0), at(D10, 20, 0), { platform: "FITBIT", method: "ACTIVELY_MEASURED", type: "YOGA", avgHR: 96, zones: ZONES }));
+      const ex = await newData(db).exercises(D10, D10, false);
+      // The band's platform: its heart rate is read as the band's.
+      expect(ex.sessions).toMatchObject([{ id: listed("syn-own"), manual: true, hr: { avgBpm: 96 }, flags: [FLAG_MANUAL_ENTRY] }]);
+    }));
+
+  it("flags a logged session that overlaps a session of the band, and merges nothing of the two", () =>
+    inStore(async (db) => {
+      for (const id of ["syn-inside", "syn-touching", "syn-apart", "syn-pair"]) own(db, id);
+      h.google.add(
+        "exercise",
+        exerciseRec(at(D10, 19, 0), at(D10, 20, 0), { type: "JIU_JITSU", avgHR: 130, kcal: 450, zones: ZONES }),
+        // 19:30 to 20:30: half of it is inside the band's session.
+        apiRec("syn-inside", at(D10, 19, 30), at(D10, 20, 30), { type: "JIU_JITSU", kcal: 500 }),
+        // It starts when the band's session ends: no time is covered twice.
+        apiRec("syn-touching", at(D10, 20, 0), at(D10, 20, 30)),
+        apiRec("syn-apart", at(D10, 7, 0), at(D10, 8, 0)),
+        // It overlaps another logged session, not a session of the band.
+        apiRec("syn-pair", at(D10, 7, 30), at(D10, 8, 30)),
+      );
+      const ex = await newData(db).exercises(D10, D10, false);
+      expect(ex.sessions.map((session) => [session.id.split("/").at(-1), session.flags])).toEqual([
+        ["syn-apart", LOGGED],
+        ["syn-pair", LOGGED],
+        // The band's own session carries no new flag.
+        [`syn-${at(D10, 19, 0).getTime() / 1000}`, []],
+        ["syn-inside", [...LOGGED, FLAG_OVERLAPS_BAND_SESSION]],
+        ["syn-touching", LOGGED],
+      ]);
+      expect(FLAG_OVERLAPS_BAND_SESSION).toBe("overlaps_band_session");
+      // Two records, each with its own values and its own source (CAPABILITY I2).
+      const [band, logged] = [ex.sessions[2], ex.sessions[3]];
+      expect(band).toMatchObject({ kcal: 450, activeMin: 60, hr: { avgBpm: 130 }, manual: false, source: "Synthetic Band" });
+      expect(logged).toMatchObject({ kcal: 500, activeMin: 60, hr: null, manual: true, source: "GOOGLE_WEB_API" });
+      expect(ex.sessions).toHaveLength(5);
+    }));
+
+  it("sees an overlap with a session of the band that starts on the day before or after the range", () =>
+    inStore(async (db) => {
+      for (const id of ["syn-early", "syn-late", "syn-noon"]) own(db, id);
+      h.google.add(
+        "exercise",
+        // The band's sessions start outside the range: on the 9th at 23:30, and on the 11th at 00:10.
+        exerciseRec(at("2026-10-09", 23, 30), at(D10, 0, 30), { type: "RUNNING" }),
+        exerciseRec(at("2026-10-11", 0, 10), at("2026-10-11", 1, 0), { type: "RUNNING" }),
+        apiRec("syn-early", at(D10, 0, 10), at(D10, 0, 40)),
+        apiRec("syn-late", at(D10, 23, 30), at("2026-10-11", 0, 30)),
+        apiRec("syn-noon", at(D10, 12, 0), at(D10, 13, 0)),
+      );
+      const ex = await newData(db).exercises(D10, D10, false);
+      // The band's two sessions are not sessions of the 10th; the logged ones that they overlap say so.
+      expect(ex.sessions.map((session) => [session.id.split("/").at(-1), session.flags])).toEqual([
+        ["syn-early", [...LOGGED, FLAG_OVERLAPS_BAND_SESSION]],
+        ["syn-noon", LOGGED],
+        ["syn-late", [...LOGGED, FLAG_OVERLAPS_BAND_SESSION]],
+      ]);
+      expect(ex).toMatchObject({ skipped: 0, otherSource: 0 });
+    }));
+
+  it("reads the names of the logged sessions once, with a day of margin, before any request", () =>
+    inStore(async (db) => {
+      own(db, "syn-own");
+      own(db, "syn-margin", "2026-10-11");
+      own(db, "syn-far", "2026-10-13");
+      const real = dbCache(db);
+      const asked: string[] = [];
+      const cache: Cache = {
+        ...real,
+        createdExerciseNames: (from, to) => {
+          // Nothing was asked of Google yet: a relink during the list request cannot change the names of this read.
+          expect(h.google.takeRequests().total).toBe(0);
+          asked.push(`${from}..${to}`);
+          return real.createdExerciseNames?.(from, to) ?? new Map();
+        },
+      };
+      h.google.add("exercise", apiRec("syn-own", at(D10, 12, 0), at(D10, 13, 0)));
+      const ex = await newData(db, { cache }).exercises(D10, D10, false);
+      expect(asked).toEqual(["2026-10-09..2026-10-11"]);
+      expect([...ex.ownNames.keys()].sort()).toEqual(["syn-margin", "syn-own"]);
+      expect(ex.sessions).toHaveLength(1);
+      expect(h.google.takeRequests()).toEqual({ total: 1, exercise: 1 });
+    }));
+
+  it("fails the read, before any request, when the store cannot list the logged sessions", () =>
+    inStore(async (db) => {
+      const cache: Cache = {
+        ...dbCache(db),
+        createdExerciseNames: () => {
+          throw new DiskError();
+        },
+      };
+      await expect(newData(db, { cache }).exercises(D10, D10, false)).rejects.toThrow("healthdata: read created entries");
+      expect(h.google.takeRequests()).toEqual({ total: 0 });
+      expect(h.logged()).not.toContain("4242");
     }));
 });

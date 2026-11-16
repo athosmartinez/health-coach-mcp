@@ -1,7 +1,9 @@
-// The two writes of the Google Health API v4 that the coach sends, both for
-// the nutrition-log data type: create one data point, and delete data points
-// by name. This file holds their shapes only: the paths, the request bodies and
-// the reading of the Operation each one answers. The client sends them.
+// The two writes of the Google Health API v4 that the coach sends for the
+// nutrition-log data type: create one data point, and delete data points by
+// name. This file holds their shapes only: the paths, the request bodies and
+// the reading of the Operation each one answers. The client sends them. The
+// writes of the exercise data type (exerciselog.ts) read their answers with
+// the readers of this file.
 //
 // The shapes come from Google's documentation, not from a real call:
 //   - https://developers.google.com/health/data-types/nutrition (the examples)
@@ -10,7 +12,7 @@
 //   - https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints
 //     (DataPoint, NutritionLog, SessionTimeInterval)
 
-/** The data type both writes are for. No other type is ever written. */
+/** The data type both writes of this file are for. */
 export const WRITE_DATA_TYPE = "nutrition-log";
 
 /** `POST` here creates one data point. Relative to the API base URL. */
@@ -25,7 +27,8 @@ export const MAX_WRITE_RESPONSE_BYTES = 64 << 10;
 /** Google documents [0, 100000] for an energy in kcal and for a weight in grams. */
 export const GOOGLE_MAX_QUANTITY = 100_000;
 
-const POINT_ID = "[A-Za-z0-9_.-]{1,128}";
+/** The pattern of a data point ID, for every data type the coach writes. */
+export const POINT_ID = "[A-Za-z0-9_.-]{1,128}";
 const POINT_ID_ONLY = new RegExp(`^${POINT_ID}$`);
 
 /**
@@ -142,7 +145,7 @@ export function deleteBody(id: string): { names: string[] } {
  * - unreadable: not a JSON object;
  * - not_done: the Operation is not finished, and the API has no method to ask again;
  * - operation_error: the Operation carries an error;
- * - no_name: a finished create without the name of a nutrition-log data point.
+ * - no_name: a finished create without the name of a data point of its data type.
  */
 export type AnswerFault = "unreadable" | "not_done" | "operation_error" | "no_name";
 
@@ -181,16 +184,20 @@ export type CreateAnswer = { ok: true; name: string } | { ok: false; fault: Answ
 
 /**
  * Reads the Operation a create answers. Only a finished Operation without an
- * error, whose response names a nutrition-log data point, gives a name: an ID
- * is never made up from anything else.
+ * error, whose response names a data point of the data type of the request,
+ * gives a name: an ID is never made up from anything else.
+ *
+ * `idOf` reads the data point ID of a name of that data type, and answers
+ * undefined for any other text: the name of a point of another data type is
+ * not an answer to this create. Default: a nutrition-log name.
  */
-export function readCreateAnswer(text: string): CreateAnswer {
+export function readCreateAnswer(text: string, idOf: (name: string) => string | undefined = pointId): CreateAnswer {
   const op = operation(text);
   if (!op) return { ok: false, fault: "unreadable" };
   if (op.failed) return { ok: false, fault: "operation_error", ...(op.code === undefined ? {} : { code: op.code }) };
   if (!op.done) return { ok: false, fault: "not_done" };
   const name = op.response?.name;
-  if (typeof name !== "string" || pointId(name) === undefined) return { ok: false, fault: "no_name" };
+  if (typeof name !== "string" || idOf(name) === undefined) return { ok: false, fault: "no_name" };
   return { ok: true, name };
 }
 

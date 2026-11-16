@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // Shared by the healthdata tests: synthetic records in the API's raw shapes
 // (they mirror the fixtures of internal/healthdata/*_test.go), a fake Google
 // Health API behind `fetch`, and the source as one MCP request builds it.
@@ -11,7 +12,17 @@ import { type Cache, HealthData, RECOVERY_KEYS, type Recovery, type Source, dbCa
 import { ALGO_VERSION, type Point } from "../src/metrics/stats";
 import type { Db } from "../src/store/db";
 import { metricRange } from "../src/store/metrics";
+import exerciseTypesText from "./fixtures/exercise-types.txt?raw";
 import { SAO_PAULO, withDb } from "./memory-helpers";
+
+/**
+ * The values of Google's ExerciseType enum, as the reference lists them
+ * (fixtures/exercise-types.txt names the page and the day it was read).
+ */
+export const DOCUMENTED_EXERCISE_TYPES: readonly string[] = exerciseTypesText
+  .split("\n")
+  .map((line) => line.trim())
+  .filter((line) => line !== "" && !line.startsWith("#"));
 
 // All values in the healthdata tests are synthetic.
 
@@ -270,6 +281,51 @@ export const FAKE_USER_ID = "1122334455";
 export const FAKE_CLIENT_ID = "synthetic-client.apps.example";
 
 const TYPE_URL = "type.googleapis.com/google.devicesandservices.health.v4";
+
+// The formats and values of the DataPoint reference
+// (https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints),
+// for the check of an exercise create.
+
+/**
+ * A Timestamp: "Uses RFC 3339 … Offsets other than "Z" are also accepted", with
+ * up to nine fractional digits. A date alone, or a time without "Z" or an
+ * offset, is not one.
+ */
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+
+/** A timestamp of the documented form that is also a real instant (not month 13). */
+const isTimestamp = (text: string) => TIMESTAMP.test(text) && !Number.isNaN(Date.parse(text));
+
+/**
+ * A Duration: "A duration in seconds with up to nine fractional digits, ending
+ * with 's'". A UTC offset can be negative (west of UTC).
+ */
+const UTC_OFFSET = /^-?\d+(\.\d{1,9})?s$/;
+
+/** The duration of an exercise without its pauses: a length of time, so never negative. */
+const ACTIVE_DURATION = /^\d+(\.\d{1,9})?s$/;
+
+/** The values of DataSource.RecordingMethod. */
+export const RECORDING_METHODS: readonly string[] = ["RECORDING_METHOD_UNSPECIFIED", "MANUAL", "PASSIVELY_MEASURED", "DERIVED", "ACTIVELY_MEASURED", "UNKNOWN"];
+
+/** The fields of Exercise, in the order of its JSON representation. */
+export const EXERCISE_FIELDS: readonly string[] = [
+  "interval",
+  "exerciseType",
+  "splits",
+  "exerciseEvents",
+  "splitSummaries",
+  "metricsSummary",
+  "exerciseMetadata",
+  "displayName",
+  "activeDuration",
+  "notes",
+  "updateTime",
+  "createTime",
+];
+
+/** The display name the fake API writes for an exercise type other than OTHER, as Google writes one of its own. */
+export const generatedName = (exerciseType: string) => `Generated ${exerciseType.toLowerCase().replaceAll("_", " ")}`;
 const FILTER = /^([a-z_]+)\.([a-z_.]+) >= "([^"]+)" AND \1\.\2 < "([^"]+)"$/;
 
 function dateText(date: Json | undefined): string {
@@ -320,6 +376,11 @@ function sampleMs(dataType: string, record: Json | null): number {
  * shows them: the create of one nutrition-log data point, and batchDelete by
  * name. A created point is listed like any other record, with the data
  * source of the documented answer (platform GOOGLE_WEB_API).
+ *
+ * And the two writes of the exercise log. A create is checked against the
+ * rules the reference documents for an Exercise, and one that breaks a rule
+ * gets HTTP 400 (INVALID_ARGUMENT) with an ErrorInfo: a fake that accepts a
+ * body the real API refuses hides the defect until production.
  */
 export class FakeGoogle {
   private readonly records = new Map<string, Json[]>();
@@ -390,9 +451,9 @@ export class FakeGoogle {
     return request.method === "POST" ? `create ${dataType}` : dataType;
   }
 
-  /** The nutrition-log points that were created through the API and not deleted. */
-  createdPoints(): Json[] {
-    return (this.records.get("nutrition-log") ?? []).filter((record) => record?.dataSource?.platform === "GOOGLE_WEB_API");
+  /** The points of a data type (default: nutrition-log) that were created through the API and not deleted. */
+  createdPoints(dataType: "nutrition-log" | "exercise" = "nutrition-log"): Json[] {
+    return (this.records.get(dataType) ?? []).filter((record) => record?.dataSource?.platform === "GOOGLE_WEB_API");
   }
 
   /** Answers one request to the API; any other URL fails the test. */
@@ -414,6 +475,82 @@ export class FakeGoogle {
     return Response.json({ error: { code: status, status: grpc, message: "synthetic refusal" } }, { status });
   }
 
+  /** HTTP 400 for a body that breaks a documented rule: Google's error with an ErrorInfo. */
+  private invalid(message: string, reason: string): Response {
+    return Response.json(
+      {
+        error: {
+          code: 400,
+          status: "INVALID_ARGUMENT",
+          message,
+          details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason, domain: "health.googleapis.com" }],
+        },
+      },
+      { status: 400 },
+    );
+  }
+
+  /**
+   * Creates one exercise point and answers the finished Operation of the
+   * documented example ("Write a workout session"). The body is checked
+   * against the reference: the four fields of the interval, each time an RFC
+   * 3339 timestamp and each offset a duration, an end after the start, an
+   * exerciseType of the documented enum, a displayName and a metricsSummary.
+   * Of the optional fields: calories that are a number, an activeDuration
+   * that is a duration and not negative, notes that are a string, a
+   * recordingMethod of the documented enum, and no field that Exercise does
+   * not have. As the reference says, the display name of the body is
+   * kept only for the type OTHER: for any other type the point gets a name
+   * the server made.
+   */
+  private createExercise(body: Json): Response {
+    const exercise = body?.exercise;
+    const interval = exercise?.interval;
+    const isText = (value: unknown) => typeof value === "string";
+    if (typeof exercise !== "object" || exercise === null) return this.invalid("exercise is required", "SYNTHETIC_EXERCISE_MISSING");
+    if (![interval?.startTime, interval?.startUtcOffset, interval?.endTime, interval?.endUtcOffset].every(isText)) {
+      return this.invalid("interval needs start_time, start_utc_offset, end_time and end_utc_offset", "SYNTHETIC_INTERVAL_INCOMPLETE");
+    }
+    if (!isTimestamp(interval.startTime) || !isTimestamp(interval.endTime)) {
+      return this.invalid("interval.start_time and interval.end_time must be RFC 3339 timestamps", "SYNTHETIC_TIMESTAMP_INVALID");
+    }
+    if (!UTC_OFFSET.test(interval.startUtcOffset) || !UTC_OFFSET.test(interval.endUtcOffset)) {
+      return this.invalid("a UTC offset must be a duration in seconds with up to nine fractional digits, ending with 's'", "SYNTHETIC_UTC_OFFSET_INVALID");
+    }
+    if (!(Date.parse(interval.endTime) > Date.parse(interval.startTime))) return this.invalid("interval.end_time must be after interval.start_time", "SYNTHETIC_INTERVAL_EMPTY");
+    if (!DOCUMENTED_EXERCISE_TYPES.includes(exercise.exerciseType)) return this.invalid("exercise_type is not a valid ExerciseType", "SYNTHETIC_EXERCISE_TYPE_UNKNOWN");
+    if (typeof exercise.displayName !== "string" || exercise.displayName === "") return this.invalid("display_name is required", "SYNTHETIC_DISPLAY_NAME_MISSING");
+    const summary = exercise.metricsSummary;
+    if (typeof summary !== "object" || summary === null || Array.isArray(summary)) return this.invalid("metrics_summary is required", "SYNTHETIC_METRICS_SUMMARY_MISSING");
+    // The optional fields: each one is checked only when the body has it.
+    if (summary.caloriesKcal !== undefined && (typeof summary.caloriesKcal !== "number" || !Number.isFinite(summary.caloriesKcal))) {
+      return this.invalid("metrics_summary.calories_kcal must be a number", "SYNTHETIC_CALORIES_INVALID");
+    }
+    if (exercise.activeDuration !== undefined && !(isText(exercise.activeDuration) && ACTIVE_DURATION.test(exercise.activeDuration))) {
+      return this.invalid("active_duration must be a duration in seconds that is not negative, with up to nine fractional digits, ending with 's'", "SYNTHETIC_ACTIVE_DURATION_INVALID");
+    }
+    if (exercise.notes !== undefined && !isText(exercise.notes)) return this.invalid("notes must be a string", "SYNTHETIC_NOTES_INVALID");
+    if (Object.keys(exercise).some((key) => !EXERCISE_FIELDS.includes(key))) return this.invalid("exercise has a field that Exercise does not have", "SYNTHETIC_EXERCISE_FIELD_UNKNOWN");
+    const method = body.dataSource?.recordingMethod;
+    if (method !== undefined && !RECORDING_METHODS.includes(method)) return this.invalid("data_source.recording_method is not a valid RecordingMethod", "SYNTHETIC_RECORDING_METHOD_UNKNOWN");
+
+    const id = `syn-created-${++this.createdCount}`;
+    const dataSource = { recordingMethod: body.dataSource?.recordingMethod ?? "UNKNOWN", application: { googleWebClientId: FAKE_CLIENT_ID }, platform: "GOOGLE_WEB_API" };
+    const stamp = new Date().toISOString();
+    const stored = {
+      ...exercise,
+      displayName: exercise.exerciseType === "OTHER" ? exercise.displayName : generatedName(exercise.exerciseType),
+      exerciseMetadata: {},
+      updateTime: stamp,
+      createTime: stamp,
+    };
+    this.add("exercise", { name: `users/me/dataTypes/exercise/dataPoints/${id}`, dataSource, exercise: stored });
+    return Response.json({
+      done: true,
+      response: { "@type": `${TYPE_URL}.DataPoint`, name: `users/${FAKE_USER_ID}/dataTypes/exercise/dataPoints/${id}`, dataSource, exercise: stored },
+    });
+  }
+
   /**
    * Creates one nutrition-log point and answers the finished Operation of the
    * documented example. The answer names the point under the user's ID; a
@@ -421,6 +558,7 @@ export class FakeGoogle {
    */
   private create(dataType: string, body: Json): Response {
     this.writes.push({ kind: "create", body });
+    if (dataType === "exercise") return this.createExercise(body);
     const log = body?.nutritionLog;
     const interval = log?.interval;
     const offset = /^-?\d+s$/;

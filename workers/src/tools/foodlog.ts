@@ -1,5 +1,6 @@
-// nutrition_log_add and nutrition_log_delete: the two tools that write to
-// Google Health. The Go server has neither: it only reads Google Health.
+// nutrition_log_add and nutrition_log_delete: the two tools that write the
+// food log of Google Health. The Go server has neither: it only reads Google
+// Health. The two tools that write the exercise log are in exerciselog.ts.
 //
 // Like the coach-moment tools, their bodies run inside the CoachStore Durable
 // Object and take turns with them, on the request budget and the token answer
@@ -108,9 +109,9 @@ const GUARDRAIL =
   "medication or a supplement.";
 
 // It adds a record to an external service on every call.
-const ADDS: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+export const ADDS: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 // It erases a record of an external service. A second call for the same entry changes nothing more.
-const DELETES: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
+export const DELETES: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
 
 // --- arguments ---
 
@@ -363,7 +364,7 @@ const NUTRITION_LOG_DELETE = writeTool(
 
 const WRITES: readonly WriteTool[] = [NUTRITION_LOG_ADD, NUTRITION_LOG_DELETE];
 
-/** The tools that write to Google Health, in the order they are listed. */
+/** The tools that write the food log of Google Health, in the order they are listed. The tools of the exercise log are in exerciselog.ts. */
 export const WRITE_TOOLS: readonly Tool[] = WRITES.map((one) => one.tool);
 
 const byName = new Map(WRITES.map((one) => [one.tool.name, one]));

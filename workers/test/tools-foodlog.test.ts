@@ -976,13 +976,18 @@ const googleError = (status: number, grpc: string) => () =>
   );
 
 describe("the write tools through /mcp of the object", () => {
-  it("are listed with the other tools: 20 in all", async () => {
+  it("are listed with the other tools: 22 in all", async () => {
     const reply = await objectRpc(freshStore(), { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tools = (reply.result as { tools: { name: string; annotations?: Record<string, unknown> }[] }).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
-    expect(tools).toHaveLength(20);
-    // The two write tools are the only ones that reach an open world and the only ones that change Google Health.
-    expect(tools.filter((tool) => tool.annotations?.openWorldHint !== false).map((tool) => tool.name)).toEqual(["nutrition_log_add", "nutrition_log_delete"]);
+    expect(tools).toHaveLength(22);
+    // The write tools are the only ones that reach an open world and the only ones that change Google Health.
+    expect(tools.filter((tool) => tool.annotations?.openWorldHint !== false).map((tool) => tool.name)).toEqual([
+      "nutrition_log_add",
+      "nutrition_log_delete",
+      "exercise_log_add",
+      "exercise_log_delete",
+    ]);
     expect(tools.find((tool) => tool.name === "nutrition_log_add")?.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
     expect(tools.find((tool) => tool.name === "nutrition_log_delete")?.annotations).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true });
   });

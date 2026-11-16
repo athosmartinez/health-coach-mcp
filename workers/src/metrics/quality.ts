@@ -8,6 +8,13 @@ import { finite } from "./stats";
 export const FLAG_LOW_HR_FOR_ACTIVITY = "low_hr_for_activity";
 export const FLAG_NO_HR_DATA = "no_hr_data";
 export const FLAG_MANUAL_ENTRY = "manual_entry";
+/**
+ * A session logged through this server covers time that a session of the
+ * band also covers: the same workout may be counted twice. The two stay
+ * separate records, each with its own values. The Go server has no such
+ * flag: it logs no session.
+ */
+export const FLAG_OVERLAPS_BAND_SESSION = "overlaps_band_session";
 export const FLAG_PARTIAL_DAY = "partial_day";
 export const FLAG_LIKELY_INCOMPLETE_NUTRITION = "likely_incomplete_nutrition";
 

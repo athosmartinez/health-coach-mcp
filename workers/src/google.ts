@@ -13,16 +13,51 @@ export const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const SCOPE_PREFIX = "https://www.googleapis.com/auth/googlehealth.";
 
 /**
+ * The data types the coach writes, each with its write scope, what that scope
+ * permits (the words of a hint) and the two tools that need it. A closed
+ * table: a write of a data type that is not here does not exist.
+ *
+ * The scopes are the ones Google lists for each data type
+ * (https://developers.google.com/health/data-types).
+ */
+export const WRITE_SCOPES = {
+  "nutrition-log": {
+    scope: `${SCOPE_PREFIX}nutrition.writeonly`,
+    permits: "add nutrition data",
+    addTool: "nutrition_log_add",
+    deleteTool: "nutrition_log_delete",
+  },
+  exercise: {
+    scope: `${SCOPE_PREFIX}activity_and_fitness.writeonly`,
+    permits: "add exercise data",
+    addTool: "exercise_log_add",
+    deleteTool: "exercise_log_delete",
+  },
+} as const;
+
+/** A data type the coach writes. */
+export type WriteDataType = keyof typeof WRITE_SCOPES;
+
+export const WRITE_DATA_TYPES = Object.keys(WRITE_SCOPES) as WriteDataType[];
+
+/** A scope as a hint names it: without the URL in front (`googlehealth.nutrition.writeonly`). */
+export function scopeName(scope: string): string {
+  return scope.slice(scope.lastIndexOf("/") + 1);
+}
+
+/**
  * The Google Health scopes the coach needs. The four read-only ones match the
- * Go server (internal/googlehealth/auth.Scopes); nutrition.writeonly lets
- * later tools log food.
+ * Go server (internal/googlehealth/auth.Scopes). The two write-only ones are
+ * the Worker's own: nutrition.writeonly for the food log tools, and
+ * activity_and_fitness.writeonly for the exercise log tools.
  */
 export const GOOGLE_HEALTH_SCOPES = [
   `${SCOPE_PREFIX}activity_and_fitness.readonly`,
   `${SCOPE_PREFIX}health_metrics_and_measurements.readonly`,
   `${SCOPE_PREFIX}sleep.readonly`,
   `${SCOPE_PREFIX}nutrition.readonly`,
-  `${SCOPE_PREFIX}nutrition.writeonly`,
+  WRITE_SCOPES["nutrition-log"].scope,
+  WRITE_SCOPES.exercise.scope,
 ] as const;
 
 /** `openid email` identify the account for the allowlist check. */
@@ -290,6 +325,19 @@ export function splitScopes(scope: string | undefined): string[] {
 
 export function missingHealthScopes(granted: readonly string[]): string[] {
   return GOOGLE_HEALTH_SCOPES.filter((scope) => !granted.includes(scope));
+}
+
+/**
+ * What a missing write scope takes away, one sentence for each scope in
+ * `missing`: the two tools that need it and the scope's name. "" when no
+ * write scope is missing. An account that signed in before a write scope was
+ * requested lacks that scope until the next sign-in.
+ */
+export function missingWriteScopes(missing: readonly string[]): string {
+  return WRITE_DATA_TYPES.map((type) => WRITE_SCOPES[type])
+    .filter((write) => missing.includes(write.scope))
+    .map((write) => `${write.addTool} and ${write.deleteTool} need ${scopeName(write.scope)}, which a new sign-in grants.`)
+    .join(" ");
 }
 
 export function base64UrlEncode(bytes: Uint8Array): string {

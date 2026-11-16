@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { GOOGLE_SIGN_IN_SCOPES } from "../src/google";
 import { call, MCP_HEADERS } from "./helpers";
 
 function expectHtmlHeaders(response: Response) {
@@ -38,6 +39,11 @@ describe("public pages", () => {
     expect(body).toContain("googlehealth.nutrition.writeonly");
     // Both uses of the write scope: the add, and the delete of the server's own entries.
     expect(body).toContain("to log food for the owner, and to delete food entries that this server logged.");
+    // The exercise write scope, with both of its uses too.
+    expect(body).toContain("googlehealth.activity_and_fitness.writeonly");
+    expect(body).toContain("to log workout sessions for the owner, and to delete workout sessions that this server logged.");
+    // Every scope of the sign-in is on the page.
+    for (const scope of GOOGLE_SIGN_IN_SCOPES) expect(body, scope).toContain(`<strong>${scope.slice(scope.lastIndexOf("/") + 1)}</strong>`);
     expect(body).toContain("Durable Object");
     expect(body).toMatch(/never logged or shared/i);
     expect(body).toMatch(/not sold or shared with third parties/i);

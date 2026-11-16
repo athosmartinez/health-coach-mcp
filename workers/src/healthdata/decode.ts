@@ -234,12 +234,26 @@ export function clean(s: string): string {
   let kept = 0;
   for (const char of s) {
     if (kept === MAX_LABEL_RUNES) break;
-    const code = char.codePointAt(0) ?? 0;
-    if (code === 0xfffd || (code >= 0xd800 && code <= 0xdfff) || HIDDEN.test(char)) continue;
+    if (dropped(char)) continue;
     out += char;
     kept++;
   }
   return trimSpace(out);
+}
+
+/** Whether `clean` drops the character (one code point). */
+function dropped(char: string): boolean {
+  const code = char.codePointAt(0) ?? 0;
+  return code === 0xfffd || (code >= 0xd800 && code <= 0xdfff) || HIDDEN.test(char);
+}
+
+/**
+ * Whether `clean` keeps every character of `s`: the rule of `clean` for a
+ * text longer than a label, which `clean` would cut.
+ */
+export function allVisible(s: string): boolean {
+  for (const char of s) if (dropped(char)) return false;
+  return true;
 }
 
 /** Names the source in envelopes: the device when known, else the platform. */

@@ -131,6 +131,8 @@ describe("the coach tools over /mcp, inside the object", () => {
         azm_min: 10,
         quality_flags: ["low_hr_for_activity"],
         source: "Synthetic Band",
+        // A session of the band: this server did not log it.
+        entry_id: null,
       },
       {
         exercise_id: RUN_ID,
@@ -146,6 +148,7 @@ describe("the coach tools over /mcp, inside the object", () => {
         azm_min: 50,
         quality_flags: [],
         source: "Synthetic Band",
+        entry_id: null,
       },
     ]);
     expect(out.data.sessions_omitted).toBe(0);

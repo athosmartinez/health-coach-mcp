@@ -293,8 +293,11 @@ const ADD: ToolCall = ["nutrition_log_add", FOOD];
 /** The name of the n-th entry the fake API creates. */
 const createdName = (n: number) => `users/${FAKE_USER_ID}/dataTypes/nutrition-log/dataPoints/syn-created-${n}`;
 const DELETE: ToolCall = ["nutrition_log_delete", { entry_id: createdName(1) }];
+/** The session of the exercise log cases: an activity that is not in the tool's list. */
+const LOG_SESSION: ToolCall = ["exercise_log_add", { exercise_type: "Capoeira angola", start_time: "07:10", duration_min: 75, kcal: 431.5, notes: "Roda de sexta" }];
+const DELETE_SESSION: ToolCall = ["exercise_log_delete", { entry_id: `users/${FAKE_USER_ID}/dataTypes/exercise/dataPoints/syn-created-1` }];
 /** Nothing of a write: no part of the entry, no entry id, no part of Google's answer. */
-const WRITE_SECRETS = ["Feijoada", "431.5", "23.75", "51.25", "17.5", "syn-created", FAKE_USER_ID, FAKE_CLIENT_ID, "Item "];
+const WRITE_SECRETS = ["Feijoada", "431.5", "23.75", "51.25", "17.5", "syn-created", FAKE_USER_ID, FAKE_CLIENT_ID, "Item ", "Capoeira", "Roda de sexta"];
 
 /** No health value, name, token or response body in a log line: only names, counts and statuses. */
 function expectCleanLogs(): void {
@@ -596,6 +599,53 @@ const CASES: Case[] = [
     first: `ok ×45, ${BUDGET} ×55`,
     hints: [...Array.from({ length: 45 }, () => null), ...Array.from({ length: 55 }, () => WRITE_OWN_REQUEST_HINT)],
     later: null,
+  },
+  // The two tools that write the exercise log: the counts of the food log
+  // tools. A later request of an add is one more session; a later request of
+  // a delete finds no session of its own (no_data) and sends nothing.
+  { tool: "`exercise_log_add`", input: "one session", empty: true, calls: [LOG_SESSION], health: [1], later: 1 },
+  {
+    tool: "`exercise_log_add`",
+    input: "one session; the access token is renewed first, and Google rejects the new one once",
+    empty: true,
+    link: EXPIRED,
+    arrange: rejectFirstRequest,
+    calls: [LOG_SESSION],
+    health: [2],
+    token: [2],
+    later: 1,
+  },
+  {
+    tool: "`exercise_log_add`",
+    input: "one session; the token is renewed first, Google rejects the new one once, then answers 429 to every request",
+    empty: true,
+    link: EXPIRED,
+    arrange: rejectThenLimit,
+    calls: [LOG_SESSION],
+    // The rejected request, then 4 attempts that Google answers with 429.
+    health: [5],
+    token: [2],
+    first: "upstream_unavailable",
+    later: null,
+    waits: 3,
+  },
+  { tool: "`exercise_log_delete`", input: "a session this server created", empty: true, before: [LOG_SESSION], calls: [DELETE_SESSION], health: [1], later: 0, laterResult: "no_data" },
+  {
+    tool: "`exercise_log_delete`",
+    input: "a session this server created; the token is renewed first, Google rejects the new one once, then answers 429 to every request",
+    empty: true,
+    before: [LOG_SESSION],
+    arrange: async (mock, stub) => {
+      await stub.linkGoogleAccount(link(EXPIRED));
+      rejectThenLimit(mock);
+    },
+    calls: [DELETE_SESSION],
+    // The rejected request, then 4 attempts that Google answers with 429.
+    health: [5],
+    token: [2],
+    first: "upstream_unavailable",
+    later: null,
+    waits: 3,
   },
 ];
 

@@ -21,7 +21,7 @@ import { FOOD_LOG_NOTICE } from "../src/tools/foodlog";
 import { FOOD_NAME, TODAY, day, everything, googleMock, link, skipRetryWaits } from "./e2e-helpers";
 import { FAKE_CLIENT_ID, FAKE_USER_ID } from "./healthdata-helpers";
 import { GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN, rpc, signInAsOwner } from "./helpers";
-import { ALL_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
+import { ALL_TOOL_NAMES, EXERCISE_LOG_TOOL_NAMES, WRITE_TOOL_NAMES } from "./memory-helpers";
 
 const g = googleMock();
 
@@ -39,7 +39,7 @@ const createdName = (n: number) => `users/${FAKE_USER_ID}/dataTypes/nutrition-lo
 beforeEach(async () => {
   // The named store is shared by the tests of this file: start each one empty.
   await runInDurableObject(coachStore(env), (_instance, state) => {
-    for (const table of ["profile", "targets", "health_items", "lab_results", "preferences", "notes", "daily_metrics", "google_account", "nutrition_entries"]) {
+    for (const table of ["profile", "targets", "health_items", "lab_results", "preferences", "notes", "daily_metrics", "google_account", "nutrition_entries", "exercise_entries"]) {
       state.storage.sql.exec(`DELETE FROM ${table}`);
     }
   });
@@ -104,10 +104,10 @@ const storedEntries = () =>
 const WRITE_SCOPE_HINT = `${RECONNECT_HINT} Allow the permission to add nutrition data (googlehealth.nutrition.writeonly), and check that the Google Health API is enabled in the Cloud project.`;
 
 describe("the food log writes, from the sign-in to a tool result", () => {
-  it("lists the 20 tools, with the two that write to Google Health", async () => {
+  it("lists the 22 tools, with the two that write the food log of Google Health", async () => {
     const { tools } = await mcp("tools/list");
     expect(tools.map((tool: { name: string }) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(22);
     expect(WRITE_TOOL_NAMES).toEqual(["nutrition_log_add", "nutrition_log_delete"]);
     const add = tools.find((tool: { name: string }) => tool.name === "nutrition_log_add");
     const remove = tools.find((tool: { name: string }) => tool.name === "nutrition_log_delete");
@@ -118,8 +118,11 @@ describe("the food log writes, from the sign-in to a tool result", () => {
       expect(tool.outputSchema.type, tool.name).toBe("object");
       expect(tool.description, tool.name).toContain("never suggest starting, stopping or dosing a medication or a supplement");
     }
-    // Every other tool stays inside the server: no other tool reaches an open world.
-    expect(tools.filter((tool: { annotations?: { openWorldHint?: boolean } }) => tool.annotations?.openWorldHint !== false).map((tool: { name: string }) => tool.name)).toEqual(WRITE_TOOL_NAMES);
+    // Every tool that does not write to Google Health stays inside the server: no other tool reaches an open world.
+    expect(tools.filter((tool: { annotations?: { openWorldHint?: boolean } }) => tool.annotations?.openWorldHint !== false).map((tool: { name: string }) => tool.name)).toEqual([
+      ...WRITE_TOOL_NAMES,
+      ...EXERCISE_LOG_TOOL_NAMES,
+    ]);
     // A list asks nothing of Google.
     expect(g.external).toEqual([]);
   });

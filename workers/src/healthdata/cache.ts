@@ -23,7 +23,7 @@ export interface Fetcher {
   listBetween<T>(dataType: DataType, start: Date, end: Date, reduce: Reduce<T>): Promise<T[]>;
 }
 
-/** The part of the store this package uses: the daily_metrics cache, and the list of the food entries this server created. */
+/** The part of the store this package uses: the daily_metrics cache, and the lists of the food entries and of the workout sessions this server created. */
 export interface Cache {
   metricRange(key: string, from: LocalDate, to: LocalDate, algoVersion: number): StoredMetric[];
   putMetric(metric: Metric): void;
@@ -43,6 +43,14 @@ export interface Cache {
    * is known.
    */
   createdFoodNames?(from: LocalDate, to: LocalDate): ReadonlyMap<string, string>;
+  /**
+   * The stored name of each workout session this server created on [from, to]
+   * for the account that is linked now, keyed by data point id. One indexed
+   * read. The exercise read takes it before any Google request, and uses its
+   * keys as the ids. Absent: the server created none, and the read holds the
+   * band's own sessions only.
+   */
+  createdExerciseNames?(from: LocalDate, to: LocalDate): ReadonlyMap<string, string>;
 }
 
 /** The daily_metrics table of the coach store. */
@@ -52,6 +60,7 @@ export function dbCache(db: Db): Cache {
     putMetric: (metric) => putMetric(db, metric),
     deleteMetric: (day, key) => deleteMetric(db, day, key),
     createdFoodNames: (from, to) => entryNamesBetween(db, from, to),
+    createdExerciseNames: (from, to) => entryNamesBetween(db, from, to, "exercise"),
   };
 }
 

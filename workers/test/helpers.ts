@@ -81,6 +81,7 @@ export function codeExchangeReply(identity: GoogleIdentityClaims, nonce: () => s
         "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
         "https://www.googleapis.com/auth/googlehealth.nutrition.readonly",
         "https://www.googleapis.com/auth/googlehealth.nutrition.writeonly",
+        "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.writeonly",
       ].join(" "),
       id_token: idToken({
         iss: "https://accounts.google.com",

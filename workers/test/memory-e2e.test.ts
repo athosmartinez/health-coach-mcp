@@ -162,12 +162,12 @@ describe("the MCP request inside the object", () => {
 });
 
 describe("coach memory over /mcp", () => {
-  it("lists the 20 tools, with no boolean schema in any property", async () => {
+  it("lists the 22 tools, with no boolean schema in any property", async () => {
     const listed = await rpc(accessToken, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(listed.error).toBeUndefined();
     const tools = (listed.result as { tools: { name: string; inputSchema: unknown; outputSchema: unknown }[] }).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual(ALL_TOOL_NAMES);
-    expect(tools).toHaveLength(20);
+    expect(tools).toHaveLength(22);
 
     // Client interop: zod-based clients reject `true` or `false` as a property schema.
     const booleans: string[] = [];

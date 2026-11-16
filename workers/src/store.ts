@@ -4,7 +4,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Zone } from "./coach/date";
 import { INTERNAL_ERROR } from "./coach/errors";
 import { timeZone } from "./config";
-import { type GoogleErrorCode, missingHealthScopes, refreshAccessToken, splitScopes } from "./google";
+import { type GoogleErrorCode, type WriteDataType, missingHealthScopes, refreshAccessToken, splitScopes } from "./google";
 import { RequestBudget } from "./googlehealth/budget";
 import { GoogleHealthClient } from "./googlehealth/client";
 import { RequestTokens } from "./googlehealth/tokens";
@@ -16,7 +16,8 @@ import { targetInForce } from "./store/memory";
 import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
 import type { CoachDeps } from "./tools/coach";
-import { type WriteDeps, runWriteTool } from "./tools/foodlog";
+import { type ExerciseLogDeps, isExerciseLogTool, runExerciseLogTool } from "./tools/exerciselog";
+import { type Entries, type WriteDeps, runWriteTool } from "./tools/foodlog";
 import { runMemoryTool } from "./tools/memory";
 import { runCoachTool } from "./tools/moments";
 import type { ToolOutcome } from "./tools/register";
@@ -137,6 +138,20 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (sub, name)
   );
   CREATE INDEX nutrition_entries_by_day ON nutrition_entries (day)`,
+  // 6: the workout sessions this server created in Google Health, with the
+  // columns and the index of the food entries of migration 5, and the same
+  // rules: a row proves that a session is this server's own, for the Google
+  // account in `sub`. It holds no activity name, no notes and no value.
+  // `name` is the data point name as the create answered it; `day` is the
+  // local day the session started.
+  `CREATE TABLE exercise_entries (
+    sub TEXT NOT NULL,
+    name TEXT NOT NULL,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sub, name)
+  );
+  CREATE INDEX exercise_entries_by_day ON exercise_entries (day)`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -190,9 +205,14 @@ export type AccessTokenErrorCode = GoogleErrorCode | "not_linked";
 /**
  * Result of {@link CoachStore.googleAccessToken}. A result rather than a throw:
  * errors crossing Durable Object RPC lose their type and fields.
+ *
+ * `sub` is the Google account the token belongs to: the row it was read from,
+ * or the row whose refresh token renewed it. It is not always the account
+ * that is linked when the caller uses the token, so a write that is bound to
+ * one account compares the two.
  */
 export type AccessTokenResult =
-  | { ok: true; accessToken: string; expiresAt: number }
+  | { ok: true; accessToken: string; expiresAt: number; sub: string }
   | { ok: false; code: AccessTokenErrorCode; message: string };
 
 export type TokenState = "ok" | AccessTokenErrorCode;
@@ -269,29 +289,36 @@ export class CoachStore extends DurableObject<Env> {
           entries: {
             has: (name) => hasEntry(db, name),
           },
-          now: db.now,
-          zone,
-        };
-      };
-      let writeDeps: WriteDeps | undefined;
-      const newWriteDeps = (): WriteDeps | undefined => {
-        const zone = zoneOrError();
-        if (!zone) return undefined;
-        return {
-          api: clientIn(zone),
-          entries: {
-            owner: () => linkedAccount(db),
-            record: (name, day, owner) => {
-              // An add always has a linked account: the create needs its token.
-              if (owner === undefined) throw new Error("store: no Google account was linked");
-              recordEntry(db, name, day, owner);
-            },
-            has: (name) => hasEntry(db, name),
-            forget: (name) => forgetEntry(db, name),
+          // The same for the sessions: the has() of exercise_log_delete, and the name map of the exercise read.
+          exerciseEntries: {
+            has: (name) => hasEntry(db, name, "exercise"),
           },
           now: db.now,
           zone,
         };
+      };
+      // The entries this server created of one data type, each in its own table.
+      const entriesOf = (type: WriteDataType): Entries => ({
+        owner: () => linkedAccount(db),
+        record: (name, day, owner) => {
+          // An add always has a linked account: the create needs its token.
+          if (owner === undefined) throw new Error("store: no Google account was linked");
+          recordEntry(db, name, day, owner, type);
+        },
+        has: (name) => hasEntry(db, name, type),
+        forget: (name) => forgetEntry(db, name, type),
+      });
+      let writeDeps: WriteDeps | undefined;
+      const newWriteDeps = (): WriteDeps | undefined => {
+        const zone = zoneOrError();
+        if (!zone) return undefined;
+        return { api: clientIn(zone), entries: entriesOf("nutrition-log"), now: db.now, zone };
+      };
+      let exerciseLogDeps: ExerciseLogDeps | undefined;
+      const newExerciseLogDeps = (): ExerciseLogDeps | undefined => {
+        const zone = zoneOrError();
+        if (!zone) return undefined;
+        return { api: clientIn(zone), entries: entriesOf("exercise"), now: db.now, zone };
       };
       // The tool calls of a batch start together. The tools that reach Google
       // take turns, so the Google requests of one MCP request run one after
@@ -322,6 +349,11 @@ export class CoachStore extends DurableObject<Env> {
         });
       const write = (name: string, args: Record<string, unknown>): Promise<ToolOutcome> =>
         inTurn(() => {
+          // The tools of each data type have their own table of entries.
+          if (isExerciseLogTool(name)) {
+            exerciseLogDeps ??= newExerciseLogDeps();
+            return exerciseLogDeps ? runExerciseLogTool(exerciseLogDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
+          }
           writeDeps ??= newWriteDeps();
           return writeDeps ? runWriteTool(writeDeps, name, args) : { ok: false, error: INTERNAL_ERROR };
         });
@@ -413,11 +445,13 @@ export class CoachStore extends DurableObject<Env> {
       if (!row) return notLinked();
       if (row.access_token && row.access_token_expires_at !== null) {
         if (row.access_token_expires_at - ACCESS_TOKEN_MARGIN_MS > Date.now()) {
-          return { ok: true, accessToken: row.access_token, expiresAt: row.access_token_expires_at };
+          return { ok: true, accessToken: row.access_token, expiresAt: row.access_token_expires_at, sub: row.sub };
         }
       }
       if (!this.refreshing) {
-        this.refreshing = this.refresh(row.refresh_token).finally(() => {
+        // The renewal answers the account of its own row: a caller that joins
+        // a renewal in flight may have read the row of another link.
+        this.refreshing = this.refresh(row.refresh_token, row.sub).finally(() => {
           this.refreshing = null;
         });
       }
@@ -487,7 +521,8 @@ export class CoachStore extends DurableObject<Env> {
       .toArray()[0];
   }
 
-  private async refresh(refreshToken: string): Promise<AccessTokenResult> {
+  /** Renews the access token of the link that holds `refreshToken`. `sub` is the account of that link. */
+  private async refresh(refreshToken: string, sub: string): Promise<AccessTokenResult> {
     const result = await refreshAccessToken(
       { clientId: this.env.GOOGLE_CLIENT_ID, clientSecret: this.env.GOOGLE_CLIENT_SECRET },
       refreshToken,
@@ -512,7 +547,9 @@ export class CoachStore extends DurableObject<Env> {
       Date.now(),
       refreshToken,
     );
-    return { ok: true, accessToken: result.accessToken, expiresAt: result.expiresAt };
+    // Google issued the token for the refresh token that was sent, so it is
+    // that account's token also when another link replaced the row meanwhile.
+    return { ok: true, accessToken: result.accessToken, expiresAt: result.expiresAt, sub };
   }
 }
 

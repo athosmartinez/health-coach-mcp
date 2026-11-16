@@ -36,13 +36,15 @@ export type Targets = (day: LocalDate) => Target | undefined;
 export type Notes = (filter: NoteFilter) => NoteResults;
 
 /**
- * The food entries this server created, so nutrition_day can name one.
- * Absent: no entry was logged here, and every item has entry_id null.
+ * The entries of one kind that this server created (food entries, or workout
+ * sessions), so the read of that kind can name one: nutrition_day for food,
+ * workout_review for sessions. Absent: no entry was logged here, and every
+ * item has entry_id null.
  */
 export interface FoodEntries {
   /**
    * Whether this server created an entry with exactly this name for the
-   * account that is linked now. The check nutrition_log_delete uses. It sees
+   * account that is linked now. The check the delete tool of the kind uses. It sees
    * the account linked when it is called, which may no longer be the account
    * the food read started with.
    */
@@ -65,6 +67,12 @@ export interface CoachDeps {
    * lookup, not a Google Health request.
    */
   entries?: FoodEntries;
+  /**
+   * The workout sessions this server created, so workout_review can name
+   * one. May be absent: workout_review then leaves entry_id null. `has` is the
+   * check exercise_log_delete uses: a local lookup, not a Google Health request.
+   */
+  exerciseEntries?: FoodEntries;
   now: () => Date;
   /** Defines the local day (I4). */
   zone: Zone;

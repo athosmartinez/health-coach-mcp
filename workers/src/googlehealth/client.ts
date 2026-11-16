@@ -15,38 +15,50 @@
 // Adapted from google-health-cli pkg/client/client.go (Do, isStaleScopeError,
 // parseRetryAfter) and cmd/data.go (list and rollup pagination), through this
 // repository's internal/googlehealth/client.go. Changes: read operations and
-// two writes of the food log only, behind a method and path allowlist; a
+// four writes only (the create and the delete of a food log entry and of a
+// workout session), behind a method and path allowlist; a
 // create that is never sent again when its outcome is unknown; waits with
 // jitter and a cap on Retry-After; one token renewal shared by 401 and the
 // stale-token 403; errors carry the HTTP status and Google's status enum. A
 // read never keeps the response body. A write refusal also keeps Google's
 // error.message, cut to about 200 characters, and the reason of any ErrorInfo,
 // so the model can explain the refusal. Tokens, email addresses, user
-// identifiers and the request body are never kept; responses are read through
+// identifiers and the request body are never kept, and neither is a text of
+// an exercise write that Google's message repeats; responses are read through
 // a size limit; a page cap or a repeated page token is
 // an error instead of a truncated result; a request budget shared by the calls
 // of one MCP request; each record reduced by the caller as its page is read;
 // and a port from Go to TypeScript.
 
 // A client for the Google Health API v4. It reads data points, and it writes
-// the food log: it creates one nutrition-log data point, and it deletes
-// nutrition-log data points by name. No other write can leave it.
+// two data types: the food log (nutrition-log) and the exercise log
+// (exercise). For each it creates one data point, and it deletes data points
+// of that type by name. No other write can leave it.
 
 import type { LocalDate, Zone } from "../coach/date";
 import { ToolError, errorTypes } from "../coach/errors";
 import { truncate } from "../coach/text";
-import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "../google";
+import { OAUTH_CLIENT_HINT, RECONNECT_HINT, WRITE_SCOPES, type WriteDataType, scopeName } from "../google";
 import type { RequestBudget } from "./budget";
 import { type DataType, type TypeInfo, filter, lookup, rollupChunks, windowFilter } from "./datatypes";
+import {
+  CREATE_PATH as EXERCISE_CREATE_PATH,
+  DELETE_PATH as EXERCISE_DELETE_PATH,
+  type NewExerciseSession,
+  callerTexts as exerciseCallerTexts,
+  createBody as exerciseCreateBody,
+  deleteBody as exerciseDeleteBody,
+  pointId as exercisePointId,
+} from "./exerciselog";
 import {
   type AnswerFault,
   CREATE_PATH,
   DELETE_PATH,
   MAX_WRITE_RESPONSE_BYTES,
   type NewFoodEntry,
-  WRITE_DATA_TYPE,
   createBody,
   deleteBody,
+  pointId,
   readCreateAnswer,
   readDeleteAnswer,
 } from "./nutritionlog";
@@ -108,10 +120,23 @@ export const MAX_RESPONSE_BYTES = 16 << 20;
 /** Bounds the responses of one call across all its pages and chunks. */
 export const MAX_CALL_BYTES = 32 << 20;
 
-/** What CoachStore.googleAccessToken() answers. */
+/**
+ * What CoachStore.googleAccessToken() answers. `sub` is the Google account
+ * the token belongs to. A source that does not know it leaves it out, and a
+ * write that is bound to an account is then never sent.
+ */
 export type TokenResult =
-  | { ok: true; accessToken: string }
+  | { ok: true; accessToken: string; sub?: string }
   | { ok: false; code: "auth_expired" | "upstream_unavailable" | "internal_error" | "not_linked" };
+
+/**
+ * The Google account (its `sub`) a write is bound to: the one whose entries
+ * the tool checked before the write. Undefined when the store held no link
+ * then. A request with a bound goes out only with a token of that account.
+ */
+interface AccountBound {
+  account: string | undefined;
+}
 
 /**
  * Supplies access tokens. `invalidate` reports a token the API rejected, so
@@ -194,7 +219,7 @@ interface Reply {
   bytes: number;
 }
 
-/** Reads data points and writes the food log. One instance serves the calls of one MCP request, one after the other. */
+/** Reads data points and writes the food log and the exercise log. One instance serves the calls of one MCP request, one after the other. */
 export class GoogleHealthClient {
   private readonly base: string;
   private readonly tokens: TokenSource;
@@ -281,11 +306,7 @@ export class GoogleHealthClient {
    * ever made up.
    */
   async createNutritionLog(entry: NewFoodEntry): Promise<string> {
-    const reply = await this.request("POST", CREATE_PATH, undefined, JSON.stringify(createBody(entry)));
-    const answer = readCreateAnswer(reply.text);
-    if (answer.ok) return answer.name;
-    logFault("create", answer.fault, answer.code);
-    throw outcomeUnknown(CREATE_FAULTS[answer.fault]);
+    return this.create("nutrition-log", CREATE_PATH, createBody(entry), pointId);
   }
 
   /**
@@ -298,12 +319,77 @@ export class GoogleHealthClient {
    * that it refuses the delete of a point another app wrote.
    */
   async deleteNutritionLog(id: string): Promise<"deleted" | "gone"> {
-    const reply = await this.request("POST", DELETE_PATH, undefined, JSON.stringify(deleteBody(id)));
+    return this.remove("nutrition-log", DELETE_PATH, deleteBody(id));
+  }
+
+  /**
+   * Creates one exercise data point (a workout session) and returns the name
+   * Google gave it. The rules are the ones of createNutritionLog: it is sent
+   * again only after an answer that proves Google did not accept it, and a
+   * name is returned only when Google's answer holds the name of an exercise
+   * data point.
+   *
+   * `account` is the Google account the caller will record the session for
+   * (undefined when none was linked). The create is sent only with a token of
+   * that account: the tool reads the account from the store and the client
+   * takes the token on its own, and one MCP HTTP request keeps one token
+   * answer, so the two can belong to different accounts after a sign-in.
+   */
+  async createExercise(session: NewExerciseSession, account: string | undefined): Promise<string> {
+    const body = exerciseCreateBody(session);
+    // A session carries free text. What Google repeats of it in a refusal is
+    // taken out of the message before the message reaches an error or a log.
+    return this.create("exercise", EXERCISE_CREATE_PATH, body, exercisePointId, { account }, exerciseCallerTexts(body));
+  }
+
+  /**
+   * Deletes the exercise data point with this ID. The rules are the ones of
+   * deleteNutritionLog: "gone" only for Google's own NOT_FOUND, and the
+   * caller decides which points may be deleted.
+   *
+   * `account` is the Google account whose session the caller checked. The
+   * delete is sent only with a token of that account: a data point ID of one
+   * account must never be deleted with the token of another.
+   */
+  async deleteExercise(id: string, account: string): Promise<"deleted" | "gone"> {
+    // The ID is an entry id: a refusal that repeats it must not carry it on.
+    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id), { account }, [id]);
+  }
+
+  /**
+   * Sends one create and reads its Operation. `idOf` reads the ID of a data
+   * point name of the data type of the request: an answer that names a point
+   * of another data type gives no name.
+   */
+  private async create(
+    dataType: WriteDataType,
+    path: string,
+    body: unknown,
+    idOf: (name: string) => string | undefined,
+    bound?: AccountBound,
+    echoes?: readonly string[],
+  ): Promise<string> {
+    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound, echoes);
+    const answer = readCreateAnswer(reply.text, idOf);
+    if (answer.ok) return answer.name;
+    logFault(dataType, "create", answer.fault, answer.code);
+    throw outcomeUnknown(dataType, CREATE_FAULTS[answer.fault]);
+  }
+
+  /** Sends one delete and reads its Operation. */
+  private async remove(
+    dataType: WriteDataType,
+    path: string,
+    body: unknown,
+    bound?: AccountBound,
+    echoes?: readonly string[],
+  ): Promise<"deleted" | "gone"> {
+    const reply = await this.request("POST", path, undefined, JSON.stringify(body), bound, echoes);
     if (reply.status === 404) return "gone";
     const answer = readDeleteAnswer(reply.text);
     if (answer.ok) return "deleted";
-    logFault("delete", answer.fault, answer.code);
-    throw new ToolError("upstream_unavailable", DELETE_FAULTS[answer.fault], RETRY_HINTS.delete);
+    logFault(dataType, "delete", answer.fault, answer.code);
+    throw unavailableFor({ dataType, kind: "delete" }, DELETE_FAULTS[answer.fault]);
   }
 
   private async pages<T>(dataType: DataType, info: TypeInfo, suffix: string, expression: string, reduce: Reduce<T>): Promise<T[]> {
@@ -391,15 +477,33 @@ export class GoogleHealthClient {
    * ends there, and its error says that the entry may exist. A delete names
    * the point to remove, so it keeps the rules of a read; a 404 that Google's
    * API answers (NOT_FOUND) comes back to the caller as an answer.
+   *
+   * With `bound`, every attempt compares the account of the token it is about
+   * to send with the account of the bound, also after a renewal: a renewal
+   * can answer the token of an account that signed in meanwhile. A request
+   * without a bound is not compared.
+   *
+   * `echoes` are the texts of the request that the caller wrote. A refusal of
+   * a write repeats Google's error.message without them.
    */
-  protected async request(method: string, path: string, query?: string, body?: string): Promise<Reply> {
+  protected async request(
+    method: string,
+    path: string,
+    query?: string,
+    body?: string,
+    bound?: AccountBound,
+    echoes: readonly string[] = [],
+  ): Promise<Reply> {
     const allowed = requestTarget(method, path, query);
     if (allowed === undefined) throw new Error(`googlehealth: the client refuses ${method} ${path}`);
+    // The data type of the request: every log line, message and hint below names this one.
     const { dataType, kind } = allowed;
     const target = query === undefined ? `${this.base}${path}` : `${this.base}${path}?${query}`;
     const limit = kind === "read" ? this.maxResponseBytes : Math.min(this.maxResponseBytes, MAX_WRITE_RESPONSE_BYTES);
-    const unavailable = (message: string, cause?: unknown) => unavailableFor(kind, message, cause);
+    const unavailable = (message: string, cause?: unknown) => unavailableFor(allowed, message, cause);
     let refreshed = false;
+    // Whether an attempt of this request was sent.
+    let sent = false;
     // Set by every failure that can be retried.
     let last: ToolError | undefined;
     for (let failures = 0; ; ) {
@@ -407,9 +511,18 @@ export class GoogleHealthClient {
       // attempts run out; a page or a chunk that was never tried means the
       // range holds more than one call reads; a write that was never tried
       // was not sent, and its error says so.
-      if (this.budget.remaining === 0) throw last ?? this.outOfBudget(dataType, kind);
-      const token = await this.accessToken();
-      if (!this.budget.take()) throw last ?? this.outOfBudget(dataType, kind);
+      if (this.budget.remaining === 0) throw last ?? this.outOfBudget(allowed);
+      const held = await this.accessToken();
+      const token = held.accessToken;
+      // A token of another account, or of an account nobody names, would write
+      // to an account the caller did not check. Nothing is sent, and no unit
+      // of the budget is taken.
+      if (bound !== undefined && (held.sub === undefined || held.sub !== bound.account)) {
+        console.warn("google health write not sent: the linked account changed", { data_type: dataType, operation: kind });
+        throw accountChanged(kind, sent);
+      }
+      if (!this.budget.take()) throw last ?? this.outOfBudget(allowed);
+      sent = true;
 
       let reply: Reply;
       let status = 0;
@@ -419,16 +532,16 @@ export class GoogleHealthClient {
         status = reply.status;
       } catch (error) {
         if (error instanceof ResponseTooLargeError) {
-          if (kind === "read") throw tooMuch(dataType, error);
+          if (allowed.kind === "read") throw tooMuch(dataType, error);
           // Google answered, and the answer cannot be read. A create may have
           // happened; a delete can be asked again.
-          if (kind === "create") throw outcomeUnknown(CREATE_FAULTS.unreadable, error);
+          if (allowed.kind === "create") throw outcomeUnknown(allowed.dataType, CREATE_FAULTS.unreadable, error);
           throw unavailable(DELETE_FAULTS.unreadable, error);
         }
         const cause = error instanceof NetworkError ? error : new NetworkError(errorTypes(error));
         console.warn("google health request did not complete", { data_type: dataType, cause: cause.causeTypes });
         // The request may have reached Google before the connection failed.
-        if (kind === "create") throw outcomeUnknown("Google Health API could not be reached", cause);
+        if (allowed.kind === "create") throw outcomeUnknown(allowed.dataType, "Google Health API could not be reached", cause);
         last = unavailable("Google Health API could not be reached", cause);
         reply = { status: 0, retryAfter: null, text: "", bytes: 0 };
       }
@@ -455,9 +568,9 @@ export class GoogleHealthClient {
         }
         if (status === 403 && !limited) {
           const [message, hint] =
-            kind === "read"
+            allowed.kind === "read"
               ? [`Google Health denied access to ${dataType} data`, SCOPE_HINT]
-              : [`Google Health denied the write of ${dataType} data`, WRITE_SCOPE_HINT];
+              : [`Google Health denied the write of ${dataType} data`, writeScopeHint(allowed.dataType)];
           throw new ToolError("scope_missing", message, hint, { cause: statusError(status, reply.text) });
         }
         // The point is not there: the state a delete asks for. Only Google's
@@ -468,9 +581,9 @@ export class GoogleHealthClient {
         // A rate limit is an answer that Google did not take the request.
         const refusedForNow = status === 429 || limited;
         const noAnswer = status === 408 || status >= 500;
-        if (kind === "create" && noAnswer) {
+        if (allowed.kind === "create" && noAnswer) {
           // Google may have stored the entry before it failed to answer.
-          throw outcomeUnknown("Google Health API is unavailable", statusError(status, reply.text));
+          throw outcomeUnknown(allowed.dataType, "Google Health API is unavailable", statusError(status, reply.text));
         }
         if (refusedForNow || noAnswer) {
           last = unavailable("Google Health API is unavailable", statusError(status, reply.text));
@@ -481,8 +594,9 @@ export class GoogleHealthClient {
           // A changed filter field, request shape or API version lands here.
           // A read logs the status and Google's enum only. A write also logs
           // the short message and the ErrorInfo reason, so the refusal can be
-          // explained; the rest of the body is never logged.
-          const detail = kind === "read" ? undefined : googleWriteFault(reply.text);
+          // explained; the rest of the body is never logged, and neither is a
+          // text of the request that the message repeats.
+          const detail = kind === "read" ? undefined : googleWriteFault(reply.text, echoes);
           console.warn("google health request rejected", {
             data_type: dataType,
             http_status: status,
@@ -518,17 +632,17 @@ export class GoogleHealthClient {
    * call started, a shorter range is not the only way: the same call can fit
    * a request of its own, and the hint says so.
    */
-  private outOfBudget(dataType: DataType, kind: Kind): ToolError {
+  private outOfBudget(target: Target): ToolError {
     // A write has no range to shorten: the units went to the calls before it.
-    if (kind !== "read") return new ToolError("invalid_input", NOT_SENT[kind], WRITE_OWN_REQUEST_HINT);
-    return tooMuch(dataType, undefined, this.budget.sharedBefore ? OWN_REQUEST_HINT : SHORTER_RANGE_HINT);
+    if (target.kind !== "read") return new ToolError("invalid_input", NOT_SENT[target.kind], WRITE_OWN_REQUEST_HINT);
+    return tooMuch(target.dataType, undefined, this.budget.sharedBefore ? OWN_REQUEST_HINT : SHORTER_RANGE_HINT);
   }
 
-  /** The access token, or the tool error of a token source that cannot give one. */
-  private async accessToken(): Promise<string> {
+  /** The access token and the account it belongs to, or the tool error of a token source that cannot give one. */
+  private async accessToken(): Promise<Extract<TokenResult, { ok: true }>> {
     if (this.budget.tokenFailure) throw this.budget.tokenFailure;
     const result = await this.tokens.accessToken();
-    if (result.ok) return result.accessToken;
+    if (result.ok) return result;
     const failure = tokenError(result.code);
     this.budget.tokenFailure = failure;
     throw failure;
@@ -603,33 +717,42 @@ export function readTarget(method: string, path: string): DataType | undefined {
   return pattern?.exec(path)?.[1] as DataType | undefined;
 }
 
-/** The writes the client may send: one create and one delete. */
+/** The writes the client may send for a data type: one create and one delete. */
 export type WriteKind = "create" | "delete";
 
+/** A write the client may send: its data type and its kind. */
+export interface WriteTarget {
+  dataType: WriteDataType;
+  kind: WriteKind;
+}
+
 /**
- * The write guard: the kind of a write the client may send, or undefined.
- * Exactly two requests pass, both for the nutrition-log data type and both
- * compared as whole texts: the create of one data point, and the delete of
- * data points by name. No pattern is used, so no other data type, user or
- * method suffix can pass.
+ * The write guard: the data type and the kind of a write the client may send,
+ * or undefined. Exactly four requests pass, each compared as a whole text:
+ * for the nutrition-log data type and for the exercise data type, the create
+ * of one data point and the delete of data points by name. No pattern is
+ * used, so no other data type, user or method suffix can pass.
  */
-export function writeTarget(method: string, path: string): WriteKind | undefined {
+export function writeTarget(method: string, path: string): WriteTarget | undefined {
   if (method !== "POST") return undefined;
-  if (path === CREATE_PATH) return "create";
-  if (path === DELETE_PATH) return "delete";
+  if (path === CREATE_PATH) return { dataType: "nutrition-log", kind: "create" };
+  if (path === DELETE_PATH) return { dataType: "nutrition-log", kind: "delete" };
+  if (path === EXERCISE_CREATE_PATH) return { dataType: "exercise", kind: "create" };
+  if (path === EXERCISE_DELETE_PATH) return { dataType: "exercise", kind: "delete" };
   return undefined;
 }
 
-type Kind = "read" | WriteKind;
+/** What a request is. A write carries one of the data types the client writes. */
+type Target = { dataType: DataType; kind: "read" } | WriteTarget;
 
 /** The allowlist of the client: what a request is, or undefined for one that must not leave. */
-function requestTarget(method: string, path: string, query: string | undefined): { dataType: DataType; kind: Kind } | undefined {
+function requestTarget(method: string, path: string, query: string | undefined): Target | undefined {
   const read = readTarget(method, path);
   if (read !== undefined) return { dataType: read, kind: "read" };
   const write = writeTarget(method, path);
-  // The whole input of a write is its body: a write with a query is not one of the two.
+  // The whole input of a write is its body: a write with a query is not one of the four.
   if (write === undefined || query !== undefined) return undefined;
-  return { dataType: WRITE_DATA_TYPE, kind: write };
+  return write;
 }
 
 const PAGING_WORDS = ["token", "page", "next", "cursor", "more", "contin", "offset", "after", "trunc", "partial", "remain"];
@@ -671,48 +794,79 @@ function badResponse(dataType: DataType): ToolError {
 }
 
 function unavailable(message: string, cause?: unknown): ToolError {
-  return unavailableFor("read", message, cause);
+  return new ToolError("upstream_unavailable", message, RETRY_HINT, cause === undefined ? undefined : { cause });
 }
 
 // --- the errors of a write ---
 
-const WRITE_SCOPE_HINT =
-  `${RECONNECT_HINT} Allow the permission to add nutrition data (googlehealth.nutrition.writeonly), ` +
-  "and check that the Google Health API is enabled in the Cloud project.";
+/**
+ * The hint of a write that Google denied: the write scope of the data type of
+ * that write, and what it permits (the table WRITE_SCOPES).
+ */
+function writeScopeHint(dataType: WriteDataType): string {
+  const { permits, scope } = WRITE_SCOPES[dataType];
+  return `${RECONNECT_HINT} Allow the permission to ${permits} (${scopeName(scope)}), and check that the Google Health API is enabled in the Cloud project.`;
+}
 
 /**
- * The hint of a create whose outcome is unknown. An entry that this server
- * has no ID for is not one of its own: nutrition_day reports it as food from
- * another source. That report is one flag, not a count. So on a day that
- * already had food from another source, nutrition_day cannot show whether
- * the entry was added: only the food log itself, in the Fitbit app, can.
+ * The hint of a create whose outcome is unknown, by data type: the read that
+ * shows the day, and what it shows of an entry that this server has no ID
+ * for. Such an entry is not one of the server's own.
+ *
+ * - A food entry: nutrition_day reports it as food from another source. That
+ *   report is one flag, not a count. So on a day that already had food from
+ *   another source, nutrition_day cannot show whether the entry was added:
+ *   only the food log itself, in the Fitbit app, can.
+ * - A workout session: workout_review leaves it out and raises
+ *   other_source_sessions_excluded. That flag covers the week of the day,
+ *   and it is one flag too: in a week that already had a session from
+ *   another source, only the exercise log in the Fitbit app can show it.
  */
-export const MAY_EXIST_HINT =
-  "the entry may exist: check the day with nutrition_day before a new try " +
-  "(an entry this server has no id for shows there as food from another source; " +
-  "when the day already had food from another source, check the food log in the Fitbit app instead)";
+export const MAY_EXIST_HINTS: Readonly<Record<WriteDataType, string>> = {
+  "nutrition-log":
+    "the entry may exist: check the day with nutrition_day before a new try " +
+    "(an entry this server has no id for shows there as food from another source; " +
+    "when the day already had food from another source, check the food log in the Fitbit app instead)",
+  exercise:
+    "the entry may exist: check the day with workout_review before a new try " +
+    "(a session this server has no id for is not listed there, and the result has the flag other_source_sessions_excluded; " +
+    "when the week already had a session from another source, check the exercise log in the Fitbit app instead)",
+};
+
+/** The hint of a food log create whose outcome is unknown. */
+export const MAY_EXIST_HINT = MAY_EXIST_HINTS["nutrition-log"];
 
 /**
  * The hint of an unavailable answer, by kind of request. A create that ends
  * with this hint was answered by Google with a refusal (a rate limit, a
- * rejected token), so the entry does not exist.
+ * rejected token), so the entry does not exist. The hint of a delete names
+ * the delete tool of the data type of that delete.
  */
-const RETRY_HINTS: Readonly<Record<Kind, string>> = {
-  read: RETRY_HINT,
-  create: `the entry was not created; ${RETRY_HINT}`,
-  delete: `the entry may still exist; call nutrition_log_delete again in a few minutes (a repeated delete is safe)`,
-};
+function retryHint(target: Target): string {
+  switch (target.kind) {
+    case "read":
+      return RETRY_HINT;
+    case "create":
+      return `the entry was not created; ${RETRY_HINT}`;
+    case "delete":
+      return `the entry may still exist; call ${WRITE_SCOPES[target.dataType].deleteTool} again in a few minutes (a repeated delete is safe)`;
+  }
+}
 
-function unavailableFor(kind: Kind, message: string, cause?: unknown): ToolError {
-  return new ToolError("upstream_unavailable", message, RETRY_HINTS[kind], cause === undefined ? undefined : { cause });
+function unavailableFor(target: Target, message: string, cause?: unknown): ToolError {
+  return new ToolError("upstream_unavailable", message, retryHint(target), cause === undefined ? undefined : { cause });
 }
 
 /** A create that may have happened: it must not be sent again before the day is checked. */
-function outcomeUnknown(message: string, cause?: unknown): ToolError {
-  return new ToolError("upstream_unavailable", message, MAY_EXIST_HINT, cause === undefined ? undefined : { cause });
+function outcomeUnknown(dataType: WriteDataType, message: string, cause?: unknown): ToolError {
+  return new ToolError("upstream_unavailable", message, MAY_EXIST_HINTS[dataType], cause === undefined ? undefined : { cause });
 }
 
-/** The hint of a write that the request budget had no unit for. */
+/**
+ * The hint of a write that was not sent for a reason of its MCP HTTP request:
+ * the request budget had no unit for it, or the linked Google account changed
+ * during the request.
+ */
 export const WRITE_OWN_REQUEST_HINT = "send this call in a request of its own";
 
 const NO_UNIT_LEFT = "this MCP request already sent all the Google Health requests one request may send";
@@ -721,6 +875,24 @@ const NOT_SENT: Readonly<Record<WriteKind, string>> = {
   create: `${NO_UNIT_LEFT}: the entry was not sent`,
   delete: `${NO_UNIT_LEFT}: the delete was not sent`,
 };
+
+const ACCOUNT_CHANGED = "the linked Google account changed during this MCP request";
+
+/**
+ * A write that is bound to one Google account, and whose token belongs to
+ * another: it is not sent. Like a write the budget has no unit for, it is
+ * invalid_input: nothing is wrong at Google or with the sign-in, and the same
+ * call works in a request of its own, which reads the account and the token
+ * together. The text names no account and no token.
+ *
+ * `sentBefore`: an attempt went out before the token changed, with the token
+ * of the account the write is bound to. Google rejected that token, or
+ * answered a failure that can be retried.
+ */
+function accountChanged(kind: Target["kind"], sentBefore: boolean): ToolError {
+  const what = kind === "create" ? "the entry" : kind === "delete" ? "the delete" : "the request";
+  return new ToolError("invalid_input", `${ACCOUNT_CHANGED}: ${what} was not sent${sentBefore ? " again" : ""}`, WRITE_OWN_REQUEST_HINT);
+}
 
 /**
  * A write that Google answered with a 4xx other than a rejected token, a
@@ -749,9 +921,9 @@ const DELETE_FAULTS: Readonly<Record<Exclude<AnswerFault, "no_name">, string>> =
 };
 
 /** The log line of a write answer that cannot be used: the reason, never a part of the answer. */
-function logFault(operation: WriteKind, fault: AnswerFault, code: number | undefined): void {
+function logFault(dataType: WriteDataType, operation: WriteKind, fault: AnswerFault, code: number | undefined): void {
   console.warn("google health write answer not usable", {
-    data_type: WRITE_DATA_TYPE,
+    data_type: dataType,
     operation,
     reason: fault,
     ...(code === undefined ? {} : { google_code: code }),
@@ -860,14 +1032,52 @@ function redactWriteText(text: string): string {
     .trim();
 }
 
+/** A shorter text identifies nothing, and its removal would empty the message. */
+const MIN_ECHO_CHARS = 3;
+
+const REGEXP_SYNTAX = /[\\^$.*+?()[\]{}|]/g;
+
+/**
+ * `text` without every occurrence of a text of `echoes`, compared without
+ * regard to letter case. Each removed stretch becomes one space.
+ *
+ * Every occurrence is marked on the text as Google sent it, and the marked
+ * stretches are cut together: so a text that is part of another one (a name
+ * inside the notes), or that overlaps it, leaves no rest behind. The removal
+ * runs before the redaction of tokens and identifiers, which would cut a
+ * repeated text into parts that match nothing.
+ */
+function withoutEchoes(text: string, echoes: readonly string[]): string {
+  const cut = new Array<boolean>(text.length).fill(false);
+  let found = false;
+  for (const echo of echoes) {
+    if ([...echo].length < MIN_ECHO_CHARS) continue;
+    // A lookahead matches at every start, also where two occurrences overlap.
+    const occurrence = new RegExp(`(?=(${echo.replace(REGEXP_SYNTAX, "\\$&")}))`, "giu");
+    for (const match of text.matchAll(occurrence)) {
+      cut.fill(true, match.index, match.index + (match[1]?.length ?? 0));
+      found = true;
+    }
+  }
+  if (!found) return text;
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    if (!cut[i]) out += text[i];
+    else if (!cut[i - 1]) out += " ";
+  }
+  return out;
+}
+
 /**
  * The reason and short message of a write that Google refused. Only
  * error.message and the reason of an ErrorInfo in error.details are read.
  * The message is cut to about 200 characters. Anything that is a token, an
  * email address or a user identifier is left out, and so is the rest of the
- * body: a request is never logged or returned.
+ * body: a request is never logged or returned. `echoes` are the texts of the
+ * request that the caller wrote (a name, notes, a value, an entry id): the
+ * message is repeated without them. The reason is a constant, and stays.
  */
-function googleWriteFault(body: string): WriteRefusal {
+function googleWriteFault(body: string, echoes: readonly string[] = []): WriteRefusal {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -876,7 +1086,7 @@ function googleWriteFault(body: string): WriteRefusal {
   }
   if (!isRecord(parsed) || !isRecord(parsed.error)) return NO_WRITE_FAULT;
   const error = parsed.error;
-  const message = typeof error.message === "string" ? truncate(redactWriteText(error.message), WRITE_ERROR_TEXT) : "";
+  const message = typeof error.message === "string" ? truncate(redactWriteText(withoutEchoes(error.message, echoes)), WRITE_ERROR_TEXT) : "";
   const details = Array.isArray(error.details) ? error.details : [];
   const reasons: string[] = [];
   let used = 0;

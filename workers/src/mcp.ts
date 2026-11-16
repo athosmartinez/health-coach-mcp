@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/server";
 
-import { OAUTH_CLIENT_HINT, RECONNECT_HINT } from "./google";
+import { OAUTH_CLIENT_HINT, RECONNECT_HINT, missingWriteScopes } from "./google";
 import { registerGuardrails, registerPrompts } from "./prompts";
 import type { GoogleAccountStatus } from "./store";
+import { registerExerciseLog } from "./tools/exerciselog";
 import { registerMemory } from "./tools/memory";
 import { registerWrites } from "./tools/foodlog";
 import { registerCoach } from "./tools/moments";
@@ -93,7 +94,7 @@ export function createServer(deps: ServerDeps): McpServer {
         scopes_granted: status.scopesGranted,
         scopes_missing: status.scopesMissing,
         token: status.token,
-        hint: hintFor(status.token, status.scopesMissing.length > 0),
+        hint: hintFor(status.token, status.scopesMissing),
       },
     };
   });
@@ -101,6 +102,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerMemory(server, deps.memory);
   registerCoach(server, deps.coach);
   registerWrites(server, deps.write);
+  registerExerciseLog(server, deps.write);
   registerGuardrails(server);
   // The prompts call profile_get and the coach tools: this server has both.
   registerPrompts(server);
@@ -108,7 +110,7 @@ export function createServer(deps: ServerDeps): McpServer {
   return server;
 }
 
-function hintFor(token: string, scopesMissing: boolean): string | null {
+function hintFor(token: string, scopesMissing: readonly string[]): string | null {
   switch (token) {
     case "not_linked":
     case "auth_expired":
@@ -118,5 +120,10 @@ function hintFor(token: string, scopesMissing: boolean): string | null {
     case "internal_error":
       return `The Google token request failed. ${OAUTH_CLIENT_HINT}`;
   }
-  return scopesMissing ? `Some Google Health permissions were not granted. ${RECONNECT_HINT}` : null;
+  if (scopesMissing.length === 0) return null;
+  // A missing write scope is named with the tools that need it: an account
+  // that signed in before the scope was requested reads here why those tools
+  // answer scope_missing, and that a new sign-in grants it.
+  const writes = missingWriteScopes(scopesMissing);
+  return `Some Google Health permissions were not granted.${writes === "" ? "" : ` ${writes}`} ${RECONNECT_HINT}`;
 }

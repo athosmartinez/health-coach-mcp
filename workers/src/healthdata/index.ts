@@ -42,6 +42,7 @@ export {
   Exercises,
   MAX_HR_SESSIONS,
   MAX_HR_WINDOW,
+  MAX_SESSION_KCAL,
   type ZoneMinutes,
 } from "./exercise";
 export {
@@ -62,7 +63,7 @@ export {
   type Total,
   dayComplete,
 } from "./nutrition";
-export { MAX_LABEL_RUNES, clean } from "./decode";
+export { MAX_LABEL_RUNES, allVisible, clean } from "./decode";
 export { PRIMARY_PLATFORM, type Stages } from "./parse";
 export { KCAL_WINDOW_DAYS, MAX_RANGE_DAYS, NIGHT_WINDOW_DAYS, ROLLUP_WINDOW_DAYS, SETTLE_DAYS, WORN_WINDOW_DAYS } from "./plan";
 export {

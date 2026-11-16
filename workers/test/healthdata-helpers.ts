@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
-// Shared by the healthdata tests: synthetic records in the API's raw shapes
-// (they mirror the fixtures of internal/healthdata/*_test.go), a fake Google
-// Health API behind `fetch`, and the source as one MCP request builds it.
+// Shared by the healthdata tests: synthetic records in the API's raw shapes,
+// a fake Google Health API behind `fetch`, and the source as one MCP request
+// builds it.
 import { type MockInstance, afterEach, beforeEach, expect, vi } from "vitest";
 
 import { type Zone, addDays } from "../src/coach/date";

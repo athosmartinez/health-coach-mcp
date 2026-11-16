@@ -1,4 +1,4 @@
-// Sleep, HRV and resting heart rate records (Go: internal/healthdata/parse.go).
+// Sleep, HRV and resting heart rate records.
 // Each parser is a page-reduction function of the API client: it keeps only
 // the fields the source uses, and it never throws for a record it cannot read.
 

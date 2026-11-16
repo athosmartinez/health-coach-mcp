@@ -1,18 +1,14 @@
 /// <reference types="vite/client" />
-// Schema parity with the Go server, the contract of this Worker.
+// Schema parity with the frozen tools/list snapshot.
 //
-// fixtures/go-tools-list.json is the `tools/list` result of the Go server over
-// stdio. To generate it again, from workers/:
-//
-//   (cd .. && make build) && node scripts/go-tools-list.mjs
-//
-// The script runs the Go binary with new empty data and config folders.
+// fixtures/go-tools-list.json is a frozen snapshot of the former Go server's
+// `tools/list` result. It is the source of truth for this comparison: do not
+// regenerate it.
 //
 // The comparison is on parsed JSON, with one normalization: the order of the
-// keys of a JSON object is ignored (objects are unordered; the Go SDK and
-// JSON.stringify write them in different orders). Everything else must be
-// equal: the keys of each tool, every string, and the order of every array
-// (required, enum, type).
+// keys of a JSON object is ignored (objects are unordered). Everything else
+// must be equal: the keys of each tool, every string, and the order of every
+// array (required, enum, type).
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { OVERLAP_IN_WEEK } from "../src/tools/weekly";

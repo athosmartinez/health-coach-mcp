@@ -13,8 +13,7 @@
 // limitations under the License.
 //
 // Adapted from google-health-cli pkg/client/client.go (Do, isStaleScopeError,
-// parseRetryAfter) and cmd/data.go (list and rollup pagination), through this
-// repository's internal/googlehealth/client.go. Changes: read operations and
+// parseRetryAfter) and cmd/data.go (list and rollup pagination). Changes: read operations and
 // four writes only (the create and the delete of a food log entry and of a
 // workout session), behind a method and path allowlist; a
 // create that is never sent again when its outcome is unknown; waits with

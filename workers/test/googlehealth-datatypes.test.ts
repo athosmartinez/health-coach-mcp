@@ -1,5 +1,4 @@
-// Ports of the type table, filter and rollup chunk cases of
-// internal/googlehealth/client_test.go and review_test.go.
+// The type table, filter and rollup chunk cases.
 import { describe, expect, it } from "vitest";
 
 import { Zone } from "../src/coach/date";

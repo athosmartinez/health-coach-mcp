@@ -1,4 +1,4 @@
-// Ports of the metrics cache cases of internal/store/store_test.go.
+// The metrics cache.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { type LocalDate, addDays } from "../src/coach/date";

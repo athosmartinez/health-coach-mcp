@@ -13,8 +13,7 @@
 // limitations under the License.
 //
 // Adapted from google-health-cli pkg/types/registry.go (filter paths, page and
-// rollup range caps) and cmd/data.go (filter and dailyRollUp body builders),
-// through this repository's internal/googlehealth/datatypes.go. Changes: a
+// rollup range caps) and cmd/data.go (filter and dailyRollUp body builders). Changes: a
 // closed table of the read operations the coach uses instead of the full
 // registry, ranges taken as inclusive local days, local midnights from the
 // coach zone for physical-time fields, ranges longer than the rollup cap split

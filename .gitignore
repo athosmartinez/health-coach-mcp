@@ -1,7 +1,5 @@
-# Build output
+# Local build output
 /bin/
-*.test
-*.out
 
 # Secrets: OAuth client, tokens, env
 client_secret*.json

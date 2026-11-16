@@ -1,4 +1,4 @@
-// The stable error contract of every tool (Go: internal/coach/errors.go).
+// The stable error contract of every tool.
 
 /** Stable, machine-readable error identifiers agents can branch on. */
 export const CODES = [

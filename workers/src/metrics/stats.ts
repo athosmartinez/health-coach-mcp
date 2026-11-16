@@ -1,4 +1,4 @@
-// The pure math behind the coach tools (Go: internal/metrics/stats.go):
+// The pure math behind the coach tools:
 // baselines, z-scores, smoothing, trends and adherence. It does no I/O and
 // knows no time zone: callers pass values already assigned to local days.
 // A null value is a missing day (never 0), and every function skips it.

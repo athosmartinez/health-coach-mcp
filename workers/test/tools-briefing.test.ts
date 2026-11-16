@@ -1,4 +1,4 @@
-// Ports of internal/tools/briefing_test.go. Each test serves morning_briefing
+// morning_briefing. Each test serves it
 // over a synthetic health source, with "now" at 2026-10-16 08:00 in São Paulo.
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

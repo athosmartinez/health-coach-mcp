@@ -1,4 +1,4 @@
-// Ports of internal/healthdata/nutrition_test.go: the food log.
+// The food log.
 import { describe, expect, it } from "vitest";
 
 import {

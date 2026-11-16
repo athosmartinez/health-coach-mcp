@@ -1,4 +1,4 @@
-// Ports of internal/metrics/stats_test.go, quality_test.go and readiness_test.go.
+// Baselines, quality flags and the readiness rule.
 import { describe, expect, it } from "vitest";
 
 import { type LocalDate, addDays } from "../src/coach/date";

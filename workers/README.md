@@ -1,29 +1,29 @@
 # health-coach-mcp (Cloudflare Workers)
 
-Remote MCP server for the health coach. The Go server at the repo root stays the contract. This Worker serves Streamable HTTP at `/mcp`, protected by OAuth 2.1, so Claude and ChatGPT can add it as a custom connector. It is single-user: only one Google account (`ALLOWED_GOOGLE_EMAIL`) can sign in. A public home page at `/` and a privacy policy at `/privacy` are served without sign-in, for the Google OAuth consent screen.
+Remote MCP server for the health coach. It serves Streamable HTTP at `/mcp`, protected by OAuth 2.1, so Claude, ChatGPT and other MCP clients can add it as a custom connector. It is single-user: only one Google account (`ALLOWED_GOOGLE_EMAIL`) can sign in. A public home page at `/` and a privacy policy at `/privacy` are served without sign-in, for the Google OAuth consent screen. The project overview is the root `README.md`.
 
 ## Tools, prompts and the resource
 
 - `server_info`: the server name, version and transport.
 - `google_account_status`: the linked account, its granted and missing Google Health scopes, and whether its access still works; never a token.
-- The 11 coach memory tools of the Go server (`docs/CAPABILITY.md` §4.2):
+- The 11 coach memory tools (`docs/CAPABILITY.md` §4.2):
   `profile_get`, `profile_update`, `targets_set`, `health_item_upsert`, `health_items_list`, `labs_record`, `labs_query`, `preference_set`, `preferences_get`, `note_add`, `notes_search`.
-- The 5 coach tools of the Go server (`docs/CAPABILITY.md` §4.1). They read the Google Health API and never write to it:
+- The 5 coach tools (`docs/CAPABILITY.md` §4.1). They read the Google Health API:
   - `morning_briefing`: last night's sleep, HRV and resting heart rate against the 28 days before, a readiness level, and yesterday's load.
   - `workout_review`: the sessions of a day (or one session by `exercise_id`), the week's sessions against the target, and the night after. A session this server logged includes `entry_id`, the id `exercise_log_delete` accepts.
   - `nutrition_day`: the food log of a day, per nutrient and per meal, against the targets in force and the calories burned. An item this server logged includes `entry_id`, the id `nutrition_log_delete` accepts.
   - `weekly_report`: an ISO week against the week before and the 28 days before it, the adherence to the targets, and the week's decision notes.
   - `metric_series`: one metric per day or per week, at most 366 days and 180 points.
-- The 2 tools that write the food log. The Go server does not have them: it only reads Google Health. [Food log writes](#food-log-writes) has their rules.
+- The 2 tools that write the food log. [Food log writes](#food-log-writes) has their rules.
   - `nutrition_log_add`: logs one meal or food item in Google Health, with the calories and macros that the MCP client estimated (for example from a photo), and returns the id of the new entry.
   - `nutrition_log_delete`: deletes one entry, and only an entry that this server created. The id is the one `nutrition_log_add` returned, which `nutrition_day` also lists on the item.
-- The 2 tools that write the exercise log. The Go server does not have them either. [Exercise log writes](#exercise-log-writes) has their rules.
+- The 2 tools that write the exercise log. [Exercise log writes](#exercise-log-writes) has their rules.
   - `exercise_log_add`: logs one completed workout session in Google Health, for a workout that the band did not record, and returns the id of the new session. An activity that is not in the tool's list is logged as `OTHER`, under the name that was given.
   - `exercise_log_delete`: deletes one session, and only a session that this server created. The id is the one `exercise_log_add` returned, which `workout_review` also lists on the session.
-- The 4 MCP prompts of the Go server: `morning_briefing`, `nutrition_review`, `workout_review`, `weekly_report`. Each tells the model to call `profile_get` and its tool, with the guardrails inline. The optional day is parsed as a calendar date before it reaches the text.
-- The resource `coach://guardrails`: the coach guardrails of the Go server, byte for byte.
+- The 4 MCP prompts: `morning_briefing`, `nutrition_review`, `workout_review`, `weekly_report`. Each tells the model to call `profile_get` and its tool, with the guardrails inline. The optional day is parsed as a calendar date before it reaches the text.
+- The resource `coach://guardrails`: the coach guardrails, the text in `src/prompts/guardrails.ts`.
 
-The 17 tools of the Go server have the same names, descriptions, annotations, schemas, validation rules, limits, rounding, flags, reason codes and error codes here. The prompts and the resource have the same texts. [Differences from the Go server](#differences-from-the-go-server) lists what a client or an operator can still observe.
+Seventeen of the tools are in the frozen `tools/list` snapshot in `test/fixtures/go-tools-list.json`, and thirteen of them match it exactly (names, descriptions, annotations, schemas). The server lists 5 tools that snapshot does not have. Four tools in the snapshot differ on purpose: `server_info` adds `transport` to its output and has annotations, `nutrition_day` and `workout_review` add `entry_id` and sentences at the end of the description, and `weekly_report` adds one sentence about `overlaps_band_session`. [Frozen contract](#frozen-contract) says how the tests pin that. [Behavior notes](#behavior-notes) lists what a client or an operator can observe that is easy to miss.
 
 ### How a tool call runs
 
@@ -33,7 +33,7 @@ The 17 tools of the Go server have the same names, descriptions, annotations, sc
 4. Every tool goes through `register` (`src/tools/register.ts`). A tool error reaches the client as JSON `{code,message,hint}` in the text content, with `isError` and no `structuredContent`. Arguments that fail the input schema are `invalid_input`. An unexpected error is `internal_error`: its text is never sent or logged.
 5. One log line per call: `tool_call` with the tool name, `duration_ms`, `is_error` and `code`. Never arguments, results, error messages or stored values. An internal error also logs `tool_internal_error` with the tool name and the error's type names. The Google Health client logs a retry, a rejected token and a rejected request with the data type, the HTTP status and Google's status enum, and a write answer that it cannot use with the reason: never a request body, a response body or a token.
 
-The source layout mirrors the Go packages: `src/coach/` (local dates, tool errors, the envelope), `src/store/` (profile, targets, health items, preferences, labs, notes, the `daily_metrics` cache, the food entries and the workout sessions this server created), `src/googlehealth/` (the API client with its reads and its four writes, the shapes of the food log writes in `nutritionlog.ts` and of the exercise log writes in `exerciselog.ts`, the request budget, the access token of one request), `src/healthdata/` (records to daily values through the cache), `src/metrics/` (pure math), `src/tools/` (`register`, the schema builders, the memory tools, the coach tools, the two food log tools in `foodlog.ts`, the two exercise log tools in `exerciselog.ts`) and `src/prompts/`. The schema migrations and the Durable Object class are in `src/store.ts`.
+Source layout: `src/coach/` (local dates, tool errors, the envelope), `src/store/` (profile, targets, health items, preferences, labs, notes, the `daily_metrics` cache, the food entries and the workout sessions this server created), `src/googlehealth/` (the API client with its reads and its four writes, the shapes of the food log writes in `nutritionlog.ts` and of the exercise log writes in `exerciselog.ts`, the request budget, the access token of one request), `src/healthdata/` (records to daily values through the cache), `src/metrics/` (pure math), `src/tools/` (`register`, the schema builders, the memory tools, the coach tools, the two food log tools in `foodlog.ts`, the two exercise log tools in `exerciselog.ts`) and `src/prompts/`. The schema migrations and the Durable Object class are in `src/store.ts`.
 
 ## Google Health reads
 
@@ -47,25 +47,25 @@ The Workers Free plan allows 50 external subrequests per invocation. The design 
 - The coach tools of one MCP HTTP request take turns. The Google requests of a request run one after the other, and a later call finds in the cache what an earlier call fetched.
 - The turns are per MCP HTTP request. The object does not order two MCP HTTP requests: while one waits for Google, the object serves the other. Two requests at the same time each have their own budget and token answer (up to 49 external fetches each), can fetch the same window twice, and add their memory (see [Memory](#memory)). In the tests, two pairs of overlapping requests give the answers and the cache rows of the same requests in sequence. One queue for the whole object is not used: a request that stops while it holds the turn would block every later request.
 - A request that would pass the budget is not sent. The tool answers one of two errors:
-  - the call needs more pages or chunks than the budget has left: `invalid_input`, `the date range holds more <type> data than one call reads`, hint `use a shorter date range` (the Go client's own error for a range that is too large). When earlier tool calls of the same MCP HTTP request took units before this call started, the hint is `use a shorter date range, or send this call in a request of its own`: the same call can fit a budget of its own;
+  - the call needs more pages or chunks than the budget has left: `invalid_input`, `the date range holds more <type> data than one call reads`, hint `use a shorter date range`. When earlier tool calls of the same MCP HTTP request took units before this call started, the hint is `use a shorter date range, or send this call in a request of its own`: the same call can fit a budget of its own;
   - retries of a failing request used the budget up, or Google rejected the token of a request and no unit is left to send it again after the renewal: `upstream_unavailable`, as when the 4 attempts of a request run out. The rule: a page that was never tried is `invalid_input`; a request that was tried and cannot be sent again is `upstream_unavailable`.
 - A failing request is tried 4 times, with waits of about 1, 2 and 4 seconds (jittered; a `Retry-After` of up to 8 seconds is honored).
 
 ### Batching
 
-The Go server fetches each run of consecutive missing days with its own requests. Here a source fetches the missing days in as few requests as it can (`src/healthdata/plan.ts`):
+A source fetches the missing days in as few requests as it can (`src/healthdata/plan.ts`):
 
 - **Windows.** A long range is fetched in windows, oldest first: 63 nights for sleep and HRV (the most nights whose HRV samples fit one page), 90 days for the steps and zone-minutes rollups, 14 days for the total-calories rollup (the API's caps), 31 days for a list of the band's step records. The settled days of a finished window (up to today − 3) are written to the cache before the next window starts. So a call that ends with the budget error leaves its finished windows in the cache, and the same call again needs fewer requests.
 - **Merged runs.** The missing days of a window are fetched as one covering range. Days of that range that are already cached keep their cached value. A cache with holes never needs more requests than a cold cache.
-- **Narrow reads.** A tool reads only what its values need. `metric_series resting_hr` does not list sleep; `metric_series steps` reads only the steps rollup; `morning_briefing` does not read total calories; `weekly_report` and the food metrics read them only for the logged days without a kcal target, and only for the days the band was worn. One exception: when the narrow read of `nutrition_day` or `morning_briefing` has no value for its day and dropped an unreadable row, the tool reads the total it left out for that one day (the steps rollup, or the total-calories rollup: one more request). The Go server reads all three totals, and a day with any of them is a day without band data, not a missing day.
+- **Narrow reads.** A tool reads only what its values need. `metric_series resting_hr` does not list sleep; `metric_series steps` reads only the steps rollup; `morning_briefing` does not read total calories; `weekly_report` and the food metrics read them only for the logged days without a kcal target, and only for the days the band was worn. One exception: when the narrow read of `nutrition_day` or `morning_briefing` has no value for its day and dropped an unreadable row, the tool reads the total it left out for that one day (the steps rollup, or the total-calories rollup: one more request).
 - **The "band worn" check** lists the band's step records only for the days without a zone-minutes row.
-- **Never cached:** sessions, heart-rate samples, the food log, today and the 2 days before it (a day is cached when it is at most today − 3), and a day without band data (as in the Go server). A steps or total-calories row is cached only for a day whose zone-minutes value is known, so `metric_series steps` alone costs the same on every call until a zone-minutes read covers its days.
+- **Never cached:** sessions, heart-rate samples, the food log, today and the 2 days before it (a day is cached when it is at most today − 3), and a day without band data. A steps or total-calories row is cached only for a day whose zone-minutes value is known, so `metric_series steps` alone costs the same on every call until a zone-minutes read covers its days.
 
 ### Memory
 
 An isolate has 128 MB. The client never keeps the raw pages of a call (`src/googlehealth/client.ts`, `page.ts`):
 
-- one response is at most **16 MiB**, and the responses of one call (all its pages and rollup chunks) at most **32 MiB** (the Go limits are 32 and 64 MiB); over a limit is the budget error above, not retried;
+- one response is at most **16 MiB**, and the responses of one call (all its pages and rollup chunks) at most **32 MiB**; over a limit is the budget error above, not retried;
 - a page is read record by record, never as one parsed tree, and each record is reduced to the fields its caller needs before the next one is read;
 - a record longer than **1 MiB** (1,048,576 characters) is refused before it is parsed: the tool answers `upstream_unavailable`, `Google Health returned an unreadable <type> response`. A parsed record of 1 MiB holds at most about 350,000 values. The largest real records are a night with its stage list and a session: 1 MiB is four times a night of 8 hours with a sleep stage every 30 seconds (960 stages of about 250 characters);
 - a top-level field of a page other than the list and the page token is checked as JSON and never parsed: the client reads its name only. So a response that is small in bytes and holds millions of small values does not become millions of objects;
@@ -158,7 +158,7 @@ What the table shows:
 
 ## Food log writes
 
-Two tools write the food log of Google Health. `nutrition_log_add` creates one entry of the food log, and `nutrition_log_delete` deletes one entry that this server created. Two more tools write the exercise log, with the same design: see [Exercise log writes](#exercise-log-writes). The Go server has no write tool (`docs/CAPABILITY.md` R2: the Go server makes no write calls), so these tools are the Worker's own. They follow the contract of every tool: `defineTool` and `register`, the stable error codes, one `tool_call` log line.
+Two tools write the food log of Google Health. `nutrition_log_add` creates one entry of the food log, and `nutrition_log_delete` deletes one entry that this server created. Two more tools write the exercise log, with the same design: see [Exercise log writes](#exercise-log-writes). They follow the contract of every tool: `defineTool` and `register`, the stable error codes, one `tool_call` log line. `docs/CAPABILITY.md` R2 limits Google Health writes to these four tools.
 
 **The request shapes come from Google's documentation. No call to the real API has tested them.** [What the documentation does not settle](#what-the-documentation-does-not-settle) lists each open point and what the server does about it.
 
@@ -176,7 +176,7 @@ Two tools write the food log of Google Health. `nutrition_log_add` creates one e
 | `time` | optional local time, `HH:MM` on a 24-hour clock, in the coach's zone (`HCM_TZ`); now when left out; required with a `date` before today; never after now |
 
 - **The input is strict.** An unknown property, a wrong type or a value out of bounds is `invalid_input`, and nothing is sent. An optional input may be `null`; `date` and `time` may also be `""`. An error names the field and its bound, never the value.
-- **A schema error repeats nothing that the client sent.** The arguments of a write are its payload, and the text of the schema validator names an unknown property by its key and can quote a value: `{"name":"X","meal_type":"LUNCH","kcal":1,"<a food name>":true}` would put the food name in the error. So the two write tools word their schema errors themselves (`defineTool(definition, { echo: false })`, `plainProblem` in `src/tools/schema.ts`). The message names a property that the schema declares and the rule that failed (`kcal must be a number`, `meal_type must be one of BREAKFAST, LUNCH, DINNER, SNACK`), and an unknown property has one fixed text: `the arguments hold a property that the tool does not have`. The code, the hint (`check the tool's input schema and retry`) and the 500-byte cap are those of every schema error. The other tools keep the validator's text, as the Go server has it.
+- **A schema error repeats nothing that the client sent.** The arguments of a write are its payload, and the text of the schema validator names an unknown property by its key and can quote a value: `{"name":"X","meal_type":"LUNCH","kcal":1,"<a food name>":true}` would put the food name in the error. So the two write tools word their schema errors themselves (`defineTool(definition, { echo: false })`, `plainProblem` in `src/tools/schema.ts`). The message names a property that the schema declares and the rule that failed (`kcal must be a number`, `meal_type must be one of BREAKFAST, LUNCH, DINNER, SNACK`), and an unknown property has one fixed text: `the arguments hold a property that the tool does not have`. The code, the hint (`check the tool's input schema and retry`) and the 500-byte cap are those of every schema error. The other tools keep the validator's text.
 - **The bounds** are the ones past which the food reads reject a value of an item (`MAX_ITEM_KCAL` and `MAX_ITEM_GRAMS` in `src/healthdata/nutrition.ts`). A single food item cannot pass them. A value that the tool accepts is a value that `nutrition_day` keeps, and a name that the tool accepts is the name that `nutrition_day` shows: see the next point. They are far inside the range Google documents for kcal and for grams, `[0, 100000]`.
 - **The name.** Every food name goes through one filter when it is read (`clean` in `src/healthdata/decode.ts`): the filter drops control characters, format characters, line and paragraph separators, U+FFFD and a surrogate without its pair, and it cuts the name at 64 characters. The tool accepts only a name that this filter keeps unchanged. Otherwise a name of zero-width characters would be logged and then shown as an empty name, a text direction override would reach Google as it is, and a name of 120 characters would be shown as its first 64. So an emoji sequence that is joined with a zero-width joiner is refused. The error names the rule and never the name.
 - **A DST change.** A time that the clocks skip is read as the first instant after the gap. A time that happens twice is read as the first of its two instants. This is the rule of the start of a day in `src/coach/date.ts` (`instantOf` next to `bounds`). The output shows the time that was logged.
@@ -241,7 +241,7 @@ Google's documentation does not prove that `batchDelete` refuses the name of a d
 
 ### The food reads count the entries of this server
 
-The food reads keep only the items of the Fitbit platform, as the Go server does. An item of another platform is left out: it raises `other_source_food_excluded`, and it makes the kcal delta of `nutrition_day` null. An entry written through the API has the platform `GOOGLE_WEB_API` (the answer of the guide's example). So without one more rule the coach would not count the meals it logged itself.
+The food reads keep only the items of the Fitbit platform. An item of another platform is left out: it raises `other_source_food_excluded`, and it makes the kcal delta of `nutrition_day` null. An entry written through the API has the platform `GOOGLE_WEB_API` (the answer of the guide's example). So without one more rule the coach would not count the meals it logged itself.
 
 - **The rule.** The nutrition source (`src/healthdata/nutrition.ts`) also keeps an item whose data point ID is in the table of the entries this server created. Every other item of another platform stays "other source", as before.
 - **By ID, not by name.** The ID is the last path part of the name. A create answers `users/<user id>/…`, and a list can name the user in another form.
@@ -249,7 +249,7 @@ The food reads keep only the items of the Fitbit platform, as the Go server does
 - **By account.** Only the entries of the Google account that is linked now count. After another account is linked, an entry of the account before is not its own: it reads as food of another source, as every item of another platform does.
 - **The id on the item.** `nutrition_day` sets `entry_id` on each listed item. It is the name the create answered, the name the table and `nutrition_log_delete` match exactly, when the item's data point id is one this server created for the linked account. A list may name the user as `me` or by an id; the two are the same entry when the data point id matches, and the tool returns the stored name either way. An item from the band or another app, and an entry of another linked account, has `entry_id` null. The names are read with the food log, before its Google request, so a relink during the request cannot pair the item with the new account's name. The lookup is one indexed read of the range plus the `has` check per listed item, no Google request.
 - **Every food read has the rule:** `nutrition_day`, `weekly_report` and the food metrics of `metric_series`. The source label of such an item is `GOOGLE_WEB_API`.
-- **This is a deliberate difference from the Go server**, which writes nothing to Google Health and so has no such rule. It is a commit of its own: `feat(workers): count the entries this server logged in the food reads`. Two later commits change only this rule and its tests: `test(workers): damage a stored entry name without naming the columns` and `fix(workers): count only the linked account's entries in the food reads`. To keep the Go rule, revert the three, the newest first. The two tools still add and delete, and an entry of this server then reads as food of another source.
+- **The entries this server logged are kept on purpose.** The commits are `feat(workers): count the entries this server logged in the food reads`, then `test(workers): damage a stored entry name without naming the columns` and `fix(workers): count only the linked account's entries in the food reads`. Reverting those three, the newest first, leaves an entry of this server reading as food of another source. The two tools still add and delete.
 
 ### The request budget of a write
 
@@ -294,7 +294,7 @@ Also not proven, because no real call was made: that Google accepts each field a
 
 ## Exercise log writes
 
-Two tools write the exercise log of Google Health. `exercise_log_add` creates one workout session, and `exercise_log_delete` deletes one session that this server created. They are for a workout that the band did not record. The Go server has neither (`docs/CAPABILITY.md` R2). The design is the one of the food log tools: the same client code, an ownership table of the same form, the same request budget and the same error contract. This section says what a session has of its own, and names the part of [Food log writes](#food-log-writes) that holds the rest.
+Two tools write the exercise log of Google Health. `exercise_log_add` creates one workout session, and `exercise_log_delete` deletes one session that this server created. They are for a workout that the band did not record. The design is the one of the food log tools: the same client code, an ownership table of the same form, the same request budget and the same error contract. This section says what a session has of its own, and names the part of [Food log writes](#food-log-writes) that holds the rest. `docs/CAPABILITY.md` R2 names these two tools next to the food log tools.
 
 **The request shapes come from Google's documentation. No call to the real API has tested them.** [What the documentation does not settle for a session](#what-the-documentation-does-not-settle-for-a-session) lists each open point and what the server does about it.
 
@@ -385,7 +385,7 @@ A tool reads the linked account from the store, and the client takes the access 
 
 ### The exercise reads count the sessions of this server
 
-The exercise reads keep only the sessions of the Fitbit platform, as the Go server does. A session of another platform is left out and raises `other_source_sessions_excluded`. A session written through the API has the platform `GOOGLE_WEB_API` (the answer of the guide's example). So without one more rule the coach would not count the workouts it logged itself.
+The exercise reads keep only the sessions of the Fitbit platform. A session of another platform is left out and raises `other_source_sessions_excluded`. A session written through the API has the platform `GOOGLE_WEB_API` (the answer of the guide's example). So without one more rule the coach would not count the workouts it logged itself.
 
 - **The rule.** The exercise source (`src/healthdata/exercise.ts`) also keeps a session whose data point ID is in the table of the sessions this server created. Every other session of another platform stays "other source", as before.
 - **By ID, by day and by account,** as for the food reads: the ID is the last path part of the name; the table is asked for the days of the read with one day of margin; only the entries of the Google account that is linked now count. The names are read before the list request, so a relink during the request cannot swap names.
@@ -395,7 +395,7 @@ The exercise reads keep only the sessions of the Fitbit platform, as the Go serv
 - **The flag on the result.** A result that shows week totals carries the flag in its own `quality_flags` when a session of the week carries it. `workout_review` has it when a session that `week_context` counted overlaps, also on a day other than the reviewed one. `weekly_report` has it when a session behind `adherence.sessions` overlaps. `morning_briefing` has it when a listed session of yesterday overlaps. The count and the minutes stay per record: the flag is the only sign that one workout may be in them twice.
 - **The id on the session.** `workout_review` sets `entry_id` on each listed session: the name the create answered, when this server created the session for the linked account, and null on every other session. `exercise_id` is unchanged: it is the name of the list, and it still selects one session.
 - **Every exercise read has the rule:** `workout_review`, `weekly_report` (the sessions of the week) and `morning_briefing` (yesterday's load, by type and never by name).
-- **This is a deliberate difference from the Go server.** It is a commit of its own: `feat(workers): read the workout sessions this server logged`. To keep the Go rule, revert it. The two tools still add and delete, and a session of this server then reads as a session of another source.
+- **The sessions this server logged are kept on purpose.** The commit is `feat(workers): read the workout sessions this server logged`. Reverting it leaves a session of this server reading as a session of another source. The two tools still add and delete.
 
 ### What the documentation does not settle for a session
 
@@ -497,102 +497,94 @@ The tests run in workerd through `@cloudflare/vitest-plugin`. They mock every Go
 - `test/subrequests.test.ts`: the table of [Measured subrequests](#measured-subrequests).
 - `test/coach-e2e.test.ts` and `test/memory-e2e.test.ts`: the detailed cases of the coach tools and of the memory tools over `/mcp`.
 
-### Parity with the Go server
+### Frozen contract
 
-`test/parity.test.ts` compares the 17 tools that the Go server lists with `test/fixtures/go-tools-list.json`, the `tools/list` result of the Go server. The Worker lists 5 tools more. The test pins them in a list of tools the Go server does not have (`exercise_log_add`, `exercise_log_delete`, `google_account_status`, `nutrition_log_add`, `nutrition_log_delete`), so a tool that is in neither list fails the test. Three tools of the Go server differ on purpose, and the test pins each difference: `nutrition_day` and `workout_review` have `entry_id` on each listed item or session, and sentences at the end of the description that say so (for `workout_review`, also what `overlaps_band_session` marks, on a session and on the result); `weekly_report` has one sentence at the end of its description, about `overlaps_band_session` on the result, and nothing else of it differs. `test/prompts.test.ts` compares the prompts and the resource with `test/fixtures/go-prompts.json`, the Go server's answers to `prompts/list`, each `prompts/get`, `resources/list` and `resources/read`. Generate the fixtures again after a tool definition, a prompt or the guardrails change in Go:
+`test/fixtures/go-tools-list.json` and `test/fixtures/go-prompts.json` are a frozen snapshot of the former Go server. They are the source of truth for the parity tests. Nothing in the repository regenerates them.
 
-```bash
-(cd .. && make build) && node scripts/go-tools-list.mjs && node scripts/go-prompts.mjs
-```
+`test/parity.test.ts` compares 16 tools (the 11 memory tools and the 5 coach tools) with `go-tools-list.json` field by field. For `server_info`, the 17th tool of the snapshot, it checks only that the server lists it: `server_info` differs on purpose (`transport` in its output, and annotations). The server lists 5 tools that snapshot does not have (`exercise_log_add`, `exercise_log_delete`, `google_account_status`, `nutrition_log_add`, `nutrition_log_delete`), and the test pins that list, so a tool that is in neither fails. Three of the 16 tools differ on purpose, and the test pins each difference: `nutrition_day` and `workout_review` have `entry_id` on each listed item or session, and sentences at the end of the description that say so (for `workout_review`, also what `overlaps_band_session` marks, on a session and on the result); `weekly_report` has one sentence at the end of its description, about `overlaps_band_session` on the result, and nothing else of it differs. `test/prompts.test.ts` compares the prompts and the resource with `go-prompts.json` (`prompts/list`, each `prompts/get`, `resources/list` and `resources/read`).
 
-The scripts run the Go binary with new, empty data and config folders. They never read the real health database or the Google credentials.
+A change to a tool definition, a prompt or the guardrails that should stay inside that contract has to update the fixture in the same change. The tests read only the committed fixtures.
 
-The parity tests read only the committed fixtures, so they cannot see a definition that changed in Go. This check does: it asks the Go binary again, compares the answers with the fixtures, writes nothing, and exits 1 with the names of what differs.
+## Behavior notes
 
-```bash
-(cd .. && make build) && npm run check:go-fixture
-```
-
-## Differences from the Go server
-
-What a client or an operator can observe. Differences that are only internal (types, the place of a helper) are not listed.
+What a client or an operator can observe.
 
 Coach memory and the server:
 
-- **`preference_set` does not keep a value byte for byte.** The value arrives parsed, so it is stored as `JSON.stringify` writes it: `1.0` becomes `1`, insignificant white space and escapes go away, and integer-like object keys move first. The 2,048-byte limit is measured as in Go, on the text as Go's JSON encoder writes it: `<`, `>`, `&`, U+2028 and U+2029 count 6 bytes each, although they are stored unescaped. As in Go, an integer beyond 2^53 loses precision.
-- **Timestamps have millisecond precision.** They are stored with the Go store's fixed-width format (9 fractional digits) and returned as RFC 3339 with the trailing zeros trimmed, as Go writes a time.
-- **The text of a schema error differs.** Both servers answer `invalid_input` with the hint `check the tool's input schema and retry`, and both cap the message at 500 bytes. The message text comes from each SDK's validator. A date that matches the pattern but is not a real day (`2026-02-30`) is reported by its path, without the value. An `exercise_id` longer than 256 characters is this `invalid_input` too; the Go SDK answers its own error text.
+- **`preference_set` does not keep a value byte for byte.** The value arrives parsed, so it is stored as `JSON.stringify` writes it: `1.0` becomes `1`, insignificant white space and escapes go away, and integer-like object keys move first. The 2,048-byte limit counts `<`, `>`, `&`, U+2028 and U+2029 as 6 bytes each (`goJsonLength` in `src/coach/text.ts`), although they are stored unescaped. An integer beyond 2^53 loses precision.
+- **Timestamps have millisecond precision.** They are stored with a fixed-width format (9 fractional digits) and returned as RFC 3339 with the trailing zeros trimmed.
+- **A schema error is `invalid_input`** with the hint `check the tool's input schema and retry`, and the message is capped at 500 bytes. The message text comes from the SDK's validator. A date that matches the pattern but is not a real day (`2026-02-30`) is reported by its path, without the value. An `exercise_id` longer than 256 characters is this `invalid_input` too.
 - **Tool results are checked against the output schema by `register`**, not by the MCP SDK. A result that does not match, or that holds NaN or Infinity, is `internal_error`.
-- **A bad `HCM_TZ` does not stop the server.** The Go server refuses to start. A Worker has no start: every tool that needs the zone answers `internal_error` and the log has `config_error` with the variable name. Zone names are checked by the runtime's `Intl`, which ignores case.
-- **A call to an unknown tool is a protocol error and writes no `tool_call` line.** The Go server logs it as `protocol_error`.
-- **`arguments` that is not an object is a protocol error.** For `"arguments": []`, a string, a number or `null`, the MCP SDK answers JSON-RPC error `-32602` before `register` runs, with no `tool_call` line. The Go server answers `invalid_input` in a tool result. The error text does not repeat the value.
-- **A schema newer than the code is not refused.** The Go store refuses a database migrated by a newer binary; the migration runner here applies only what is missing.
-- **`server_info` also returns `transport`** and has annotations; it existed before the memory tools.
-- The quoting of names in error messages (`JSON.stringify`) follows JavaScript, which differs from Go's `%q` only for control characters and a few non-ASCII characters. Lowercasing and uppercasing follow Go's `strings.ToLower` and `ToUpper` code point by code point (`src/coach/text.ts`, `src/metrics/quality.ts`); the Unicode tables are the runtime's, not Go's.
+- **A bad `HCM_TZ` does not stop the process.** A Worker has no start: every tool that needs the zone answers `internal_error` and the log has `config_error` with the variable name. Zone names are checked by the runtime's `Intl`, which ignores case.
+- **A call to an unknown tool is a protocol error and writes no `tool_call` line.**
+- **`arguments` that is not an object is a protocol error.** For `"arguments": []`, a string, a number or `null`, the MCP SDK answers JSON-RPC error `-32602` before `register` runs, with no `tool_call` line. The error text does not repeat the value.
+- **A schema newer than the code is not refused.** The migration runner applies only what is missing.
+- **`server_info` returns `name`, `version` and `transport`**, and has annotations.
+- Names in error messages are quoted with `JSON.stringify`. Lowercasing and uppercasing follow code point by code point (`src/coach/text.ts`, `src/metrics/quality.ts`); the Unicode tables are the runtime's.
 
 Error texts and hints of the Google Health side:
 
-- **Hints name the reconnect step.** `auth_expired` has the hint `Disconnect and reconnect this connector in the MCP client to sign in with Google again.`; `scope_missing` adds `Allow every permission, and check that the Google Health API is enabled in the Cloud project.` The Go server names its CLI command `health-coach-mcp auth login`.
-- **A token renewal that Google refuses** is `auth_expired`, `Google rejected the token renewal`, with the hint `Check the server's Google OAuth client settings.` and the reconnect step. The Go server adds Google's error code and the HTTP status to the message, and names `client_secret.json`.
-- **A token endpoint that is down has one message**, `Google's token service is unavailable`, also for an HTTP 200 answer without a usable token. The Go server has three texts.
-- **A date error of a prompt has the JSON-RPC code `-32602`.** The Go server answers code `0` with the same message, `date must be a calendar date (YYYY-MM-DD)`. A prompt argument that is not text is refused by the MCP SDK with its own text.
-- **The echo of an unknown prompt name is cut at 500 bytes**, and its escapes follow `JSON.stringify`, not Go's `%q`.
-- **List and read results have no `ttlMs` and `cacheScope` keys.** The Go SDK adds `ttlMs: 0` and `cacheScope: "public"`.
+- **Hints name the reconnect step.** `auth_expired` has the hint `Disconnect and reconnect this connector in the MCP client to sign in with Google again.`; `scope_missing` adds `Allow every permission, and check that the Google Health API is enabled in the Cloud project.`
+- **A token renewal that Google refuses** is `auth_expired`, `Google rejected the token renewal`, with the hint `Check the server's Google OAuth client settings.` and the reconnect step.
+- **A token endpoint that is down has one message**, `Google's token service is unavailable`, also for an HTTP 200 answer without a usable token.
+- **A date error of a prompt has the JSON-RPC code `-32602`** and the message `date must be a calendar date (YYYY-MM-DD)`. A prompt argument that is not text is refused by the MCP SDK with its own text.
+- **The echo of an unknown prompt name is cut at 500 bytes**, and its escapes follow `JSON.stringify`.
+- **List and read results have no `ttlMs` and `cacheScope` keys.** The frozen prompt fixture still has them; the parity test strips those two keys before it compares.
 
-The request budget (the Go server has none):
+The request budget:
 
-- **The budget error.** A call that needs more than the 45 Google Health requests of its MCP HTTP request answers `invalid_input`, `the date range holds more <type> data than one call reads`, hint `use a shorter date range`. The Go server gives this error only at 200 pages or 64 MiB. Here it also comes at 16 MiB per response and 32 MiB per call, and the 32 MiB cover all the chunks of one rollup. In a request with several tool calls, a call that runs out of budget after earlier calls took units has the hint `use a shorter date range, or send this call in a request of its own`.
+- **The budget error.** A call that needs more than the 45 Google Health requests of its MCP HTTP request answers `invalid_input`, `the date range holds more <type> data than one call reads`, hint `use a shorter date range`. The same error comes at 16 MiB per response and 32 MiB per call, and the 32 MiB cover all the chunks of one rollup. In a request with several tool calls, a call that runs out of budget after earlier calls took units has the hint `use a shorter date range, or send this call in a request of its own`.
 - **Retries that use the budget up** are `upstream_unavailable`. So is a request that Google rejects for its token when the budget has no unit left to send it again.
-- **Every network error is retried.** The Go server fails fast on a DNS not-found and on a certificate error; `fetch` in workerd does not tell the kinds apart.
-- **`Retry-After` as a date is read only in the IMF-fixdate form.** The Go server also reads the two obsolete forms.
+- **Every network error is retried.** `fetch` in workerd does not separate a DNS failure from a certificate error.
+- **`Retry-After` as a date is read only in the IMF-fixdate form.**
 
 The token rules:
 
-- **One forced renewal per MCP HTTP request.** The Go server allows one per page. After it, a second `401` in the same request is `auth_expired`.
+- **One forced renewal per MCP HTTP request.** After it, a second `401` in the same request is `auth_expired`.
 - **The store is asked for a token at most twice per request.** A token that passes its expiry during a long request is not renewed by the clock: Google rejects it, and the forced renewal renews it. A failure of the token endpoint is asked once per request, whatever the request calls.
 - **`google_account_status` shares the token answer of its request**, so in a batch it reports the state at the first ask.
-- **The coach tool calls of one HTTP request run one after the other** and share the budget. The Go server runs calls at the same time. Two HTTP requests at the same time are not ordered here either: each has its own budget.
+- **The coach tool calls of one HTTP request run one after the other** and share the budget. Two HTTP requests at the same time are not ordered: each has its own budget.
 
 Effects of a narrow read:
 
-- **A narrow read serves a settled day from its own cached rows.** The Go server serves a cached activity day only when its steps, zone-minutes and total-calories rows are all there, so it reads the day again when one of the three totals is missing. Example: a settled day with a zone-minutes row and no steps row is served from the cache by `metric_series azm`; the Go server reads that day again on every call. So a total of such a day that changes at Google after the day settled shows in the Go server, and not here. The Go rule is not kept: a tool that reads one total writes one total, so it would never find a cached day, and `metric_series total_calories` over 366 days would cost 45 requests on every call.
-- **`unreadable_records` counts only the data that was read.** For example `metric_series resting_hr` does not see an unreadable sleep record, `morning_briefing` does not see an unreadable total-calories row of yesterday or a body-fat reading, and `metric_series total_calories` does not see a total-calories row of a day without the band. The Go server reads every value. When such a row is the only activity data of the day, `nutrition_day` (an unreadable steps row) and `morning_briefing` (an unreadable total-calories row) answer `band_not_worn` without `unreadable_records`; the Go server answers `unreadable_records` without `band_not_worn`.
-- **A worn day without a zone-minutes row reads as 0 minutes also when an unreadable steps or total-calories row is in the same run** and the tool did not read that rollup. The Go server gives no value for that day.
-- **`sources` of `metric_series resting_hr`** holds the labels of the resting heart rate records only. The Go server adds the labels of the sleep records.
-- **`metric_series total_calories` gives `band_not_worn` for every day without band data**, also a day without any activity data. The flag `band_not_worn` is then set, and a week point counts the day in `days_left_out`. The Go server gives such a day `null` without a reason. The value of every point is the same.
+- **A narrow read serves a settled day from its own cached rows.** A tool that reads one total writes one total. Example: a settled day with a zone-minutes row and no steps row is served from the cache by `metric_series azm`. A total of such a day that changes at Google after the day settled stays at the cached value until something else rewrites that row. Reading every activity total on every call would mean `metric_series total_calories` over 366 days costs 45 requests every time.
+- **`unreadable_records` counts only the data that was read.** For example `metric_series resting_hr` does not see an unreadable sleep record, `morning_briefing` does not see an unreadable total-calories row of yesterday or a body-fat reading, and `metric_series total_calories` does not see a total-calories row of a day without the band. When such a row is the only activity data of the day, `nutrition_day` (an unreadable steps row) and `morning_briefing` (an unreadable total-calories row) answer `band_not_worn` without `unreadable_records`.
+- **A worn day without a zone-minutes row reads as 0 minutes also when an unreadable steps or total-calories row is in the same run** and the tool did not read that rollup.
+- **`sources` of `metric_series resting_hr`** holds the labels of the resting heart rate records only.
+- **`metric_series total_calories` gives `band_not_worn` for every day without band data**, also a day without any activity data. The flag `band_not_worn` is then set, and a week point counts the day in `days_left_out`.
 
 Output forms:
 
-- **Session times are written in the coach's zone** (`2026-10-14T19:00:00-03:00`), as night and food times are. The Go server writes a session time as the record carried it (`…Z` for the API's UTC instants). The instant is the same.
-- **`nutrition_day` items include `entry_id`.** The Go server's items do not. It is the stored name of an entry this server created for the linked account, or null.
-- **`workout_review` sessions include `entry_id`.** The Go server's sessions do not. It is the stored name of a session this server created for the linked account, or null. The description has more sentences at its end: what a logged session looks like, and what `overlaps_band_session` marks on a session and on the result.
-- **A session can carry the flag `overlaps_band_session`, and so can a result with week totals.** `workout_review`, `weekly_report` and `morning_briefing` raise it in `quality_flags`. The description of `weekly_report` has one sentence more at its end, which says what the flag marks. The Go server has no such flag: it logs no session. See [The exercise reads count the sessions of this server](#the-exercise-reads-count-the-sessions-of-this-server).
-- **A rounded `-0` is written as `0`.** Go's JSON encoder writes `-0`.
-- **Key order.** `active_min_by_type` keeps the order of the sessions, and `days_left_out` the order in which the reasons first appear. The Go server writes map keys sorted. A JSON object has no order.
-- **Sessions with the same start keep the API's order.** Go's sort is not stable.
+- **Session times are written in the coach's zone** (`2026-10-14T19:00:00-03:00`), as night and food times are.
+- **`nutrition_day` items include `entry_id`.** It is the stored name of an entry this server created for the linked account, or null.
+- **`workout_review` sessions include `entry_id`.** It is the stored name of a session this server created for the linked account, or null. The description says what a logged session looks like, and what `overlaps_band_session` marks on a session and on the result.
+- **A session can carry the flag `overlaps_band_session`, and so can a result with week totals.** `workout_review`, `weekly_report` and `morning_briefing` raise it in `quality_flags`. The description of `weekly_report` says what the flag marks. See [The exercise reads count the sessions of this server](#the-exercise-reads-count-the-sessions-of-this-server).
+- **A rounded `-0` is written as `0`.**
+- **Key order.** `active_min_by_type` keeps the order of the sessions, and `days_left_out` the order in which the reasons first appear. A JSON object has no order.
+- **Sessions with the same start keep the API's order.**
 
 Decoding of Google Health records:
 
-- **Key names match exactly.** Go's decoder also matches without regard to case.
-- **A repeated key keeps the last value**, and a page that holds its list key twice is refused. Go decodes both values, and keeps the last list.
-- **A whole number written as `440.0` or `4.4e2` is accepted** where Go refuses it.
-- **Time fractions finer than a millisecond are cut, never rounded up:** an instant stays in its second and on its local day, as in the Go server. An output shows milliseconds. Inside one millisecond, two instants keep their order down to about a microsecond; the Go server keeps nanoseconds.
+- **Key names match exactly.**
+- **A repeated key keeps the last value**, and a page that holds its list key twice is refused.
+- **A whole number written as `440.0` or `4.4e2` is accepted.**
+- **Time fractions finer than a millisecond are cut, never rounded up:** an instant stays in its second and on its local day. An output shows milliseconds. Inside one millisecond, two instants keep their order down to about a microsecond.
 - **A record that is not JSON makes its whole page unreadable** (`upstream_unavailable`). It cannot reach a parser as one skipped record.
-- **A record longer than 1 MiB makes its whole page unreadable** (`upstream_unavailable`). The Go server has only its byte limits per response and per call.
-- **A page field that the client does not read may nest at most 512 levels.** It is checked as JSON without being parsed, and a deeper one makes the page unreadable. Go's decoder allows deeper nesting.
+- **A record longer than 1 MiB makes its whole page unreadable** (`upstream_unavailable`).
+- **A page field that the client does not read may nest at most 512 levels.** It is checked as JSON without being parsed, and a deeper one makes the page unreadable.
 
-Writes to Google Health (the Go server has none):
+Writes to Google Health:
 
-- **Two tools write the food log, and two write the exercise log.** `nutrition_log_add`, `nutrition_log_delete`, `exercise_log_add` and `exercise_log_delete` exist only here; the Go server is read-only on Google Health. They are the only tools with `openWorldHint: true`. See [Food log writes](#food-log-writes) and [Exercise log writes](#exercise-log-writes).
-- **The Google Health client is not read-only.** Next to the reads of the Go client, it sends four writes and no other: for the data type `nutrition-log` and for the data type `exercise`, the create of one data point and the delete of data points by name.
-- **The sign-in asks for two scopes more** than the Go server's: `googlehealth.nutrition.writeonly` and `googlehealth.activity_and_fitness.writeonly`.
-- **The store has two tables that the Go store does not have:** `nutrition_entries` (migration 5) and `exercise_entries` (migration 6), the entries this server created.
-- **The exercise reads keep the sessions this server created**, although their platform is `GOOGLE_WEB_API` and not Fitbit. The Go server leaves out every session of another platform. A session of another platform that this server did not create is left out here too. See [The exercise reads count the sessions of this server](#the-exercise-reads-count-the-sessions-of-this-server), which also says how to take the rule out.
-- **The food reads keep the entries this server created**, although their platform is `GOOGLE_WEB_API` and not Fitbit. The Go server leaves out every item of another platform. An item of another platform that this server did not create is left out here too. See [The food reads count the entries of this server](#the-food-reads-count-the-entries-of-this-server), which also says how to take the rule out.
+- **Two tools write the food log, and two write the exercise log.** `nutrition_log_add`, `nutrition_log_delete`, `exercise_log_add` and `exercise_log_delete` are the only tools with `openWorldHint: true`. See [Food log writes](#food-log-writes) and [Exercise log writes](#exercise-log-writes).
+- **The Google Health client sends four writes and no other:** for the data type `nutrition-log` and for the data type `exercise`, the create of one data point and the delete of data points by name.
+- **The sign-in asks for two write scopes:** `googlehealth.nutrition.writeonly` and `googlehealth.activity_and_fitness.writeonly`, next to the four read scopes.
+- **The store has `nutrition_entries`** (migration 5) **and `exercise_entries`** (migration 6), the entries this server created.
+- **The exercise reads keep the sessions this server created**, although their platform is `GOOGLE_WEB_API` and not Fitbit. A session of another platform that this server did not create is left out. See [The exercise reads count the sessions of this server](#the-exercise-reads-count-the-sessions-of-this-server).
+- **The food reads keep the entries this server created**, although their platform is `GOOGLE_WEB_API` and not Fitbit. An item of another platform that this server did not create is left out. See [The food reads count the entries of this server](#the-food-reads-count-the-entries-of-this-server).
 
 Logs:
 
-- **Log lines are `console.*(message, {fields})`** with the Go messages and field names. `wait_ms` is a number (Go logs a duration as `wait`). A network error logs only the type names of its cause. `from` and `to` of an "unreadable …" line are the range of the Worker's own request, which can be wider than the Go server's run.
+- **Log lines are `console.*(message, {fields})`.** `wait_ms` is a number. A network error logs only the type names of its cause. `from` and `to` of an "unreadable …" line are the range of this server's own request.
 
 ## Workers Free plan
 
@@ -600,7 +592,7 @@ Logs:
 - **Subrequests: 50 per invocation.** See [The request budget](#the-request-budget) and [Measured subrequests](#measured-subrequests): the highest measured count of one MCP HTTP request is 49.
 - **Google Health rate limit: 300 requests per minute per user.** One MCP HTTP request sends at most 45, one after the other; requests at the same time send at most 45 each. Over the limit Google answers 429, which is retried.
 - **Rows written: 100,000 per day** for SQLite in Durable Objects. A note also writes rows to its full-text index. The `daily_metrics` cache writes up to 15 values per day when the day settles. Each value counts 3 rows written: its row, its primary key entry and its entry in the index `(metric, date)`. A cold year is about 16,500 rows written, once. An entry that `nutrition_log_add` or `exercise_log_add` creates counts 3 rows written too (its row, its primary key entry and its entry in the index of the day), and the check of a delete reads 1 row. An exercise read lists the logged sessions of its days first: one indexed read, which reads the rows of those days only.
-- **Rows read: 5 million per day** for SQLite in Durable Objects. Each write to the coach memory counts its table first (`SELECT COUNT(*)`), as the Go store does, to enforce the caps. A count scans the table: `note_add` can read up to 50,000 rows, `labs_record` up to 20,000, a new item in `health_item_upsert` up to 500 and a new key in `preference_set` up to 200. If a scanned row counts as a row read (the pricing page does not say how a count is billed), about 100 `note_add` calls in a day use the whole quota once the notes table is full. A new store is far from that. The coach tools read the `daily_metrics` cache one metric at a time, through the index `(metric, date)`: one metric over N cached days reads N + 1 rows, not the rows of all 15 metrics of those days. The largest read is the recovery of 366 days, 10 metrics: 3,670 rows. The row counts of the cache are the ones the local runtime reports (`rowsRead`, `rowsWritten`); a deploy has not confirmed them.
+- **Rows read: 5 million per day** for SQLite in Durable Objects. Each write to the coach memory counts its table first (`SELECT COUNT(*)`), to enforce the caps. A count scans the table: `note_add` can read up to 50,000 rows, `labs_record` up to 20,000, a new item in `health_item_upsert` up to 500 and a new key in `preference_set` up to 200. If a scanned row counts as a row read (the pricing page does not say how a count is billed), about 100 `note_add` calls in a day use the whole quota once the notes table is full. A new store is far from that. The coach tools read the `daily_metrics` cache one metric at a time, through the index `(metric, date)`: one metric over N cached days reads N + 1 rows, not the rows of all 15 metrics of those days. The largest read is the recovery of 366 days, 10 metrics: 3,670 rows. The row counts of the cache are the ones the local runtime reports (`rowsRead`, `rowsWritten`); a deploy has not confirmed them.
 - **A statement binds at most 100 parameters and is at most 100 KB long** (SQLite in Durable Objects). The store binds at most 13 parameters, and writes a lab batch one row per statement.
 - **Bundle:** `wrangler deploy --dry-run` reports 1,210 KiB, 268 KiB with gzip.
 
@@ -612,7 +604,7 @@ This code is deployed on Cloudflare Workers (Free plan) and in daily use. The po
 - **Whether an object invocation has its own subrequest budget.** The design assumes that it has not: 50 for the whole request.
 - **Memory.** The 16 MiB and 32 MiB limits rest on an estimate of 0.7 to 1.0 kB per heart-rate sample, and the 1 MiB record limit on an estimate of about 250 characters per sleep stage. No real record was measured. The local workerd does not enforce 128 MB.
 - **Record volumes.** The table above uses synthetic volumes. A real 31-day list of the band's steps can have more than one page.
-- **The daily rollup page size.** The docs give a maximum page size of 90 (14 for total calories). The request keeps the Go shape and sends `pageSize: 10000`, which works for the Go server against the real API.
+- **The daily rollup page size.** The docs give a maximum page size of 90 (14 for total calories). The request sends `pageSize: 10000`.
 - **The time form of real exercise records.** The fixtures write UTC instants.
 
 How to measure after a deploy:

@@ -1,4 +1,4 @@
-// morning_briefing (Go: internal/tools/briefing.go, CAPABILITY §4.1).
+// morning_briefing (CAPABILITY §4.1).
 
 import type { LocalDate } from "../coach/date";
 import { ToolError } from "../coach/errors";

@@ -1,5 +1,4 @@
-// The coach-moment tools as the server registers them (Go: the RegisterX calls
-// of internal/server/server.go, CAPABILITY §4.1).
+// The coach-moment tools as the server registers them (CAPABILITY §4.1).
 //
 // Like the memory tools, their definitions and bodies run inside the
 // CoachStore Durable Object. Their bodies read Google Health through the
@@ -16,7 +15,7 @@ import { METRIC_SERIES } from "./series";
 import { WEEKLY_REPORT } from "./weekly";
 import { WORKOUT_REVIEW } from "./workout";
 
-/** The coach-moment tools, in the order the Go server registers them. */
+/** The coach-moment tools, in registration order. */
 const COACH: readonly CoachTool[] = [MORNING_BRIEFING, WORKOUT_REVIEW, NUTRITION_DAY, WEEKLY_REPORT, METRIC_SERIES];
 
 export const COACH_TOOLS: readonly Tool[] = COACH.map((one) => one.tool);

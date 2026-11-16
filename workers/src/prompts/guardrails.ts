@@ -1,11 +1,9 @@
-// The coach guardrails: a literal copy of the Go server's
-// internal/prompts/guardrails.md, which that server embeds from the file.
+// The coach guardrails, served as the coach://guardrails resource.
 //
 // A Worker bundle has no file to read at run time, so the text is a constant.
-// test/prompts.test.ts compares it, byte for byte, with what the Go server
-// serves (test/fixtures/go-prompts.json), and `npm run check:go-fixture` fails
-// when that fixture no longer equals the Go binary's answer. To change a rule,
-// change the Go file first, capture the fixture again, then copy the text here.
+// test/prompts.test.ts compares it, byte for byte, with the frozen snapshot in
+// test/fixtures/go-prompts.json, which is the source of truth for that
+// contract. To change a rule, change this constant and the fixture together.
 
 /** Names the guardrails resource. */
 export const GUARDRAILS_URI = "coach://guardrails";

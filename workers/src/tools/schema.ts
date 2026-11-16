@@ -1,7 +1,5 @@
-// JSON schemas of the tools (Go: internal/tools/schema.go). The Go server
-// infers them from its structs; the builders in `s` follow the same rules, one
-// per Go type, and a parity test compares the result with the Go server's
-// tools/list.
+// JSON schemas of the tools. The builders in `s` produce them, and a parity
+// test compares the result with the frozen tools/list fixture.
 
 import { DATE_PATTERN, parseDate } from "../coach/date";
 

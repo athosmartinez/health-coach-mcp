@@ -24,26 +24,26 @@ coverage and source, so any model gives consistent advice.
 | # | Rule |
 |---|---|
 | R1 | **Single-user.** One Google account, one store. No tenant/user_id in the schema. |
-| R2 | **Google Health writes are nutrition-log entries and exercise sessions, and only from the Worker.** The Go server makes no write calls to the API; its writes go only to the local store. The Worker reads Google Health and writes only two data types. Nutrition-log entries: `nutrition_log_add` creates one entry and returns `entry_id`, and `nutrition_log_delete` deletes only an entry this server created. `nutrition_day` exposes `entry_id` on an item this server logged for the linked account (the id `nutrition_log_delete` accepts), and null on any other item. Exercise sessions: `exercise_log_add` creates one completed workout session and returns `entry_id`, and `exercise_log_delete` deletes only a session this server created. `workout_review` exposes `entry_id` on a session this server logged for the linked account (the id `exercise_log_delete` accepts), and null on any other session. A logged session and a session of the band stay two records (I2): a logged session that overlaps a session of the band carries the flag `overlaps_band_session`. |
+| R2 | **Google Health writes are nutrition-log entries and exercise sessions.** The server reads Google Health and writes only two data types. Nutrition-log entries: `nutrition_log_add` creates one entry and returns `entry_id`, and `nutrition_log_delete` deletes only an entry this server created. `nutrition_day` exposes `entry_id` on an item this server logged for the linked account (the id `nutrition_log_delete` accepts), and null on any other item. Exercise sessions: `exercise_log_add` creates one completed workout session and returns `entry_id`, and `exercise_log_delete` deletes only a session this server created. `workout_review` exposes `entry_id` on a session this server logged for the linked account (the id `exercise_log_delete` accepts), and null on any other session. A logged session and a session of the band stay two records (I2): a logged session that overlaps a session of the band carries the flag `overlaps_band_session`. |
 | R3 | **The MCP doesn't diagnose or prescribe medication.** Out-of-range values come back flagged with `refer_to_doctor: true`; tool descriptions state the limit. |
 | R4 | **No health data in logs, git or test fixtures.** Logs record only tool, duration and status. Fixtures are synthetic. |
-| R5 | **stdout is reserved for JSON-RPC** in stdio mode. |
-| R6 | **HTTP without auth binds to loopback only.** Any non-loopback bind requires a bearer token (phase 2). |
+| R5 | **Logs never carry health data or tokens.** The server logs with `console` (tool name, duration, outcome). There is no stdio transport. |
+| R6 | **`/mcp` requires an OAuth access token.** `/` and `/privacy` are public. Only `ALLOWED_GOOGLE_EMAIL` may finish sign-in. |
 
 ### Invariants (data)
 | # | Invariant | Origin |
 |---|---|---|
 | I1 | Every aggregate metric returns `n_days` (coverage) and `confidence` (`low` < 7 days, `medium` 7–20, `high` ≥ 21 for 28d baselines). | 1 week of history today |
-| I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` or daily rollup (both merge overlaps; the daily rollup is one total per local day) or filter on the primary source (`Google Fitbit Air`). | Real data: steps arrive from Fitbit Air **and** `com.apple.health.*` |
+| I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` or daily rollup (both merge overlaps; the daily rollup is one total per local day) or filter on the primary source (`Google Fitbit Air`). | Steps can arrive from Fitbit Air **and** `com.apple.health.*` |
 | I3 | A missing day is `null`, never `0`. | ghealth behavior (presence-aware types) |
-| I4 | The "day" is the **local day** in the configured time zone (default `America/Sao_Paulo`); sleep belongs to the day it **ends**. | Timestamps arrive `-03:00`; sleep runs 23:00→09:24 |
+| I4 | The "day" is the **local day** in the configured time zone (default `America/Sao_Paulo`); sleep belongs to the day it **ends**. | Timestamps arrive `-03:00`; a night starts on one local day and ends on the next |
 | I5 | Units: kg, kcal, g, bpm, ms, min. Conversion happens in the MCP, not in the LLM. | `weightGrams`, `rootMeanSquareOfSuccessiveDifferencesMilliseconds` |
 | I6 | Targets (kcal, protein, weekly workouts) are **versioned** with `effective_from`; adherence uses the target in force on that day. | Targets will change during recomposition |
-| I7 | Suspicious data comes back with `quality_flags`, it isn't hidden or "fixed". E.g. average HR of 81 bpm in 60 min of jiu-jitsu → `low_hr_for_activity`. | Real data: Jiu-jitsu 60 min, avg HR 81 |
+| I7 | Suspicious data comes back with `quality_flags`, it isn't hidden or "fixed". E.g. average HR of 81 bpm in 60 min of jiu-jitsu → `low_hr_for_activity`. | A session can report an average HR far below what its activity type implies |
 
 ### Architecture preferences (changeable)
-- Go + official MCP SDK; SQLite via `modernc.org/sqlite`; Google Health client adapted from `ghealth`.
-- Fetch live from the API + **cache of closed daily aggregates** in SQLite (see §5.3).
+- TypeScript on Cloudflare Workers: MCP over Streamable HTTP, OAuth 2.1 (`workers-oauth-provider`), coach memory and the daily cache in a SQLite Durable Object (`CoachStore`), OAuth clients and grants in KV (`OAUTH_KV`). Google Health client adapted from `ghealth` (Apache-2.0, see `NOTICE`).
+- Fetch live from the API + **cache of closed daily aggregates** in that SQLite store (see §5.3).
 
 ## 3. Actors and Surfaces
 
@@ -53,8 +53,8 @@ coverage and source, so any model gives consistent advice.
 | The user via chat | MCP **prompts** | `/morning_briefing`, `/weekly_report` as ready-made shortcuts in any client |
 | Cron agent (phase 2) | Tools over HTTP | Proactive daily briefing and weekly report |
 | Chat bridge (phase 2) | Tools over HTTP | WhatsApp/Telegram |
-| Google Health API | Source | Read, plus the create and the delete of nutrition-log entries and of exercise sessions, from the Worker only (R2); OAuth 2.0 user |
-| Local SQLite | Store | Coach memory + cache |
+| Google Health API | Source | Read, plus the create and the delete of nutrition-log entries and of exercise sessions (R2); OAuth 2.0 user |
+| Durable Object SQLite (`CoachStore`) | Store | Coach memory, daily cache, the Google refresh token, and the entries this server created |
 
 ## 4. Interface Contract — Tools
 
@@ -69,8 +69,7 @@ Conventions for **every** tool:
   `upstream_unavailable`, `no_data`, `invalid_input`, `internal_error` (unexpected failure; the detail
   isn't exposed because it could contain health data). The error goes as JSON `{code, message, hint}` in the
   **text content**, with no `StructuredContent` (so as not to violate the tool's `outputSchema`).
-  `auth_expired` includes the re-login command. Arguments that fail the input schema are rejected by the
-  SDK itself before the handler runs (protocol error), not with `invalid_input`.
+  `auth_expired` tells the user to disconnect and reconnect the connector. Arguments that fail the input schema are `invalid_input`.
 - **Partial days:** today (and any day with incomplete coverage) comes back with `quality_flags: ["partial_day"]`;
   energy balance and adherence don't count partial days as failure.
 - Baselines: **7d** = last 7 closed days; **28d** = last 28 closed days, excluding the day being analyzed.
@@ -286,30 +285,22 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 - The cache is disposable: deleting `daily_metrics` doesn't lose anything (source of truth = API).
 
 ### 5.4 Retention and deletion
-- Data lives on your machine (phase 1). In phase 2 (cloud): disk encryption + backup encrypted with
-  your own key. The MVP doesn't delete memory; deletion comes with explicit tools (phase 2).
+- The shipped server keeps coach memory, the daily cache, the Google refresh token and the ids of entries it created in the `CoachStore` Durable Object. OAuth clients, grants and hashed MCP tokens are in KV. The Google refresh token is not in KV.
+- The original plan was a local database, then an encrypted cloud disk. The MVP doesn't delete memory; deletion comes with explicit tools.
 
 ## 6. Security and Policy
 
-- **OAuth:** own client in project `<your-gcp-project-id>`, 4 read-only `googlehealth.*`
-  scopes: the categories of the data types the coach reads (`activity_and_fitness`,
-  `health_metrics_and_measurements`, `sleep`, `nutrition`). Profile, settings, location, ECG and
-  irregular-rhythm scopes are not requested (2026-10-26; they were in the first sign-in). The Worker
-  requests those four read scopes plus two write scopes, and uses each write scope only for its two
-  tools: `googlehealth.nutrition.writeonly` for `nutrition_log_add` and `nutrition_log_delete`, and
-  `googlehealth.activity_and_fitness.writeonly` for `exercise_log_add` and `exercise_log_delete`. An
-  account that signed in before a write scope was requested gets it at the next sign-in. Token in
-  `~/.config/health-coach-mcp/` (0600), own login (Q2).
+- **OAuth:** a Web application client. The server requests `openid`, `email`, four read-only `googlehealth.*` scopes (`activity_and_fitness`, `health_metrics_and_measurements`, `sleep`, `nutrition`) and two write scopes. Profile, settings, location, ECG and irregular-rhythm scopes are not requested (2026-10-26; they were in the first sign-in). Each write scope is used only by its two tools: `googlehealth.nutrition.writeonly` for `nutrition_log_add` and `nutrition_log_delete`, and `googlehealth.activity_and_fitness.writeonly` for `exercise_log_add` and `exercise_log_delete`. An account that signed in before a write scope was requested gets it at the next sign-in. The Google refresh token lives in the `CoachStore` Durable Object, never in KV, logs or tool output.
 - **Refresh token in Testing mode expires in ~7 days** → detect `invalid_grant`, return
   `auth_expired` with instructions; evaluate publishing the app as "In production" unverified (Q5).
-- **HTTP (phase 2):** bearer token from an env var, TLS terminated in front, never public without auth (R6).
+- **HTTP:** `/mcp` requires the MCP access token from the OAuth flow (R6). TLS is the Worker's.
 - **Abuse paths:** prompt injection via food name / notes → the MCP returns data as data and
   never executes instructions from stored content; the guardrail resource tells the LLM so.
 - **Health data:** no values in logs (R4); errors don't echo payloads.
 
 ## 7. Non-Goals
 
-- Writing to Google Health beyond nutrition-log entries and exercise sessions. The Go server does not write to the API. The Worker writes only through `nutrition_log_add`, `nutrition_log_delete`, `exercise_log_add` and `exercise_log_delete`, and a delete removes only an entry this server created. Logging weight, or any type other than a nutrition-log entry or an exercise session, stays outside this server. So does changing a logged session (delete it and add it again), and logging heart rate, distance or pauses with a session.
+- Writing to Google Health beyond nutrition-log entries and exercise sessions. The server writes only through `nutrition_log_add`, `nutrition_log_delete`, `exercise_log_add` and `exercise_log_delete`, and a delete removes only an entry this server created. Logging weight, or any type other than a nutrition-log entry or an exercise session, stays outside this server. So does changing a logged session (delete it and add it again), and logging heart rate, distance or pauses with a session.
 - Multiple users, signup, billing.
 - Own UI/dashboard; WhatsApp channel and cron (phase 2, they consume the same tools).
 - Raw sensor series (1s HR, PPG, accelerometer) — not exposed.
@@ -322,7 +313,7 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 | # | Decision |
 |---|---|
 | Q1 | **Readiness:** `red` if HRV z < −1.5 **or** resting HR ≥ +5 bpm vs 28d **or** `asleep_min` < 360; `yellow` if HRV z < −0.5 **or** resting HR ≥ +3 **or** `asleep_min` < 420; otherwise `green`. A missing signal **doesn't count** (neither red nor green): it's left out and listed in `reasons` as `missing:<signal>`; with no signal at all → `level: unknown`. z-score only with ≥ 7 nights of baseline. `confidence: low` until 7 nights. Thresholds live in a single constant so they can be tuned. |
-| Q2 | **Token in its own directory** `~/.config/health-coach-mcp/` (0600), with its own login `health-coach-mcp auth login`. Independent from ghealth. |
+| Q2 | **Google sign-in is the MCP OAuth flow.** The refresh token is stored in the `CoachStore` Durable Object. The original decision was a Desktop-app token in `~/.config/health-coach-mcp/` with a CLI login; that path was removed with the Go server. |
 | Q3 | **Targets set by the user** (or a nutritionist) via `targets_set`. The coach can suggest, but only saves after explicit confirmation in chat. |
 | Q4 | **Week Monday–Sunday** (ISO). |
 
@@ -335,16 +326,6 @@ CREATE TABLE daily_metrics (                                 -- cache (5.3)
 
 ## 9. Handoff
 
-**Status: ready for direct implementation.** Q1–Q4 decided; Q5–Q7 have defaults that don't block.
+**Status: shipped as the Cloudflare Worker in `workers/`.** Q1–Q4 decided; Q5–Q7 have defaults that don't block.
 
-Suggested order (each step in `tdd-workflow`, with in-memory tool tests and synthetic fixtures):
-1. `internal/store` — migrations + memory tools (`profile_*`, `targets_set`, `health_item_*`,
-   `labs_*`, `preference_*`, `note_*`). Doesn't depend on the API → immediate value.
-2. `internal/googlehealth` — client + OAuth (adapted from `ghealth`, Apache-2.0 with NOTICE),
-   error mapping to stable `code`s.
-3. `internal/metrics` — baselines, deltas, z-score, EWMA, reconciliation, quality flags; pure
-   unit tests on fixtures.
-4. Coach-moment tools, in order: `morning_briefing` → `nutrition_day` → `workout_review` →
-   `weekly_report` → `metric_series`.
-5. MCP prompts + `coach://guardrails` resource.
-6. `verification-loop`: wire into Claude Code/Desktop and use it for real for 1 week.
+The original implementation order named Go packages. The code that runs is `workers/src/`: store and memory tools, the Google Health client, metrics, the coach-moment tools, the four write tools, the prompts and `coach://guardrails`.

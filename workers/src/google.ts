@@ -46,9 +46,8 @@ export function scopeName(scope: string): string {
 }
 
 /**
- * The Google Health scopes the coach needs. The four read-only ones match the
- * Go server (internal/googlehealth/auth.Scopes). The two write-only ones are
- * the Worker's own: nutrition.writeonly for the food log tools, and
+ * The Google Health scopes the coach needs: four read-only scopes, plus
+ * nutrition.writeonly for the food log tools and
  * activity_and_fitness.writeonly for the exercise log tools.
  */
 export const GOOGLE_HEALTH_SCOPES = [
@@ -67,17 +66,16 @@ const ID_TOKEN_ISSUERS = new Set(["accounts.google.com", "https://accounts.googl
 
 /**
  * What the person does when the Google link is missing, expired or revoked.
- * The Go server names its CLI login command here; a remote connector has none.
  */
 export const RECONNECT_HINT = "Disconnect and reconnect this connector in the MCP client to sign in with Google again.";
 
 /**
  * What the person checks when Google refuses the server's own token request
- * (a wrong client ID or secret). The Go server names its client_secret.json here.
+ * (a wrong client ID or secret).
  */
 export const OAUTH_CLIENT_HINT = "Check the server's Google OAuth client settings.";
 
-/** Same codes as the Go server's coach.ToolError for auth failures. */
+/** Stable codes for auth failures. */
 export type GoogleErrorCode = "auth_expired" | "upstream_unavailable" | "internal_error";
 
 export interface GoogleError {

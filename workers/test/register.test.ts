@@ -1,6 +1,5 @@
 /// <reference types="vite/client" />
-// Ports of internal/tools/register_test.go and guard_test.go, plus the
-// tool-call log and the error contract of internal/server/middleware.go.
+// Tool registration, the guardrail texts, the tool-call log and the error contract.
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

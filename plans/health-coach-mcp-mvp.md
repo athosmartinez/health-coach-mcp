@@ -1,7 +1,7 @@
 # Blueprint — health-coach-mcp MVP
 
 > Objective: implement `docs/CAPABILITY.md` (approved 2026-10-13) as a Go MCP server, in PR-sized steps.
-> Mode: **git + gh** (repo `athosmartinez/health-coach-mcp`, private, default branch `main`).
+> Mode: **git + gh** (repo `athosmartinez/health-coach-mcp`, default branch `main`; private when this plan was written).
 > Plan status: active · steps: 13 · max parallelism: 3 (after Step 1) · adversarial review: done (2026-10-13)
 
 ## How to execute a step (applies to every step)

@@ -582,7 +582,7 @@ describe("createExercise", () => {
 
   it("does not accept the name of an exercise data point as the answer of a food log create", async () => {
     const requests = fakeApi(() => created(POINT));
-    const error = await failure(testClient().client.createNutritionLog(FOOD));
+    const error = await failure(testClient().client.createNutritionLog(FOOD, ACCOUNT));
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health returned no usable id for the entry", hint: MAY_EXIST_HINT });
     expect(requests).toHaveLength(1);
     expect(warnings()).toEqual([["google health write answer not usable", { data_type: "nutrition-log", operation: "create", reason: "no_name" }]]);
@@ -686,11 +686,11 @@ describe("createExercise", () => {
     expect(requests).toHaveLength(1);
     expect(waits).toEqual([]);
     // The same answer for a food log write names the food log scope.
-    const food = await failure(client.createNutritionLog(FOOD));
+    const food = await failure(client.createNutritionLog(FOOD, ACCOUNT));
     expect(toWire(food)).toEqual({ code: "scope_missing", message: "Google Health denied the write of nutrition-log data", hint: FOOD_SCOPE_HINT });
     // And the delete of each data type has the hint of its own type.
     expect(toWire(await failure(client.deleteExercise("syn-point-9f3a", ACCOUNT)))).toEqual({ code: "scope_missing", message: "Google Health denied the write of exercise data", hint: EXERCISE_SCOPE_HINT });
-    expect(toWire(await failure(client.deleteNutritionLog("syn-point-9f3a")))).toEqual({ code: "scope_missing", message: "Google Health denied the write of nutrition-log data", hint: FOOD_SCOPE_HINT });
+    expect(toWire(await failure(client.deleteNutritionLog("syn-point-9f3a", ACCOUNT)))).toEqual({ code: "scope_missing", message: "Google Health denied the write of nutrition-log data", hint: FOOD_SCOPE_HINT });
     expectNoSecret(error);
   });
 
@@ -824,12 +824,14 @@ describe("a refusal of Google that repeats what the request sent", () => {
     expect(`${texts(error)} ${logged()}`.toLowerCase()).not.toContain(id.toLowerCase());
   });
 
-  it("the food log writes keep their message as it was", async () => {
-    const message = "Synthetic food with energy 100 was not accepted";
+  it("a food log create: the food name and the kcal value are taken out, and the meal type stays", async () => {
+    const message = 'food "Synthetic food" of meal LUNCH with energy 100 was not accepted';
     fakeApi(refusal(message));
-    const error = await failure(testClient().client.createNutritionLog(FOOD));
-    expect(rejectLine()).toBe(message);
-    expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${message}`);
+    const error = await failure(testClient().client.createNutritionLog(FOOD, ACCOUNT));
+    const kept = 'food " " of meal LUNCH with energy was not accepted';
+    expect(rejectLine()).toBe(kept);
+    expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${kept}`);
+    expect(`${texts(error)} ${logged()}`.toLowerCase()).not.toContain("synthetic food");
   });
 });
 
@@ -896,7 +898,7 @@ describe("deleteExercise", () => {
     expect(toWire(error)).toEqual({ code: "upstream_unavailable", message: "Google Health API is unavailable", hint: DELETE_AGAIN_HINT });
     expect(again).toHaveLength(MAX_ATTEMPTS);
     // The hint of a food log delete still names its own tool.
-    const food = await failure(testClient().client.deleteNutritionLog("syn-point-9f3a"));
+    const food = await failure(testClient().client.deleteNutritionLog("syn-point-9f3a", ACCOUNT));
     expect(toWire(food).hint).toBe("the entry may still exist; call nutrition_log_delete again in a few minutes (a repeated delete is safe)");
     expectNoSecret(error);
   });
@@ -982,19 +984,19 @@ describe("the Google account of an exercise write", () => {
     expectNoSecret(error);
   });
 
-  it("the food log writes and the reads name no account, and are not compared", async () => {
+  it("a food log write is not sent with a token that names no account, and a read is", async () => {
     const requests = fakeApi((_n, request) => {
       if (request.method === "GET") return json(200, {});
       return request.path === FOOD_DELETE_PATH ? deleted() : created(FOOD_POINT);
     });
     const tokens = new FakeTokens();
-    // A token source that says no account, as before the answer carried one.
     tokens.subs = [null];
     const { client } = testClient({}, tokens);
-    expect(await client.createNutritionLog(FOOD)).toBe(FOOD_POINT);
-    expect(await client.deleteNutritionLog("syn-point-9f3a")).toBe("deleted");
+    const createdError = await failure(client.createNutritionLog(FOOD, ACCOUNT));
+    const deletedError = await failure(client.deleteNutritionLog("syn-point-9f3a", ACCOUNT));
+    expect(toWire(createdError).message).toBe(`${CHANGED}: the entry was not sent`);
+    expect(toWire(deletedError).message).toBe(`${CHANGED}: the delete was not sent`);
     expect(await client.list("exercise", "2026-10-16", "2026-10-16", (record) => record)).toEqual([]);
-    expect(requests.map((request) => request.auth)).toEqual(["Bearer at-0", "Bearer at-0", "Bearer at-0"]);
-    expect(logged()).toBe("[]");
+    expect(requests.map((request) => request.method)).toEqual(["GET"]);
   });
 });

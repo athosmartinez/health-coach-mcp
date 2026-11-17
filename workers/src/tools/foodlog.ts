@@ -23,10 +23,17 @@ import { inputSchema, s } from "./schema";
 
 /** The part of the Google Health client the write tools use. */
 export interface FoodLogApi {
-  /** Creates one entry and returns the data point name Google gave it. Never sent again when its outcome is unknown. */
-  createNutritionLog(entry: NewFoodEntry): Promise<string>;
-  /** Deletes the entry with this data point ID. "gone": Google has no such entry. */
-  deleteNutritionLog(id: string): Promise<"deleted" | "gone">;
+  /**
+   * Creates one entry and returns the data point name Google gave it. Never sent again when its outcome is unknown.
+   * `account` is the linked account the entry will be recorded for, or undefined when none is linked: the create
+   * is sent only with a token of that account.
+   */
+  createNutritionLog(entry: NewFoodEntry, account: string | undefined): Promise<string>;
+  /**
+   * Deletes the entry with this data point ID. "gone": Google has no such entry.
+   * `account` is the linked account the entry belongs to: the delete is sent only with a token of that account.
+   */
+  deleteNutritionLog(id: string, account: string): Promise<"deleted" | "gone">;
 }
 
 /**
@@ -269,9 +276,11 @@ const NUTRITION_LOG_ADD = writeTool(
     if (carbs !== undefined) entry.carbGrams = carbs;
     if (fat !== undefined) entry.fatGrams = fat;
     // The entry will belong to the account that is linked now. Without a link
-    // the create answers auth_expired, and nothing is sent.
+    // the create answers auth_expired, and nothing is sent. The client sends
+    // the create only with a token of this account: the token answer of the
+    // MCP HTTP request can be older than the link.
     const owner = deps.entries.owner();
-    const entryId = await deps.api.createNutritionLog(entry);
+    const entryId = await deps.api.createNutritionLog(entry, owner);
 
     // Google holds the entry from here on. Without its row the server does
     // not own it: say so, instead of an error that reads as "nothing happened".
@@ -334,7 +343,8 @@ const NUTRITION_LOG_DELETE = writeTool(
     // would hide the step that makes the delete work. So the answer is the
     // one of a token request without a link, for every id, and no request is
     // sent. It says nothing about which entries exist.
-    if (deps.entries.owner() === undefined) throw notLinkedError();
+    const owner = deps.entries.owner();
+    if (owner === undefined) throw notLinkedError();
     // Only an entry of this server is deleted, and the check comes before any
     // request: Google's documentation does not prove that it would refuse the
     // delete of an entry another app wrote. An entry that was created for
@@ -348,7 +358,9 @@ const NUTRITION_LOG_DELETE = writeTool(
       );
     }
     // "gone" is the state the delete asks for: the row goes in both cases.
-    await deps.api.deleteNutritionLog(id);
+    // The entry is this account's own, so the delete goes out only with a
+    // token of this account.
+    await deps.api.deleteNutritionLog(id, owner);
     try {
       deps.entries.forget(entryId);
     } catch (cause) {

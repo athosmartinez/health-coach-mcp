@@ -310,6 +310,112 @@ describe("the food entries this server created, when a Google account is linked"
     expect(next).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: null }] }] } } });
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual(NO_ENTRY);
   });
+
+  // The tool reads the linked account from the store, and the client takes the
+  // token on its own. One MCP HTTP request keeps one token answer, so the two
+  // can belong to different accounts. A food write is sent only when they are
+  // the same account.
+  describe("a write whose token belongs to another account than the one the tool checked", () => {
+    const notSent = (what: string) => ({
+      ok: false,
+      error: {
+        code: "invalid_input",
+        message: `the linked Google account changed during this MCP request: ${what} was not sent`,
+        hint: "send this call in a request of its own",
+      },
+    });
+    const SECRETS = [OTHER_TOKEN, STORED_TOKEN, RENEWED_TOKEN, OTHER_SUB, OWNER_SUB, "other@example.com", "Feijoada", "431.5", "23.75"];
+
+    /** The other account signs in during the first Google Health request from now on. The mock runs inside the object, so it reaches the store through a stub of its own. */
+    function signInDuringTheNextRead(stub: DurableObjectStub<CoachStore>): void {
+      const id = stub.id.toString();
+      let done = false;
+      g.healthReply = async () => {
+        if (done) return undefined;
+        done = true;
+        await env.COACH_STORE.get(env.COACH_STORE.idFromString(id)).linkGoogleAccount(other());
+        return undefined;
+      };
+    }
+
+    it("does not create an entry, when the account changes during an earlier call of the same request", async () => {
+      const stub = await linkedStore();
+      signInDuringTheNextRead(stub);
+      // The read takes the token of the first account, and the request keeps it for the add.
+      const [listed, added] = await batch(stub, [
+        ["nutrition_day", {}],
+        ["nutrition_log_add", FOOD],
+      ]);
+      expect(listed?.ok).toBe(false);
+      expect(await linkedSub(stub)).toBe(OTHER_SUB);
+      expect(added).toEqual(notSent("the entry"));
+      const calls = g.takeExternal();
+      expect(calls["nutrition-log"] ?? 0).toBeGreaterThan(0);
+      expect(calls["create nutrition-log"] ?? 0).toBe(0);
+      expect(calls.token ?? 0).toBe(0);
+      expect(new Set(g.auths)).toEqual(new Set([`Bearer ${STORED_TOKEN}`]));
+      expect(g.google.createdPoints("nutrition-log")).toEqual([]);
+      expect(await owners(stub)).toEqual([]);
+      expect(g.logLines("warn")).toEqual([["google health write not sent: the linked account changed", { data_type: "nutrition-log", operation: "create" }]]);
+      for (const secret of SECRETS) expect(g.logged(), secret).not.toContain(secret);
+
+      g.auths = [];
+      const again = await objectTool(stub, "nutrition_log_add", FOOD);
+      if (!again.ok) throw new Error(JSON.stringify(again.error));
+      expect(g.auths).toEqual([`Bearer ${OTHER_TOKEN}`]);
+      expect(await owners(stub)).toEqual([{ sub: OTHER_SUB, name: again.output.entry_id }]);
+    });
+
+    it("does not delete an entry, when the account changes during an earlier call of the same request", async () => {
+      const stub = await linkedStore();
+      await stub.linkGoogleAccount(other());
+      const entryId = await entryOfTheFirstAccount(stub);
+      expect(await owners(stub)).toEqual([{ sub: OTHER_SUB, name: entryId }]);
+      await stub.linkGoogleAccount(link());
+      g.auths = [];
+      g.clearLogs();
+
+      signInDuringTheNextRead(stub);
+      const [listed, removed] = await batch(stub, [
+        ["nutrition_day", {}],
+        ["nutrition_log_delete", { entry_id: entryId }],
+      ]);
+      expect(listed?.ok).toBe(false);
+      expect(removed).toEqual(notSent("the delete"));
+      const calls = g.takeExternal();
+      expect(calls["delete nutrition-log"] ?? 0).toBe(0);
+      expect(new Set(g.auths)).toEqual(new Set([`Bearer ${STORED_TOKEN}`]));
+      expect(g.google.createdPoints("nutrition-log")).toHaveLength(1);
+      expect(await owners(stub)).toEqual([{ sub: OTHER_SUB, name: entryId }]);
+      for (const secret of SECRETS) expect(g.logged(), secret).not.toContain(secret);
+
+      g.auths = [];
+      expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual({ ok: true, output: { entry_id: entryId, deleted: true } });
+      expect(g.auths).toEqual([`Bearer ${OTHER_TOKEN}`]);
+    });
+
+    it("does not delete an entry with the token of an account that signs in while the token is renewed", async () => {
+      const stub = await linkedStore();
+      const entryId = await entryOfTheFirstAccount(stub);
+      await runInDurableObject(stub, (_instance, state) => {
+        state.storage.sql.exec("UPDATE google_account SET access_token_expires_at = 0");
+      });
+      const id = stub.id.toString();
+      g.tokenReply = async () => {
+        await env.COACH_STORE.get(env.COACH_STORE.idFromString(id)).linkGoogleAccount(other());
+        return newToken(RENEWED_TOKEN);
+      };
+      g.auths = [];
+      g.clearLogs();
+      expect(await objectTool(stub, "nutrition_log_delete", { entry_id: entryId })).toEqual(notSent("the delete"));
+      expect(await linkedSub(stub)).toBe(OTHER_SUB);
+      expect(g.takeExternal()).toEqual({ total: 1, token: 1 });
+      expect(g.auths).toEqual([]);
+      expect(g.google.createdPoints("nutrition-log")).toHaveLength(1);
+      expect(await owners(stub)).toEqual([{ sub: OWNER_SUB, name: entryId }]);
+      for (const secret of SECRETS) expect(g.logged(), secret).not.toContain(secret);
+    });
+  });
 });
 
 // A session that exercise_log_add created belongs to the Google account that

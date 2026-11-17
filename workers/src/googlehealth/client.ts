@@ -55,6 +55,7 @@ import {
   DELETE_PATH,
   MAX_WRITE_RESPONSE_BYTES,
   type NewFoodEntry,
+  callerTexts,
   createBody,
   deleteBody,
   pointId,
@@ -303,9 +304,19 @@ export class GoogleHealthClient {
    * renewal). When the outcome is unknown, the error says that the entry may
    * exist. A name is returned only when Google's answer holds one: none is
    * ever made up.
+   *
+   * `account` is the Google account the caller will record the entry for
+   * (undefined when none was linked). The create is sent only with a token of
+   * that account: the tool reads the account from the store and the client
+   * takes the token on its own, and one MCP HTTP request keeps one token
+   * answer, so the two can belong to different accounts after a sign-in.
    */
-  async createNutritionLog(entry: NewFoodEntry): Promise<string> {
-    return this.create("nutrition-log", CREATE_PATH, createBody(entry), pointId);
+  async createNutritionLog(entry: NewFoodEntry, account: string | undefined): Promise<string> {
+    const body = createBody(entry);
+    // An entry carries the food name the caller wrote. What Google repeats of
+    // it, or of a number the caller sent, is taken out of the message before
+    // the message reaches an error or a log.
+    return this.create("nutrition-log", CREATE_PATH, body, pointId, { account }, callerTexts(body));
   }
 
   /**
@@ -316,9 +327,14 @@ export class GoogleHealthClient {
    * there. The caller
    * decides which points may be deleted: Google's documentation does not prove
    * that it refuses the delete of a point another app wrote.
+   *
+   * `account` is the Google account whose entry the caller checked. The delete
+   * is sent only with a token of that account: a data point ID of one account
+   * must never be deleted with the token of another.
    */
-  async deleteNutritionLog(id: string): Promise<"deleted" | "gone"> {
-    return this.remove("nutrition-log", DELETE_PATH, deleteBody(id));
+  async deleteNutritionLog(id: string, account: string): Promise<"deleted" | "gone"> {
+    // The ID is an entry id: a refusal that repeats it must not carry it on.
+    return this.remove("nutrition-log", DELETE_PATH, deleteBody(id), { account }, [id]);
   }
 
   /**

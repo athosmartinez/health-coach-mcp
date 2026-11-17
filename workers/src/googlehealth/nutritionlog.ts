@@ -130,6 +130,24 @@ export function createBody(entry: NewFoodEntry): { nutritionLog: NutritionLogBod
 }
 
 /**
+ * The texts of a create body that the caller wrote, as the body carries them:
+ * the food name, and the calories and each macro as their JSON number text.
+ * Google's answer to a refused create can repeat them, and none may reach an
+ * error or a log line.
+ *
+ * The meal type and the times are not caller text: the server chose the meal
+ * type from its own list, and the times are the instant the tool computed.
+ */
+export function callerTexts(body: { nutritionLog: NutritionLogBody }): string[] {
+  const log = body.nutritionLog;
+  const texts = [log.foodDisplayName, JSON.stringify(log.energy.kcal)];
+  if (log.totalCarbohydrate !== undefined) texts.push(JSON.stringify(log.totalCarbohydrate.grams));
+  if (log.totalFat !== undefined) texts.push(JSON.stringify(log.totalFat.grams));
+  if (log.nutrients !== undefined) for (const item of log.nutrients) texts.push(JSON.stringify(item.quantity.grams));
+  return texts;
+}
+
+/**
  * The body of the delete request for one data point ID. The name is written
  * with `users/me`, the form of the documented example and of the request path:
  * the reference says that every name must share the parent of the path.

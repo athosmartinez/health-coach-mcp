@@ -11,12 +11,12 @@
 
 import type { McpServer } from "@modelcontextprotocol/server";
 
-import { type LocalDate, type Zone, addDays, dateOf, instantOf, today } from "../coach/date";
+import { type LocalDate, type Zone, addDays, dateOf, instantOf, parseDate, today } from "../coach/date";
 import { INTERNAL_ERROR, ToolError } from "../coach/errors";
 import { trimSpace } from "../coach/text";
 import { notLinkedError } from "../googlehealth/client";
 import { MAX_NOTES_CHARS as MAX_NOTES_SENT, MAX_SESSION_SECONDS, type NewExerciseSession, pointId } from "../googlehealth/exerciselog";
-import { MAX_NAME_LENGTH } from "../googlehealth/nutritionlog";
+import { MAX_BATCH_DELETE, MAX_NAME_LENGTH } from "../googlehealth/nutritionlog";
 import { MAX_SESSION_KCAL, allVisible } from "../healthdata";
 import { invalid } from "../store/db";
 import { ADDS, DELETES, type Entries, MAX_DAYS_BACK, MAX_NAME_CHARS, TIME_PATTERN } from "./foodlog";
@@ -38,6 +38,11 @@ export interface ExerciseLogApi {
    * goes out only with a token of that account.
    */
   deleteExercise(id: string, account: string): Promise<"deleted" | "gone">;
+  /**
+   * Deletes the sessions with these data point IDs in one request. "gone": Google has none of them.
+   * `account` is the linked account the sessions belong to.
+   */
+  deleteExercises(ids: readonly string[], account: string): Promise<"deleted" | "gone">;
 }
 
 /** What the exercise log tools need. */
@@ -440,33 +445,87 @@ const EXERCISE_LOG_ADD = writeTool(
 
 // --- exercise_log_delete ---
 
+const ONE_OR_A_DAY = "name the entry_id of one session, or the date whose sessions this server created";
+
+/** Deletes every session this server created on one day, in one batchDelete. Nothing is sent when the day has none. */
+async function deleteExerciseDay(deps: ExerciseLogDeps, day: LocalDate, owner: string): Promise<Record<string, unknown>> {
+  const names = deps.entries.onDay(day);
+  if (names.size === 0) {
+    throw new ToolError(
+      "no_data",
+      "this server created no entry on that day",
+      "it deletes only an entry that exercise_log_add created and that was not deleted yet",
+    );
+  }
+  // The reference allows up to 10,000 names in one batchDelete. Past that, nothing is sent.
+  if (names.size > MAX_BATCH_DELETE) {
+    throw new ToolError("invalid_input", "that day has more entries than one delete can send", "delete them by entry_id");
+  }
+  const ids = [...names.keys()].sort();
+  const outcome = await deps.api.deleteExercises(ids, owner);
+  // "gone" for one name proves that Google no longer has that point. For
+  // several names, the reference does not say whether Google removed the
+  // points it has or refused the whole request. So no row is removed: a row
+  // that is forgotten while Google still holds its point can never be deleted
+  // by this server again. A delete by entry_id settles each row on its own.
+  if (outcome === "gone" && ids.length > 1) {
+    throw new ToolError(
+      "invalid_input",
+      "Google Health did not find every entry of that day, and may have deleted none",
+      "delete each session by its entry_id, which workout_review lists",
+    );
+  }
+  try {
+    for (const stored of names.values()) deps.entries.forget(stored, owner);
+  } catch (cause) {
+    throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
+      cause,
+    });
+  }
+  return { date: day, deleted: true, deleted_count: ids.length };
+}
+
 const EXERCISE_LOG_DELETE = writeTool(
   {
     name: "exercise_log_delete",
     description:
       "Deletes one session of the user's Google Health exercise log, by the entry_id that exercise_log_add " +
       "returned or that workout_review lists on the session. It deletes only a session that this server created: " +
-      "any other id answers no_data, and nothing is sent to Google Health for it. A delete cannot be undone, so " +
-      "confirm it with the user first. " +
+      "any other id answers no_data, and nothing is sent to Google Health for it. With date and no entry_id, it " +
+      "deletes every session this server created on that day, in one request, and a day with none answers no_data " +
+      "with nothing sent. Send entry_id or date, not both. A delete cannot be undone, so confirm it with the user first. " +
       GUARDRAIL,
     annotations: DELETES,
     inputSchema: inputSchema(
       s.object({
-        entry_id: {
+        "entry_id?": {
           type: "string",
           description:
             "The entry_id that exercise_log_add returned, or that workout_review lists on the session " +
-            "(users/…/dataTypes/exercise/dataPoints/…)",
+            "(users/…/dataTypes/exercise/dataPoints/…). Omit it to delete every session of date.",
           maxLength: MAX_NAME_LENGTH,
         },
+        "date?": s.date("The local day whose sessions this server created are all deleted. Omit it to delete one entry_id."),
       }),
     ),
-    outputSchema: s.object({ entry_id: s.string(), deleted: s.boolean() }),
+    outputSchema: s.object({
+      "entry_id?": s.string("The session that was deleted, when entry_id was sent"),
+      "date?": s.string("The day whose sessions were deleted, when date was sent"),
+      deleted: s.boolean(),
+      "deleted_count?": s.number("How many sessions of that day were deleted"),
+    }),
   },
   async (deps, args) => {
     const entryId = str(args.entry_id);
-    const id = pointId(entryId);
-    if (id === undefined) {
+    const date = str(args.date);
+    if (entryId === "" && date === "") throw new ToolError("invalid_input", "send entry_id or date", ONE_OR_A_DAY);
+    if (entryId !== "" && date !== "") throw new ToolError("invalid_input", "send entry_id or date, not both", ONE_OR_A_DAY);
+    if (date !== "") {
+      if (parseDate(date) === undefined) throw new ToolError("invalid_input", "date is not a calendar day", "use a date, YYYY-MM-DD");
+      if (date > today(deps.now(), deps.zone)) throw new ToolError("invalid_input", "date is after today", "name a day up to today");
+    }
+    const id = entryId === "" ? undefined : pointId(entryId);
+    if (entryId !== "" && id === undefined) {
       throw new ToolError(
         "invalid_input",
         "entry_id is not the id of an exercise log entry",
@@ -476,10 +535,12 @@ const EXERCISE_LOG_DELETE = writeTool(
     // Without a linked account the store matches no entry, also not one that
     // this server created: "no entry with that id" would be false for it, and
     // would hide the step that makes the delete work. So the answer is the
-    // one of a token request without a link, for every id, and no request is
-    // sent. It says nothing about which entries exist.
+    // one of a token request without a link, for every id and every date, and
+    // no request is sent. It says nothing about which entries exist.
     const owner = deps.entries.owner();
     if (owner === undefined) throw notLinkedError();
+    if (date !== "") return deleteExerciseDay(deps, date, owner);
+    if (id === undefined) throw new ToolError("invalid_input", "send entry_id or date", ONE_OR_A_DAY);
     // Only a session of this server is deleted, and the check comes before
     // any request: Google's documentation does not prove that it would refuse
     // the delete of a session the band or another app wrote. A session that
@@ -497,7 +558,7 @@ const EXERCISE_LOG_DELETE = writeTool(
     // token of this account.
     await deps.api.deleteExercise(id, owner);
     try {
-      deps.entries.forget(entryId);
+      deps.entries.forget(entryId, owner);
     } catch (cause) {
       throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
         cause,

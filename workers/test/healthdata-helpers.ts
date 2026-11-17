@@ -272,7 +272,7 @@ export function foodRec(t: Date, options: FoodOptions = {}): Json {
 }
 
 const API = "https://health.googleapis.com";
-const PATH = /^\/v4\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints(:dailyRollUp|:batchDelete)?$/;
+const PATH = /^\/v4\/users\/me\/dataTypes\/([a-z0-9-]+)\/dataPoints(:dailyRollUp|:batchDelete)?$/;
 
 /** The user ID that the fake API writes in the name of a data point it creates. */
 export const FAKE_USER_ID = "1122334455";
@@ -326,7 +326,7 @@ export const EXERCISE_FIELDS: readonly string[] = [
 
 /** The display name the fake API writes for an exercise type other than OTHER, as Google writes one of its own. */
 export const generatedName = (exerciseType: string) => `Generated ${exerciseType.toLowerCase().replaceAll("_", " ")}`;
-const FILTER = /^([a-z_]+)\.([a-z_.]+) >= "([^"]+)" AND \1\.\2 < "([^"]+)"$/;
+const FILTER = /^([a-z0-9_]+)\.([a-z_.]+) >= "([^"]+)" AND \1\.\2 < "([^"]+)"$/;
 
 function dateText(date: Json | undefined): string {
   const pad = (n: unknown, width: number) => String(n ?? 0).padStart(width, "0");
@@ -348,6 +348,8 @@ function recordDay(dataType: string, record: Json | null): string {
       return local(record?.nutritionLog?.interval?.startTime);
     case "daily-resting-heart-rate":
       return dateText(record?.dailyRestingHeartRate?.date);
+    case "daily-vo2-max":
+      return dateText(record?.dailyVo2Max?.date);
     case "steps":
       return dateText(record?.steps?.interval?.civilStartTime?.date);
   }
@@ -682,6 +684,7 @@ export function newData(db: Db, options: DataOptions = {}): Source {
     body: (...args) => one().body(...args),
     exercises: (...args) => one().exercises(...args),
     nutrition: (...args) => one().nutrition(...args),
+    vo2: (...args) => one().vo2(...args),
   };
 }
 

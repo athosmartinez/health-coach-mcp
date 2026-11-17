@@ -21,6 +21,12 @@ export const CREATE_PATH = `/users/me/dataTypes/${WRITE_DATA_TYPE}/dataPoints`;
 /** `POST` here deletes the data points named in the body. */
 export const DELETE_PATH = `${CREATE_PATH}:batchDelete`;
 
+/**
+ * The most names one batchDelete body may hold. The reference says `names`
+ * is required and can hold up to 10,000 resource names.
+ */
+export const MAX_BATCH_DELETE = 10_000;
+
 /** A write answer is one Operation with at most one data point: far below this. */
 export const MAX_WRITE_RESPONSE_BYTES = 64 << 10;
 
@@ -130,14 +136,39 @@ export function createBody(entry: NewFoodEntry): { nutritionLog: NutritionLogBod
 }
 
 /**
- * The body of the delete request for one data point ID. The name is written
- * with `users/me`, the form of the documented example and of the request path:
- * the reference says that every name must share the parent of the path.
- * Throws for a text that is not a data point ID (a caller bug).
+ * The texts of a create body that the caller wrote, as the body carries them:
+ * the food name, and the calories and each macro as their JSON number text.
+ * Google's answer to a refused create can repeat them, and none may reach an
+ * error or a log line.
+ *
+ * The meal type and the times are not caller text: the server chose the meal
+ * type from its own list, and the times are the instant the tool computed.
  */
-export function deleteBody(id: string): { names: string[] } {
-  if (typeof id !== "string" || !POINT_ID_ONLY.test(id)) throw new Error("googlehealth: not a data point ID");
-  return { names: [`users/me/dataTypes/${WRITE_DATA_TYPE}/dataPoints/${id}`] };
+export function callerTexts(body: { nutritionLog: NutritionLogBody }): string[] {
+  const log = body.nutritionLog;
+  const texts = [log.foodDisplayName, JSON.stringify(log.energy.kcal)];
+  if (log.totalCarbohydrate !== undefined) texts.push(JSON.stringify(log.totalCarbohydrate.grams));
+  if (log.totalFat !== undefined) texts.push(JSON.stringify(log.totalFat.grams));
+  if (log.nutrients !== undefined) for (const item of log.nutrients) texts.push(JSON.stringify(item.quantity.grams));
+  return texts;
+}
+
+/**
+ * The body of the delete request for one data point ID, or for several. The
+ * names are written with `users/me`, the form of the documented example and of
+ * the request path: the reference says that every name must share the parent
+ * of the path. Throws for a text that is not a data point ID, for no id, or
+ * for more than {@link MAX_BATCH_DELETE} ids (a caller bug).
+ */
+export function deleteBody(idOrIds: string | readonly string[]): { names: string[] } {
+  const ids = typeof idOrIds === "string" ? [idOrIds] : idOrIds;
+  if (ids.length === 0 || ids.length > MAX_BATCH_DELETE) throw new Error("googlehealth: not a data point ID");
+  return {
+    names: ids.map((id) => {
+      if (typeof id !== "string" || !POINT_ID_ONLY.test(id)) throw new Error("googlehealth: not a data point ID");
+      return `users/me/dataTypes/${WRITE_DATA_TYPE}/dataPoints/${id}`;
+    }),
+  };
 }
 
 /**

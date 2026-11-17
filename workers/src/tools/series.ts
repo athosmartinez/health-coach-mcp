@@ -70,6 +70,7 @@ export const SERIES_UNITS = {
   kcal_in: "kcal",
   protein_g: "g",
   total_calories: "kcal",
+  vo2_max: "ml/kg/min",
 } as const;
 
 export type SeriesMetric = keyof typeof SERIES_UNITS;
@@ -80,6 +81,17 @@ const GRANULARITIES = ["day", "week"] as const;
 
 /** Some items do not report protein, so the total is a lower bound. */
 export const REASON_MISSING_PROTEIN = "items_missing_protein";
+
+/** The daily VO2 max reading is one the band marked estimated. The value is kept. */
+export const REASON_ESTIMATED = "estimated";
+
+/**
+ * What the description adds past the frozen tools/list fixture. That snapshot
+ * does not include daily VO2 max. The value is the daily-vo2-max summary.
+ */
+export const SERIES_VO2 =
+  " vo2_max is the daily VO2 max in ml/kg/min. A day without a reading is null, which is missing data and not " +
+  "an error. A reading the band marks estimated keeps its value, with reason estimated.";
 
 /** Travels in every series (R3). */
 export const SERIES_NOTICE =
@@ -203,7 +215,8 @@ const ACTIVITY_KEYS: Record<"steps" | "azm", ActivityKey> = {
  *   - azm: the zone-minutes rollup, and the band's steps for the days without a row;
  *   - total_calories: what tells that the band was worn (as azm), then the
  *     total-calories rollup of the worn days alone;
- *   - kcal_in, protein_g: the food log (see `food`).
+ *   - kcal_in, protein_g: the food log (see `food`);
+ *   - vo2_max: the daily VO2 max list (one request; a day without a reading is null).
  */
 async function daily(deps: CoachDeps, metric: SeriesMetric, from: LocalDate, to: LocalDate, flags: FlagSet, sources: SourceSet): Promise<DailySeries> {
   switch (metric) {
@@ -256,6 +269,16 @@ async function daily(deps: CoachDeps, metric: SeriesMetric, from: LocalDate, to:
         } else {
           point.value = burn.kcal.get(point.date) ?? null;
         }
+      }
+      return series;
+    }
+    case "vo2_max": {
+      const vo2 = await deps.health.vo2(from, to);
+      flags.add(FLAG_UNREADABLE_RECORDS, vo2.skipped > 0);
+      const series = plain(vo2.series());
+      for (const [day, reading] of vo2.days) {
+        sources.add(reading.source);
+        if (reading.estimated) series.reason.set(day, REASON_ESTIMATED);
       }
       return series;
     }
@@ -364,7 +387,9 @@ export const METRIC_SERIES = coachTool(
       "from another platform or unreadable, the log looks incomplete) and total_calories is null on a day without " +
       "the band; the point's reason says why. protein_g keeps a total that may miss food with complete=false (a " +
       "lower bound) and the reason. Weeks are ISO weeks (Monday first); a week point is the mean of its days " +
-      "with a value, and days_left_out counts the days withheld for a reason. Never raw heart-rate samples.",
+      "with a value, and days_left_out counts the days withheld for a reason. Never raw heart-rate samples." +
+      // The frozen tools/list fixture ends above. The rest is this server's own.
+      SERIES_VO2,
     annotations: READ_ONLY,
     inputSchema: inputSchema(
       s.object({

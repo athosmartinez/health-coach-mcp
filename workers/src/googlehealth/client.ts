@@ -55,6 +55,7 @@ import {
   DELETE_PATH,
   MAX_WRITE_RESPONSE_BYTES,
   type NewFoodEntry,
+  callerTexts,
   createBody,
   deleteBody,
   pointId,
@@ -303,9 +304,19 @@ export class GoogleHealthClient {
    * renewal). When the outcome is unknown, the error says that the entry may
    * exist. A name is returned only when Google's answer holds one: none is
    * ever made up.
+   *
+   * `account` is the Google account the caller will record the entry for
+   * (undefined when none was linked). The create is sent only with a token of
+   * that account: the tool reads the account from the store and the client
+   * takes the token on its own, and one MCP HTTP request keeps one token
+   * answer, so the two can belong to different accounts after a sign-in.
    */
-  async createNutritionLog(entry: NewFoodEntry): Promise<string> {
-    return this.create("nutrition-log", CREATE_PATH, createBody(entry), pointId);
+  async createNutritionLog(entry: NewFoodEntry, account: string | undefined): Promise<string> {
+    const body = createBody(entry);
+    // An entry carries the food name the caller wrote. What Google repeats of
+    // it, or of a number the caller sent, is taken out of the message before
+    // the message reaches an error or a log.
+    return this.create("nutrition-log", CREATE_PATH, body, pointId, { account }, callerTexts(body));
   }
 
   /**
@@ -316,9 +327,23 @@ export class GoogleHealthClient {
    * there. The caller
    * decides which points may be deleted: Google's documentation does not prove
    * that it refuses the delete of a point another app wrote.
+   *
+   * `account` is the Google account whose entry the caller checked. The delete
+   * is sent only with a token of that account: a data point ID of one account
+   * must never be deleted with the token of another.
    */
-  async deleteNutritionLog(id: string): Promise<"deleted" | "gone"> {
-    return this.remove("nutrition-log", DELETE_PATH, deleteBody(id));
+  async deleteNutritionLog(id: string, account: string): Promise<"deleted" | "gone"> {
+    return this.deleteNutritionLogs([id], account);
+  }
+
+  /**
+   * Deletes the nutrition-log data points with these IDs, in one batchDelete.
+   * The rules are the ones of deleteNutritionLog. `account` is the Google
+   * account whose entries the caller checked.
+   */
+  async deleteNutritionLogs(ids: readonly string[], account: string): Promise<"deleted" | "gone"> {
+    // Each ID is an entry id: a refusal that repeats one must not carry it on.
+    return this.remove("nutrition-log", DELETE_PATH, deleteBody(ids), { account }, ids);
   }
 
   /**
@@ -351,8 +376,17 @@ export class GoogleHealthClient {
    * account must never be deleted with the token of another.
    */
   async deleteExercise(id: string, account: string): Promise<"deleted" | "gone"> {
-    // The ID is an entry id: a refusal that repeats it must not carry it on.
-    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id), { account }, [id]);
+    return this.deleteExercises([id], account);
+  }
+
+  /**
+   * Deletes the exercise data points with these IDs, in one batchDelete. The
+   * rules are the ones of deleteExercise. `account` is the Google account
+   * whose sessions the caller checked.
+   */
+  async deleteExercises(ids: readonly string[], account: string): Promise<"deleted" | "gone"> {
+    // Each ID is an entry id: a refusal that repeats one must not carry it on.
+    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(ids), { account }, ids);
   }
 
   /**
@@ -704,8 +738,9 @@ function checkBaseUrl(base: string): void {
   }
 }
 
-const READ_PATH = /^\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints(:reconcile)?$/;
-const ROLLUP_PATH = /^\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints:dailyRollUp$/;
+// A documented type name can contain a digit (daily-vo2-max).
+const READ_PATH = /^\/users\/me\/dataTypes\/([a-z0-9-]+)\/dataPoints(:reconcile)?$/;
+const ROLLUP_PATH = /^\/users\/me\/dataTypes\/([a-z0-9-]+)\/dataPoints:dailyRollUp$/;
 
 /**
  * The read-only guard: the data type of a request the client may send, or
@@ -1031,14 +1066,29 @@ function redactWriteText(text: string): string {
     .trim();
 }
 
-/** A shorter text identifies nothing, and its removal would empty the message. */
+/**
+ * A text of fewer characters is removed only where it stands alone: as a part
+ * of a word or of a longer number it identifies nothing, and its removal
+ * there would empty the message. A calorie or macro amount is often that
+ * short (`50`), and it must not stay in the message.
+ */
 const MIN_ECHO_CHARS = 3;
+
+/**
+ * The edges of a short text that stands alone: no letter or digit touches it,
+ * and it is not a field of a time, a date or a decimal number (`14:50:00`,
+ * `2026-10-16`, `1.50`), which the server or Google wrote.
+ */
+const ALONE_BEFORE = "(?<![\\p{L}\\p{N}]|\\p{N}[.:\\-])";
+const ALONE_AFTER = "(?![\\p{L}\\p{N}]|[.:\\-]\\p{N})";
 
 const REGEXP_SYNTAX = /[\\^$.*+?()[\]{}|]/g;
 
 /**
  * `text` without every occurrence of a text of `echoes`, compared without
  * regard to letter case. Each removed stretch becomes one space.
+ * A text shorter than {@link MIN_ECHO_CHARS} characters is removed only
+ * where it stands alone.
  *
  * Every occurrence is marked on the text as Google sent it, and the marked
  * stretches are cut together: so a text that is part of another one (a name
@@ -1050,9 +1100,11 @@ function withoutEchoes(text: string, echoes: readonly string[]): string {
   const cut = new Array<boolean>(text.length).fill(false);
   let found = false;
   for (const echo of echoes) {
-    if ([...echo].length < MIN_ECHO_CHARS) continue;
+    if (echo === "") continue;
+    const literal = echo.replace(REGEXP_SYNTAX, "\\$&");
+    const pattern = [...echo].length < MIN_ECHO_CHARS ? `${ALONE_BEFORE}${literal}${ALONE_AFTER}` : literal;
     // A lookahead matches at every start, also where two occurrences overlap.
-    const occurrence = new RegExp(`(?=(${echo.replace(REGEXP_SYNTAX, "\\$&")}))`, "giu");
+    const occurrence = new RegExp(`(?=(${pattern}))`, "giu");
     for (const match of text.matchAll(occurrence)) {
       cut.fill(true, match.index, match.index + (match[1]?.length ?? 0));
       found = true;

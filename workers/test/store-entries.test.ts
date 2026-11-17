@@ -234,6 +234,24 @@ describe("the entries of the linked Google account", () => {
       expect(owners(sql)).toEqual([{ sub: OWNER_SUB, name: shared }]);
     }));
 
+  it("forgets the entry of the account a delete was sent for, also after another account is linked", () =>
+    withDb((db, sql) => {
+      const shared = "users/me/dataTypes/nutrition-log/dataPoints/syn-shared";
+      recordEntry(db, shared, "2026-10-13");
+      recordEntry(db, NAME, "2026-10-13");
+      linkAccount(sql, OTHER_SUB);
+      recordEntry(db, shared, "2026-10-14");
+      // The delete went out for the first account, and the second one is linked when the answer comes.
+      forgetEntry(db, shared, OWNER_SUB);
+      expect(owners(sql)).toEqual([
+        { sub: OWNER_SUB, name: NAME },
+        { sub: OTHER_SUB, name: shared },
+      ]);
+      // An account that holds no such row removes nothing.
+      forgetEntry(db, NAME, OTHER_SUB);
+      expect(owners(sql)).toHaveLength(2);
+    }));
+
   it("knows no entry and records none when no account is linked", () =>
     withDb((db, sql) => {
       recordEntry(db, NAME, "2026-10-13");

@@ -21,6 +21,7 @@ import {
   TREND_ONSET_SD_MIN,
   TREND_RESTING_HR_BPM,
   TREND_STEPS,
+  TREND_VO2,
   TREND_WEIGHT_KG,
   WEEKLY_NOTICE,
 } from "../src/tools/weekly";
@@ -99,6 +100,18 @@ describe("weekly_report", () => {
       avg_28d_n_days: 0,
     });
     expect(data.cardio.resting_hr_bpm).not.toHaveProperty("trend_unavailable");
+    // No daily VO2 max in the fixture: missing data, not an error.
+    expect(data.cardio.vo2_max).toEqual({
+      latest: null,
+      latest_on: null,
+      prev_latest: null,
+      prev_latest_on: null,
+      delta: null,
+      trend: "unknown",
+      trend_unavailable: "no_data",
+      n_days: 0,
+      prev_n_days: 0,
+    });
 
     const w = data.body.weight_kg;
     expect(w.this_week).toBeGreaterThan(0);
@@ -153,9 +166,33 @@ describe("weekly_report", () => {
       "recovery 2026-09-07..2026-10-11",
       "activity 2026-09-07..2026-10-11 values=steps,azm,worn",
       "body 2026-07-14..2026-10-11",
+      "vo2 2026-09-28..2026-10-11",
       "nutrition 2026-10-05..2026-10-11",
       "exercises 2026-10-05..2026-10-11 maxHR=false",
     ]);
+  });
+
+  it("compares the latest daily VO2 max with the week before", async () => {
+    const h = weeklyHealth();
+    h.vo2Days.set("2026-10-03", { value: 41, estimated: false, source: "Synthetic Band" });
+    h.vo2Days.set("2026-10-04", { value: 42, estimated: false, source: "Synthetic Band" });
+    h.vo2Days.set("2026-10-06", { value: 43, estimated: false, source: "Synthetic Band" });
+    h.vo2Days.set("2026-10-10", { value: 44, estimated: true, source: "Synthetic Band" });
+    const out = await coachSession(h).ok("weekly_report", { week_end: WEEK_END });
+    expect(out.data.cardio.vo2_max).toEqual({
+      latest: 44,
+      latest_on: "2026-10-10",
+      prev_latest: 42,
+      prev_latest_on: "2026-10-04",
+      delta: 2,
+      trend: "up",
+      n_days: 2,
+      prev_n_days: 2,
+      estimated: true,
+    });
+    expect(TREND_VO2).toBe(1);
+    expect(out.sources).toContain("Synthetic Band");
+    expect(out).not.toHaveProperty("isError");
   });
 
   it("counts the current week up to today", async () => {
@@ -458,6 +495,7 @@ describe("weekly_report", () => {
       "recovery 2026-09-07..2026-10-11",
       "activity 2026-09-07..2026-10-11 values=steps,azm,worn",
       "body 2026-07-14..2026-10-11",
+      "vo2 2026-09-28..2026-10-11",
       "nutrition 2026-10-05..2026-10-11",
       "exercises 2026-10-05..2026-10-11 maxHR=false",
       "activity 2026-10-05..2026-10-11 values=total_calories days=2026-10-05..2026-10-11",

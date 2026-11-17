@@ -199,6 +199,7 @@ describe("the exercise log writes, from the sign-in to a tool result", () => {
         azm_min: 0,
         quality_flags: ["manual_entry", "no_hr_data"],
         source: "GOOGLE_WEB_API",
+        notes: "Roda de sexta",
         // The name the create answered: the id exercise_log_delete accepts.
         entry_id: createdName(1),
       },

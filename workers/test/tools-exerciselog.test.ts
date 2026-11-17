@@ -11,7 +11,7 @@ import { UTC, Zone } from "../src/coach/date";
 import { ToolError, type WireError } from "../src/coach/errors";
 import { GOOGLE_HEALTH_SCOPES, RECONNECT_HINT, WRITE_SCOPES } from "../src/google";
 import { MAY_EXIST_HINTS } from "../src/googlehealth/client";
-import { type NewExerciseSession, createBody } from "../src/googlehealth/exerciselog";
+import { type NewExerciseSession, createBody, pointId } from "../src/googlehealth/exerciselog";
 import { MAX_SESSION_KCAL, clean } from "../src/healthdata";
 import { parseExercise } from "../src/healthdata/exercise";
 import type { CoachStore } from "../src/store";
@@ -98,6 +98,12 @@ function session(options: FakeOptions = {}) {
         accounts.push(account);
         return options.remove ? options.remove(id) : "deleted";
       },
+      deleteExercises: async (ids, account) => {
+        steps.push("delete");
+        removed.push(...ids);
+        accounts.push(account);
+        return options.remove ? options.remove(ids[0] ?? "") : "deleted";
+      },
     },
     // The rules of the store: a session is recorded for the linked account,
     // and only the sessions of the linked account are known.
@@ -117,10 +123,20 @@ function session(options: FakeOptions = {}) {
         steps.push("has");
         return rows.has(name) && owners.get(name) === linked.account;
       },
-      forget: (name) => {
+      onDay: (day) => {
+        steps.push("onDay");
+        const found = new Map<string, string>();
+        for (const [name, on] of rows) {
+          if (on !== day || owners.get(name) !== linked.account) continue;
+          const id = pointId(name);
+          if (id !== undefined) found.set(id, name);
+        }
+        return found;
+      },
+      forget: (name, owner) => {
         steps.push("forget");
         if (options.failForget) throw new DiskError();
-        if (owners.get(name) !== linked.account) return;
+        if (owners.get(name) !== owner) return;
         rows.delete(name);
         owners.delete(name);
       },
@@ -228,14 +244,21 @@ describe("the two exercise log tools as they are listed", () => {
 
     expect(remove?.inputSchema).toEqual({
       type: "object",
-      properties: { entry_id: { type: "string", description: expect.any(String), maxLength: 256 } },
-      required: ["entry_id"],
+      properties: {
+        entry_id: { type: ["null", "string"], description: expect.any(String), maxLength: 256 },
+        date: { type: ["null", "string"], description: expect.any(String), pattern: "^(?:\\d{4}-\\d{2}-\\d{2})?$" },
+      },
       additionalProperties: false,
     });
     expect(remove?.outputSchema).toEqual({
       type: "object",
-      properties: { entry_id: { type: "string" }, deleted: { type: "boolean" } },
-      required: ["entry_id", "deleted"],
+      properties: {
+        entry_id: { type: "string", description: expect.any(String) },
+        date: { type: "string", description: expect.any(String) },
+        deleted: { type: "boolean" },
+        deleted_count: { type: "number", description: expect.any(String) },
+      },
+      required: ["deleted"],
       additionalProperties: false,
     });
     expect(add?.outputSchema.required).toEqual(["entry_id", "date", "start_time", "end_time", "duration_min", "exercise_type", "kcal", "notice"]);
@@ -828,10 +851,19 @@ describe("exercise_log_delete", () => {
   it.each([
     ["no entry_id", {}],
     ["a null entry_id", { entry_id: null }],
+    ["entry_id and date together", { entry_id: OWN, date: TODAY }],
+  ])("asks for entry_id or date, and not both, for %s", async (_name, args) => {
+    const { s } = await withEntry();
+    const error = await s.fails("exercise_log_delete", args);
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toMatch(/^send entry_id or date/);
+    expect(s.steps).toEqual([]);
+  });
+
+  it.each([
     ["an entry_id that is not a text", { entry_id: 7 }],
     ["a list of ids", { entry_id: [OWN] }],
     ["a property the tool does not have", { entry_id: OWN, force: true }],
-    ["a date in place of an id", { date: TODAY }],
   ])("answers invalid_input for %s", async (_name, args) => {
     const { s } = await withEntry();
     const error = await s.fails("exercise_log_delete", args);
@@ -892,6 +924,66 @@ describe("exercise_log_delete", () => {
     // The account is read once, and the delete names it to the client: the one the "not linked" check and the ownership check saw.
     expect(s.reads.owner).toBe(1);
     expect(s.accounts).toEqual([ACCOUNT]);
+  });
+
+  it("deletes every session of the day this server created, and never a session of another account", async () => {
+    const s = session();
+    const first = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    const second = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "08:00", duration_min: 30 });
+    s.linked.account = "400000000000000000004";
+    const foreign = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "09:00", duration_min: 30 });
+    s.linked.account = ACCOUNT;
+    s.removed.length = 0;
+    expect(await s.ok("exercise_log_delete", { date: TODAY })).toEqual({ date: TODAY, deleted: true, deleted_count: 2 });
+    expect(s.removed.sort()).toEqual([pointId(first.entry_id), pointId(second.entry_id)].sort());
+    expect(s.accounts.at(-1)).toBe(ACCOUNT);
+    expect([...s.rows.keys()]).toEqual([foreign.entry_id]);
+    expect(await s.fails("exercise_log_delete", { date: TODAY })).toMatchObject({ code: "no_data", message: "this server created no entry on that day" });
+    expect(s.removed).toHaveLength(2);
+  });
+
+  it.each([
+    ["one session", (first: string) => ({ entry_id: first }), 1],
+    ["a day", () => ({ date: TODAY }), 0],
+  ])("removes the rows of the account the delete was sent for when another account is linked before Google answers: %s", async (_name, args, left) => {
+    const other = "400000000000000000004";
+    // Another account signs in while the delete is on its way.
+    const s = session({
+      remove: async () => {
+        s.linked.account = other;
+        return "deleted";
+      },
+    });
+    const first = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    const second = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "08:00", duration_min: 30 });
+    s.linked.account = other;
+    const foreign = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    s.linked.account = ACCOUNT;
+    await s.ok("exercise_log_delete", args(first.entry_id as string));
+    expect(s.linked.account).toBe(other);
+    // The rows of the first account are gone, and the row of the account that is linked now stays.
+    expect([...s.rows.keys()]).toEqual(left === 1 ? [second.entry_id, foreign.entry_id] : [foreign.entry_id]);
+  });
+
+  it("keeps every row of a day of several sessions when Google answers that it found none", async () => {
+    // The answer does not say which of the sessions Google still holds.
+    const s = session({ remove: async () => "gone" });
+    const first = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    const second = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "08:00", duration_min: 30 });
+    const error = await s.fails("exercise_log_delete", { date: TODAY });
+    expect(error).toEqual({
+      code: "invalid_input",
+      message: "Google Health did not find every entry of that day, and may have deleted none",
+      hint: "delete each session by its entry_id, which workout_review lists",
+    });
+    expect([...s.rows.keys()].sort()).toEqual([first.entry_id, second.entry_id].sort());
+    expect(s.steps.filter((step) => step === "forget")).toEqual([]);
+    // One id at a time, the same answer proves that this session is gone.
+    expect(await s.ok("exercise_log_delete", { entry_id: first.entry_id })).toEqual({ entry_id: first.entry_id, deleted: true });
+    expect([...s.rows.keys()]).toEqual([second.entry_id]);
+    // A day with one session left names one point: its answer is proof too.
+    expect(await s.ok("exercise_log_delete", { date: TODAY })).toEqual({ date: TODAY, deleted: true, deleted_count: 1 });
+    expect(s.rows.size).toBe(0);
   });
 
   it("keeps the row when the client does not send the delete because its token is of another account", async () => {
@@ -965,7 +1057,7 @@ describe("a schema error of an exercise log tool", () => {
     ["a start time that is the activity", "exercise_log_add", { start_time: "Capoeira angola" }, "start_time does not have the format that its description gives"],
     ["an end time that is a number", "exercise_log_add", { end_time: 431.5 }, "end_time must be a text or null"],
     ["notes that are a number", "exercise_log_add", { notes: 431.5 }, "notes must be a text or null"],
-    ["an entry id that is a number", "exercise_log_delete", { entry_id: 431.5 }, "entry_id must be a text"],
+    ["an entry id that is a number", "exercise_log_delete", { entry_id: 431.5 }, "entry_id must be a text or null"],
     ["an entry id longer than the cap", "exercise_log_delete", { entry_id: `${entryName(1)}${"-syn-entry".repeat(30)}` }, "entry_id must be at most 256 characters"],
   ] as [string, string, Record<string, unknown>, string][])("names the property and its rule for %s, and never the value", async (_name, tool, change, message) => {
     const base = tool === "exercise_log_add" ? WORKOUT : {};
@@ -974,7 +1066,6 @@ describe("a schema error of an exercise log tool", () => {
 
   it("names a property that is missing, and has one text for arguments that are not an object", async () => {
     expect(await schemaError("exercise_log_add", { start_time: "07:10", duration_min: 75 })).toBe(`${SCHEMA_PREFIX}exercise_type is required`);
-    expect(await schemaError("exercise_log_delete", {})).toBe(`${SCHEMA_PREFIX}entry_id is required`);
     for (const args of ["Capoeira angola", 431.5, null]) expect(await schemaError("exercise_log_add", args)).toBe(`${SCHEMA_PREFIX}the arguments must be an object`);
   });
 });
@@ -1205,6 +1296,29 @@ describe("the exercise log tools through /mcp of the object", () => {
     });
     expect(g.takeExternal()).toEqual({ total: 0 });
     expectNoSecret(g.logged());
+  });
+
+  it("deletes the day's own sessions in one batchDelete and leaves a session the band recorded", async () => {
+    const stub = await linkedStore();
+    expect((await objectTool(stub, "exercise_log_add", WORKOUT)).ok).toBe(true);
+    expect((await objectTool(stub, "exercise_log_add", { ...WORKOUT, start_time: "08:00", duration_min: 20 })).ok).toBe(true);
+    g.google.add("exercise", exerciseRec(at(TODAY, 6, 0), at(TODAY, 7, 0), { type: "RUNNING", name: "users/me/dataTypes/exercise/dataPoints/syn-band" }));
+    g.takeExternal();
+    expect(await objectTool(stub, "exercise_log_delete", { date: TODAY })).toEqual({
+      ok: true,
+      output: { date: TODAY, deleted: true, deleted_count: 2 },
+    });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete exercise": 1 });
+    expect(g.google.writes.at(-1)).toEqual({
+      kind: "delete",
+      body: { names: ["users/me/dataTypes/exercise/dataPoints/syn-created-1", "users/me/dataTypes/exercise/dataPoints/syn-created-2"] },
+    });
+    expect(await storedSessions(stub)).toEqual([]);
+    expect(await objectTool(stub, "exercise_log_delete", { date: TODAY })).toMatchObject({ ok: false, error: { code: "no_data" } });
+    expect(g.takeExternal()).toEqual({ total: 0 });
+    // The band's session is still in the log: its name was not in the delete.
+    const review = await objectTool(stub, "workout_review", { date: TODAY });
+    expect(review).toMatchObject({ ok: true, output: { data: { sessions: [{ type: "RUNNING", entry_id: null }] } } });
   });
 
   it("delete takes Google's own 404 (NOT_FOUND) as a session that is already gone, and no other 404", async () => {
@@ -1514,8 +1628,10 @@ describe("the reads of a session this server logged", () => {
       // It covers time of the band's class: the same workout may be there twice.
       quality_flags: ["manual_entry", "no_hr_data", "overlaps_band_session"],
       source: "GOOGLE_WEB_API",
+      notes: null,
       entry_id: createdName(2),
     });
+    expect(sessions[2]?.notes).toBe("Roda de sexta");
     expect(sessions[2]).toMatchObject({ type: "OTHER", name: "Capoeira angola", active_min: 45, kcal: 300.5, avg_hr_bpm: null, quality_flags: ["manual_entry", "no_hr_data"] });
     // Nothing of the two records is merged: the band's class keeps its own values and flags.
     expect(sessions[0]).toMatchObject({ active_min: 60, avg_hr_bpm: 81, kcal: 400, quality_flags: ["low_hr_for_activity"], entry_id: null });

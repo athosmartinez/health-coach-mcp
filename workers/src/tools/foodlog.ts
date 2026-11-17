@@ -11,11 +11,11 @@
 
 import type { McpServer, ToolAnnotations } from "@modelcontextprotocol/server";
 
-import { type LocalDate, type Zone, addDays, dateOf, instantOf, today } from "../coach/date";
+import { type LocalDate, type Zone, addDays, dateOf, instantOf, parseDate, today } from "../coach/date";
 import { INTERNAL_ERROR, ToolError } from "../coach/errors";
 import { trimSpace } from "../coach/text";
 import { notLinkedError } from "../googlehealth/client";
-import { MAX_NAME_LENGTH, type NewFoodEntry, pointId } from "../googlehealth/nutritionlog";
+import { MAX_BATCH_DELETE, MAX_NAME_LENGTH, type NewFoodEntry, pointId } from "../googlehealth/nutritionlog";
 import { MAX_ITEM_GRAMS, MAX_ITEM_KCAL, MAX_LABEL_RUNES, clean } from "../healthdata";
 import { invalid } from "../store/db";
 import { type Tool, type ToolDefinition, type ToolOutcome, captureAsync, defineTool, register } from "./register";
@@ -23,10 +23,22 @@ import { inputSchema, s } from "./schema";
 
 /** The part of the Google Health client the write tools use. */
 export interface FoodLogApi {
-  /** Creates one entry and returns the data point name Google gave it. Never sent again when its outcome is unknown. */
-  createNutritionLog(entry: NewFoodEntry): Promise<string>;
-  /** Deletes the entry with this data point ID. "gone": Google has no such entry. */
-  deleteNutritionLog(id: string): Promise<"deleted" | "gone">;
+  /**
+   * Creates one entry and returns the data point name Google gave it. Never sent again when its outcome is unknown.
+   * `account` is the linked account the entry will be recorded for, or undefined when none is linked: the create
+   * is sent only with a token of that account.
+   */
+  createNutritionLog(entry: NewFoodEntry, account: string | undefined): Promise<string>;
+  /**
+   * Deletes the entry with this data point ID. "gone": Google has no such entry.
+   * `account` is the linked account the entry belongs to: the delete is sent only with a token of that account.
+   */
+  deleteNutritionLog(id: string, account: string): Promise<"deleted" | "gone">;
+  /**
+   * Deletes the entries with these data point IDs in one request. "gone": Google has none of them.
+   * `account` is the linked account the entries belong to.
+   */
+  deleteNutritionLogs(ids: readonly string[], account: string): Promise<"deleted" | "gone">;
 }
 
 /**
@@ -45,7 +57,16 @@ export interface Entries {
   record(name: string, day: LocalDate, owner: string | undefined): void;
   /** Whether this server created an entry with exactly this name for the linked account. */
   has(name: string): boolean;
-  forget(name: string): void;
+  /**
+   * The stored name of each entry this server created on this local day for the linked account, keyed by
+   * data point ID. An entry of another account is not included, and neither is an entry this server did not create.
+   */
+  onDay(day: LocalDate): ReadonlyMap<string, string>;
+  /**
+   * Removes the row of an entry of `owner`, the account the delete was sent for. Another account can be the
+   * linked one when Google answers: the row that goes is still the one of `owner`, and no row of another account.
+   */
+  forget(name: string, owner: string): void;
 }
 
 /** What the write tools need. */
@@ -269,9 +290,11 @@ const NUTRITION_LOG_ADD = writeTool(
     if (carbs !== undefined) entry.carbGrams = carbs;
     if (fat !== undefined) entry.fatGrams = fat;
     // The entry will belong to the account that is linked now. Without a link
-    // the create answers auth_expired, and nothing is sent.
+    // the create answers auth_expired, and nothing is sent. The client sends
+    // the create only with a token of this account: the token answer of the
+    // MCP HTTP request can be older than the link.
     const owner = deps.entries.owner();
-    const entryId = await deps.api.createNutritionLog(entry);
+    const entryId = await deps.api.createNutritionLog(entry, owner);
 
     // Google holds the entry from here on. Without its row the server does
     // not own it: say so, instead of an error that reads as "nothing happened".
@@ -296,33 +319,87 @@ const NUTRITION_LOG_ADD = writeTool(
 
 // --- nutrition_log_delete ---
 
+const ONE_OR_A_DAY = "name the entry_id of one entry, or the date whose entries this server created";
+
+/** Deletes every entry this server created on one day, in one batchDelete. Nothing is sent when the day has none. */
+async function deleteFoodDay(deps: WriteDeps, day: LocalDate, owner: string): Promise<Record<string, unknown>> {
+  const names = deps.entries.onDay(day);
+  if (names.size === 0) {
+    throw new ToolError(
+      "no_data",
+      "this server created no entry on that day",
+      "it deletes only an entry that nutrition_log_add created and that was not deleted yet",
+    );
+  }
+  // The reference allows up to 10,000 names in one batchDelete. Past that, nothing is sent.
+  if (names.size > MAX_BATCH_DELETE) {
+    throw new ToolError("invalid_input", "that day has more entries than one delete can send", "delete them by entry_id");
+  }
+  const ids = [...names.keys()].sort();
+  const outcome = await deps.api.deleteNutritionLogs(ids, owner);
+  // "gone" for one name proves that Google no longer has that point. For
+  // several names, the reference does not say whether Google removed the
+  // points it has or refused the whole request. So no row is removed: a row
+  // that is forgotten while Google still holds its point can never be deleted
+  // by this server again. A delete by entry_id settles each row on its own.
+  if (outcome === "gone" && ids.length > 1) {
+    throw new ToolError(
+      "invalid_input",
+      "Google Health did not find every entry of that day, and may have deleted none",
+      "delete each entry by its entry_id, which nutrition_day lists",
+    );
+  }
+  try {
+    for (const stored of names.values()) deps.entries.forget(stored, owner);
+  } catch (cause) {
+    throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
+      cause,
+    });
+  }
+  return { date: day, deleted: true, deleted_count: ids.length };
+}
+
 const NUTRITION_LOG_DELETE = writeTool(
   {
     name: "nutrition_log_delete",
     description:
       "Deletes one entry of the user's Google Health food log, by the entry_id that nutrition_log_add returned or " +
       "that nutrition_day lists on the item. It deletes only an entry that this server created: any other id " +
-      "answers no_data, and nothing is sent to Google Health for it. A delete cannot be undone, so confirm it " +
-      "with the user first. " +
+      "answers no_data, and nothing is sent to Google Health for it. With date and no entry_id, it deletes every " +
+      "entry this server created on that day, in one request, and a day with none answers no_data with nothing sent. " +
+      "Send entry_id or date, not both. A delete cannot be undone, so confirm it with the user first. " +
       GUARDRAIL,
     annotations: DELETES,
     inputSchema: inputSchema(
       s.object({
-        entry_id: {
+        "entry_id?": {
           type: "string",
           description:
             "The entry_id that nutrition_log_add returned, or that nutrition_day lists on the item " +
-            "(users/…/dataTypes/nutrition-log/dataPoints/…)",
+            "(users/…/dataTypes/nutrition-log/dataPoints/…). Omit it to delete every entry of date.",
           maxLength: MAX_NAME_LENGTH,
         },
+        "date?": s.date("The local day whose entries this server created are all deleted. Omit it to delete one entry_id."),
       }),
     ),
-    outputSchema: s.object({ entry_id: s.string(), deleted: s.boolean() }),
+    outputSchema: s.object({
+      "entry_id?": s.string("The entry that was deleted, when entry_id was sent"),
+      "date?": s.string("The day whose entries were deleted, when date was sent"),
+      deleted: s.boolean(),
+      "deleted_count?": s.number("How many entries of that day were deleted"),
+    }),
   },
   async (deps, args) => {
     const entryId = str(args.entry_id);
-    const id = pointId(entryId);
-    if (id === undefined) {
+    const date = str(args.date);
+    if (entryId === "" && date === "") throw new ToolError("invalid_input", "send entry_id or date", ONE_OR_A_DAY);
+    if (entryId !== "" && date !== "") throw new ToolError("invalid_input", "send entry_id or date, not both", ONE_OR_A_DAY);
+    if (date !== "") {
+      if (parseDate(date) === undefined) throw new ToolError("invalid_input", "date is not a calendar day", "use a date, YYYY-MM-DD");
+      if (date > today(deps.now(), deps.zone)) throw new ToolError("invalid_input", "date is after today", "name a day up to today");
+    }
+    const id = entryId === "" ? undefined : pointId(entryId);
+    if (entryId !== "" && id === undefined) {
       throw new ToolError(
         "invalid_input",
         "entry_id is not the id of a food log entry",
@@ -332,9 +409,12 @@ const NUTRITION_LOG_DELETE = writeTool(
     // Without a linked account the store matches no entry, also not one that
     // this server created: "no entry with that id" would be false for it, and
     // would hide the step that makes the delete work. So the answer is the
-    // one of a token request without a link, for every id, and no request is
-    // sent. It says nothing about which entries exist.
-    if (deps.entries.owner() === undefined) throw notLinkedError();
+    // one of a token request without a link, for every id and every date, and
+    // no request is sent. It says nothing about which entries exist.
+    const owner = deps.entries.owner();
+    if (owner === undefined) throw notLinkedError();
+    if (date !== "") return deleteFoodDay(deps, date, owner);
+    if (id === undefined) throw new ToolError("invalid_input", "send entry_id or date", ONE_OR_A_DAY);
     // Only an entry of this server is deleted, and the check comes before any
     // request: Google's documentation does not prove that it would refuse the
     // delete of an entry another app wrote. An entry that was created for
@@ -348,9 +428,11 @@ const NUTRITION_LOG_DELETE = writeTool(
       );
     }
     // "gone" is the state the delete asks for: the row goes in both cases.
-    await deps.api.deleteNutritionLog(id);
+    // The entry is this account's own, so the delete goes out only with a
+    // token of this account.
+    await deps.api.deleteNutritionLog(id, owner);
     try {
-      deps.entries.forget(entryId);
+      deps.entries.forget(entryId, owner);
     } catch (cause) {
       throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
         cause,

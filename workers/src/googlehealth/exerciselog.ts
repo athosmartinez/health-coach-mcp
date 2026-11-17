@@ -15,7 +15,7 @@
 //   - https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints
 //     (DataPoint, DataSource, Exercise, SessionTimeInterval, MetricsSummary)
 
-import { MAX_NAME_LENGTH, POINT_ID } from "./nutritionlog";
+import { MAX_BATCH_DELETE, MAX_NAME_LENGTH, POINT_ID } from "./nutritionlog";
 
 /** The data type both writes of this file are for. */
 export const EXERCISE_DATA_TYPE = "exercise";
@@ -193,12 +193,19 @@ export function callerTexts(body: ExerciseBody): string[] {
 }
 
 /**
- * The body of the delete request for one data point ID. The name is written
- * with `users/me`, the form of the request path: the reference says that
- * every name must share the parent of the path. Throws for a text that is not
- * a data point ID (a caller bug).
+ * The body of the delete request for one data point ID, or for several. The
+ * names are written with `users/me`, the form of the request path: the
+ * reference says that every name must share the parent of the path, and that
+ * `names` can hold up to {@link MAX_BATCH_DELETE} of them. Throws for a text
+ * that is not a data point ID, for no id, or for more than that (a caller bug).
  */
-export function deleteBody(id: string): { names: string[] } {
-  if (typeof id !== "string" || !POINT_ID_ONLY.test(id)) throw new Error("googlehealth: not a data point ID");
-  return { names: [`users/me/dataTypes/${EXERCISE_DATA_TYPE}/dataPoints/${id}`] };
+export function deleteBody(idOrIds: string | readonly string[]): { names: string[] } {
+  const ids = typeof idOrIds === "string" ? [idOrIds] : idOrIds;
+  if (ids.length === 0 || ids.length > MAX_BATCH_DELETE) throw new Error("googlehealth: not a data point ID");
+  return {
+    names: ids.map((id) => {
+      if (typeof id !== "string" || !POINT_ID_ONLY.test(id)) throw new Error("googlehealth: not a data point ID");
+      return `users/me/dataTypes/${EXERCISE_DATA_TYPE}/dataPoints/${id}`;
+    }),
+  };
 }

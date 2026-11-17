@@ -35,6 +35,7 @@ export const DATA_TYPES = [
   "total-calories",
   "weight",
   "body-fat",
+  "daily-vo2-max",
 ] as const;
 
 /** A Google Health API data type ID. */
@@ -80,6 +81,9 @@ export const TYPE_TABLE: Readonly<Record<DataType, TypeInfo>> = {
   "total-calories": { filterName: "total_calories", kind: "civilStart", ops: ["dailyRollup"], pageSize: 10000, rollupDays: 14 },
   weight: { filterName: "weight", kind: "physical", ops: ALL, pageSize: 10000, rollupDays: 90 },
   "body-fat": { filterName: "body_fat", kind: "physical", ops: ALL, pageSize: 10000, rollupDays: 90 },
+  // A daily summary (list and reconcile only; no rollup). The sample types
+  // vo2-max and run-vo2-max are a measurement and a run, not this summary.
+  "daily-vo2-max": { filterName: "daily_vo2_max", kind: "date", ops: LIST, pageSize: 10000, rollupDays: 0 },
 };
 
 /**

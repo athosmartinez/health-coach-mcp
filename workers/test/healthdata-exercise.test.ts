@@ -37,6 +37,7 @@ describe("exercises", () => {
         day: D10,
         type: "JIU_JITSU",
         name: "JIU JITSU",
+        notes: null,
         start: at(D10, 19, 0),
         end: at(D10, 20, 0),
         activeMin: 60,
@@ -247,6 +248,7 @@ describe("the sessions this server created", () => {
         id: listed("syn-own"),
         type: "OTHER",
         name: "Capoeira angola",
+        notes: "Roda de sexta",
         start: Date.parse("2026-10-16T10:10:00Z"),
         end: Date.parse("2026-10-16T11:25:00Z"),
         activeMin: 75,
@@ -257,6 +259,16 @@ describe("the sessions this server created", () => {
         source: "GOOGLE_WEB_API",
       },
     });
+    const without = { name: listed("syn-own"), ...createBody({ ...WRITTEN, notes: undefined }) };
+    const bare = parseExercise(without, new Set(["syn-own"]));
+    expect(bare.kind === "session" ? bare.session.notes : undefined).toBeNull();
+    const unreadable = { name: listed("syn-own"), ...createBody(WRITTEN) } as { exercise: { notes: unknown } };
+    unreadable.exercise.notes = 12;
+    expect(parseExercise(unreadable, new Set(["syn-own"]))).toEqual({ kind: "undated" });
+    const long = { name: listed("syn-own"), ...createBody(WRITTEN) };
+    long.exercise.notes = "n".repeat(600);
+    const kept = parseExercise(long, new Set(["syn-own"]));
+    expect(kept.kind === "session" ? kept.session.notes : undefined).toBe("n".repeat(500));
   });
 
   it("has the bounds of a written session: a value the client writes is a value the reader keeps", () => {
@@ -291,6 +303,7 @@ describe("the sessions this server created", () => {
           day: D10,
           type: "OTHER",
           name: "OTHER",
+          notes: null,
           start: at(D10, 12, 0),
           end: at(D10, 12, 45),
           activeMin: 45,

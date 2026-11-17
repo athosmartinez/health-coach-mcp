@@ -89,11 +89,18 @@ export function hasEntry(db: Db, name: string, type: WriteDataType = "nutrition-
 }
 
 /**
- * Removes the row of an entry of the linked account that is gone from Google
- * Health. No row is not an error, and a row of another account stays.
+ * Removes the row of an entry that is gone from Google Health. No row is not
+ * an error, and a row of another account stays.
+ *
+ * `owner` is the account the delete was sent for: the one that was linked
+ * before the request. Another account can be the linked one when the answer
+ * comes, and the row to remove is still the one of `owner`. Without `owner`,
+ * the row is the one of the account that is linked now.
  */
-export function forgetEntry(db: Db, name: string, type: WriteDataType = "nutrition-log"): void {
-  db.all(`DELETE FROM ${TABLES[type].table} WHERE sub = ${LINKED} AND name = ?`, name);
+export function forgetEntry(db: Db, name: string, owner?: string, type: WriteDataType = "nutrition-log"): void {
+  const { table } = TABLES[type];
+  if (owner === undefined) db.all(`DELETE FROM ${table} WHERE sub = ${LINKED} AND name = ?`, name);
+  else db.all(`DELETE FROM ${table} WHERE sub = ? AND name = ?`, owner, name);
 }
 
 /**

@@ -11,7 +11,7 @@ import { ToolError, type WireError } from "../src/coach/errors";
 import { RECONNECT_HINT } from "../src/google";
 import { HEALTH_REQUESTS } from "../src/googlehealth/budget";
 import { MAY_EXIST_HINT, WRITE_OWN_REQUEST_HINT } from "../src/googlehealth/client";
-import { GOOGLE_MAX_QUANTITY, type NewFoodEntry, createBody } from "../src/googlehealth/nutritionlog";
+import { GOOGLE_MAX_QUANTITY, MAX_BATCH_DELETE, type NewFoodEntry, createBody, pointId } from "../src/googlehealth/nutritionlog";
 import { MAX_ITEM_GRAMS, MAX_ITEM_KCAL, MAX_LABEL_RUNES, clean } from "../src/healthdata";
 import { parseFood } from "../src/healthdata/nutrition";
 import type { CoachStore } from "../src/store";
@@ -63,6 +63,8 @@ interface FakeOptions {
   failForget?: boolean;
   /** The linked Google account at the start; null for none. Default: ACCOUNT. */
   account?: string | null;
+  /** Replaces the day's own entries, keyed by data point ID. Used to pass the batch cap. */
+  onDay?: (day: string) => ReadonlyMap<string, string>;
 }
 
 /** The `sub` of the linked account of the fake store. It must never reach a result, an error or a log line. */
@@ -90,6 +92,11 @@ function session(options: FakeOptions = {}) {
         removed.push(id);
         return options.remove ? options.remove(id) : "deleted";
       },
+      deleteNutritionLogs: async (ids) => {
+        steps.push("delete");
+        removed.push(...ids);
+        return options.remove ? options.remove(ids[0] ?? "") : "deleted";
+      },
     },
     // The rules of the store: an entry is recorded for the linked account,
     // and only the entries of the linked account are known.
@@ -106,10 +113,20 @@ function session(options: FakeOptions = {}) {
         steps.push("has");
         return rows.has(name) && owners.get(name) === linked.account;
       },
-      forget: (name) => {
+      onDay: (day) => {
+        steps.push("onDay");
+        const found = new Map<string, string>();
+        for (const [name, on] of rows) {
+          if (on !== day || owners.get(name) !== linked.account) continue;
+          const id = pointId(name);
+          if (id !== undefined) found.set(id, name);
+        }
+        return options.onDay ? options.onDay(day) : found;
+      },
+      forget: (name, owner) => {
         steps.push("forget");
         if (options.failForget) throw new DiskError();
-        if (owners.get(name) !== linked.account) return;
+        if (owners.get(name) !== owner) return;
         rows.delete(name);
         owners.delete(name);
       },
@@ -211,14 +228,21 @@ describe("the two write tools as they are listed", () => {
 
     expect(remove?.inputSchema).toEqual({
       type: "object",
-      properties: { entry_id: { type: "string", description: expect.any(String), maxLength: 256 } },
-      required: ["entry_id"],
+      properties: {
+        entry_id: { type: ["null", "string"], description: expect.any(String), maxLength: 256 },
+        date: { type: ["null", "string"], description: expect.any(String), pattern: "^(?:\\d{4}-\\d{2}-\\d{2})?$" },
+      },
       additionalProperties: false,
     });
     expect(remove?.outputSchema).toEqual({
       type: "object",
-      properties: { entry_id: { type: "string" }, deleted: { type: "boolean" } },
-      required: ["entry_id", "deleted"],
+      properties: {
+        entry_id: { type: "string", description: expect.any(String) },
+        date: { type: "string", description: expect.any(String) },
+        deleted: { type: "boolean" },
+        deleted_count: { type: "number", description: expect.any(String) },
+      },
+      required: ["deleted"],
       additionalProperties: false,
     });
     expect(add?.outputSchema.required).toEqual(["entry_id", "date", "time", "meal_type", "kcal", "protein_g", "carbs_g", "fat_g", "notice"]);
@@ -757,6 +781,16 @@ describe("nutrition_log_delete", () => {
   it.each([
     ["no entry_id", {}],
     ["a null entry_id", { entry_id: null }],
+    ["entry_id and date together", { entry_id: OWN, date: TODAY }],
+  ])("asks for entry_id or date, and not both, for %s", async (_name, args) => {
+    const { s } = await withEntry();
+    const error = await s.fails("nutrition_log_delete", args);
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toMatch(/^send entry_id or date/);
+    expect(s.steps).toEqual([]);
+  });
+
+  it.each([
     ["an entry_id that is not a text", { entry_id: 7 }],
     ["a list of ids", { entry_id: [OWN] }],
     ["a property the tool does not have", { entry_id: OWN, force: true }],
@@ -820,6 +854,88 @@ describe("nutrition_log_delete", () => {
     expect(await s.ok("nutrition_log_delete", { entry_id: entryId })).toEqual({ entry_id: entryId, deleted: true });
     expect(s.removed).toEqual(["syn-entry-1"]);
     expect(s.rows.size).toBe(0);
+  });
+
+  it("deletes every entry of the day this server created, and never an entry of another account", async () => {
+    const s = session();
+    const first = await s.ok("nutrition_log_add", { ...FOOD, date: TODAY, time: "08:00" });
+    const second = await s.ok("nutrition_log_add", { ...FOOD, name: "Other plate", date: TODAY, time: "08:30" });
+    s.linked.account = "400000000000000000004";
+    const foreign = await s.ok("nutrition_log_add", { ...FOOD, name: "Their plate", date: TODAY, time: "09:00" });
+    s.linked.account = ACCOUNT;
+    s.removed.length = 0;
+    expect(await s.ok("nutrition_log_delete", { date: TODAY })).toEqual({ date: TODAY, deleted: true, deleted_count: 2 });
+    expect(s.removed.sort()).toEqual([pointId(first.entry_id), pointId(second.entry_id)].sort());
+    expect([...s.rows.keys()]).toEqual([foreign.entry_id]);
+    expect(s.steps.filter((step) => step === "delete")).toEqual(["delete"]);
+    // The day is empty for this account: nothing is sent.
+    expect(await s.fails("nutrition_log_delete", { date: TODAY })).toMatchObject({ code: "no_data", message: "this server created no entry on that day" });
+    expect(s.removed).toHaveLength(2);
+  });
+
+  it.each([
+    ["one entry", (first: string) => ({ entry_id: first }), 1],
+    ["a day", () => ({ date: TODAY }), 0],
+  ])("removes the rows of the account the delete was sent for when another account is linked before Google answers: %s", async (_name, args, left) => {
+    const other = "400000000000000000004";
+    // Another account signs in while the delete is on its way.
+    const s = session({
+      remove: async () => {
+        s.linked.account = other;
+        return "deleted";
+      },
+    });
+    const first = await s.ok("nutrition_log_add", { ...FOOD, date: TODAY, time: "08:00" });
+    const second = await s.ok("nutrition_log_add", { ...FOOD, name: "Other plate", date: TODAY, time: "08:30" });
+    s.linked.account = other;
+    const foreign = await s.ok("nutrition_log_add", { ...FOOD, date: TODAY, time: "08:00" });
+    s.linked.account = ACCOUNT;
+    await s.ok("nutrition_log_delete", args(first.entry_id as string));
+    expect(s.linked.account).toBe(other);
+    // The rows of the first account are gone, and the row of the account that is linked now stays.
+    expect([...s.rows.keys()]).toEqual(left === 1 ? [second.entry_id, foreign.entry_id] : [foreign.entry_id]);
+  });
+
+  it("keeps every row of a day of several entries when Google answers that it found none", async () => {
+    // The answer does not say which of the entries Google still holds.
+    const s = session({ remove: async () => "gone" });
+    const first = await s.ok("nutrition_log_add", { ...FOOD, date: TODAY, time: "08:00" });
+    const second = await s.ok("nutrition_log_add", { ...FOOD, name: "Other plate", date: TODAY, time: "08:30" });
+    g.clearLogs();
+    const error = await s.fails("nutrition_log_delete", { date: TODAY });
+    expect(error).toEqual({
+      code: "invalid_input",
+      message: "Google Health did not find every entry of that day, and may have deleted none",
+      hint: "delete each entry by its entry_id, which nutrition_day lists",
+    });
+    expect([...s.rows.keys()].sort()).toEqual([first.entry_id, second.entry_id].sort());
+    expect(s.steps.filter((step) => step === "forget")).toEqual([]);
+    expectNoSecret(g.logged());
+    // One id at a time, the same answer proves that this entry is gone.
+    expect(await s.ok("nutrition_log_delete", { entry_id: first.entry_id })).toEqual({ entry_id: first.entry_id, deleted: true });
+    expect([...s.rows.keys()]).toEqual([second.entry_id]);
+    // A day with one entry left names one point: its answer is proof too.
+    expect(await s.ok("nutrition_log_delete", { date: TODAY })).toEqual({ date: TODAY, deleted: true, deleted_count: 1 });
+    expect(s.rows.size).toBe(0);
+  });
+
+  it("does not delete a day that is after today, or a day with more entries than one request can name", async () => {
+    const future = session();
+    expect(await future.fails("nutrition_log_delete", { date: "2026-10-17" })).toMatchObject({ code: "invalid_input", message: "date is after today" });
+    expect(future.steps).toEqual([]);
+    const ids = Array.from({ length: MAX_BATCH_DELETE + 1 }, (_unused, n) => `syn-cap-${n}`);
+    const over = session({ onDay: () => new Map(ids.map((id) => [id, `users/me/dataTypes/nutrition-log/dataPoints/${id}`])) });
+    expect(await over.fails("nutrition_log_delete", { date: TODAY })).toMatchObject({
+      code: "invalid_input",
+      message: "that day has more entries than one delete can send",
+    });
+    expect(over.removed).toEqual([]);
+  });
+
+  it("answers auth_expired for a date when no account is linked, and sends nothing", async () => {
+    const s = session({ account: null });
+    expect(await s.fails("nutrition_log_delete", { date: TODAY })).toMatchObject({ code: "auth_expired" });
+    expect(s.steps).toEqual([]);
   });
 
   it.each([
@@ -909,8 +1025,8 @@ describe("a schema error of a write tool", () => {
     ["a date that is a number", "nutrition_log_add", { date: 431.5 }, "date must be a text or null"],
     ["a time that is the food name", "nutrition_log_add", { time: "Feijoada completa" }, "time does not have the format that its description gives"],
     ["a time that is a number", "nutrition_log_add", { time: 17.5 }, "time must be a text or null"],
-    ["an entry id that is a number", "nutrition_log_delete", { entry_id: 431.5 }, "entry_id must be a text"],
-    ["an entry id that is a list of ids", "nutrition_log_delete", { entry_id: [entryName(1)] }, "entry_id must be a text"],
+    ["an entry id that is a number", "nutrition_log_delete", { entry_id: 431.5 }, "entry_id must be a text or null"],
+    ["an entry id that is a list of ids", "nutrition_log_delete", { entry_id: [entryName(1)] }, "entry_id must be a text or null"],
     ["an entry id longer than the cap", "nutrition_log_delete", { entry_id: `${entryName(1)}${"-syn-entry".repeat(30)}` }, "entry_id must be at most 256 characters"],
   ] as [string, string, Record<string, unknown>, string][])("names the property and its rule for %s, and never the value", async (_name, tool, change, message) => {
     const base = tool === "nutrition_log_add" ? FOOD : {};
@@ -920,7 +1036,6 @@ describe("a schema error of a write tool", () => {
   it("names a property that is missing", async () => {
     expect(await schemaError("nutrition_log_add", { name: "Feijoada completa", meal_type: "LUNCH" })).toBe(`${SCHEMA_PREFIX}kcal is required`);
     expect(await schemaError("nutrition_log_add", { kcal: 431.5 })).toBe(`${SCHEMA_PREFIX}name is required`);
-    expect(await schemaError("nutrition_log_delete", {})).toBe(`${SCHEMA_PREFIX}entry_id is required`);
   });
 
   it("has one text for arguments that are not an object", async () => {
@@ -1034,6 +1149,31 @@ describe("the write tools through /mcp of the object", () => {
     // A second delete of the same id: no_data, and no request.
     expect(await objectTool(stub, "nutrition_log_delete", { entry_id: added.output.entry_id })).toMatchObject({ ok: false, error: { code: "no_data" } });
     expect(g.takeExternal()).toEqual({ total: 0 });
+  });
+
+  it("deletes the day's own entries in one batchDelete and leaves food another app logged", async () => {
+    const stub = await linkedStore();
+    expect((await objectTool(stub, "nutrition_log_add", FOOD)).ok).toBe(true);
+    expect((await objectTool(stub, "nutrition_log_add", { ...FOOD, name: "Other plate", time: "09:00" })).ok).toBe(true);
+    g.google.add("nutrition-log", foodRec(at(TODAY, 19, 0), { meal: "DINNER", kcal: 100, name: "users/me/dataTypes/nutrition-log/dataPoints/syn-other-app" }));
+    g.takeExternal();
+    expect(await objectTool(stub, "nutrition_log_delete", { date: TODAY })).toEqual({
+      ok: true,
+      output: { date: TODAY, deleted: true, deleted_count: 2 },
+    });
+    expect(g.takeExternal()).toEqual({ total: 1, "delete nutrition-log": 1 });
+    expect(g.google.writes.at(-1)).toEqual({
+      kind: "delete",
+      body: {
+        names: ["users/me/dataTypes/nutrition-log/dataPoints/syn-created-1", "users/me/dataTypes/nutrition-log/dataPoints/syn-created-2"],
+      },
+    });
+    expect(await storedEntries(stub)).toEqual([]);
+    expect(await objectTool(stub, "nutrition_log_delete", { date: TODAY })).toMatchObject({ ok: false, error: { code: "no_data" } });
+    expect(g.takeExternal()).toEqual({ total: 0 });
+    // The band's item is still in the log: its name was not in the delete.
+    const review = await objectTool(stub, "nutrition_day", { date: TODAY });
+    expect(review).toMatchObject({ ok: true, output: { data: { items_logged: 1, per_meal: [{ items: [{ entry_id: null }] }] } } });
   });
 
   it("delete takes Google's own 404 (NOT_FOUND) as an entry that is already gone", async () => {

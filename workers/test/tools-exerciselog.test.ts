@@ -133,10 +133,10 @@ function session(options: FakeOptions = {}) {
         }
         return found;
       },
-      forget: (name) => {
+      forget: (name, owner) => {
         steps.push("forget");
         if (options.failForget) throw new DiskError();
-        if (owners.get(name) !== linked.account) return;
+        if (owners.get(name) !== owner) return;
         rows.delete(name);
         owners.delete(name);
       },
@@ -940,6 +940,29 @@ describe("exercise_log_delete", () => {
     expect([...s.rows.keys()]).toEqual([foreign.entry_id]);
     expect(await s.fails("exercise_log_delete", { date: TODAY })).toMatchObject({ code: "no_data", message: "this server created no entry on that day" });
     expect(s.removed).toHaveLength(2);
+  });
+
+  it.each([
+    ["one session", (first: string) => ({ entry_id: first }), 1],
+    ["a day", () => ({ date: TODAY }), 0],
+  ])("removes the rows of the account the delete was sent for when another account is linked before Google answers: %s", async (_name, args, left) => {
+    const other = "400000000000000000004";
+    // Another account signs in while the delete is on its way.
+    const s = session({
+      remove: async () => {
+        s.linked.account = other;
+        return "deleted";
+      },
+    });
+    const first = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    const second = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "08:00", duration_min: 30 });
+    s.linked.account = other;
+    const foreign = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    s.linked.account = ACCOUNT;
+    await s.ok("exercise_log_delete", args(first.entry_id as string));
+    expect(s.linked.account).toBe(other);
+    // The rows of the first account are gone, and the row of the account that is linked now stays.
+    expect([...s.rows.keys()]).toEqual(left === 1 ? [second.entry_id, foreign.entry_id] : [foreign.entry_id]);
   });
 
   it("keeps every row of a day of several sessions when Google answers that it found none", async () => {

@@ -43,10 +43,10 @@ describe("the sessions this server created", () => {
       expect([...entryNamesBetween(db, "2026-10-13", "2026-10-13").values()]).toEqual([FOOD]);
       // Forgetting one leaves the other.
       forgetEntry(db, NAME);
-      forgetEntry(db, FOOD, TYPE);
+      forgetEntry(db, FOOD, undefined, TYPE);
       expect(hasEntry(db, NAME, TYPE)).toBe(true);
       expect(hasEntry(db, FOOD)).toBe(true);
-      forgetEntry(db, NAME, TYPE);
+      forgetEntry(db, NAME, undefined, TYPE);
       expect(rows(sql)).toEqual([]);
       expect(rows(sql, "nutrition_entries")).toHaveLength(1);
     }));
@@ -90,7 +90,7 @@ describe("the sessions this server created", () => {
       expect([...entryIdsBetween(db, "2026-10-12", "2026-10-12", TYPE)]).toEqual(["syn-a"]);
       expect(entryNamesBetween(db, "2026-10-16", "2026-10-20", TYPE).size).toBe(0);
       expect(entryNamesBetween(db, "2026-10-14", "2026-10-13", TYPE).size).toBe(0);
-      forgetEntry(db, underMe, TYPE);
+      forgetEntry(db, underMe, undefined, TYPE);
       expect([...entryIdsBetween(db, "2026-10-13", "2026-10-14", TYPE)]).toEqual(["syn-session-1"]);
     }));
 
@@ -141,7 +141,7 @@ describe("the sessions of the linked Google account", () => {
       expect(hasEntry(db, NAME, TYPE)).toBe(false);
       expect(entryNamesBetween(db, "2026-10-13", "2026-10-13", TYPE).size).toBe(0);
       // Forgetting it does nothing: the row is not the linked account's.
-      forgetEntry(db, NAME, TYPE);
+      forgetEntry(db, NAME, undefined, TYPE);
       expect(rows(sql)).toMatchObject([{ sub: OWNER_SUB, name: NAME }]);
       // The new account has sessions of its own, also one with the same name.
       recordEntry(db, OTHER, "2026-10-14", undefined, TYPE);
@@ -157,7 +157,7 @@ describe("the sessions of the linked Google account", () => {
       expect(hasEntry(db, NAME, TYPE)).toBe(true);
       expect(hasEntry(db, OTHER, TYPE)).toBe(false);
       expect([...entryNamesBetween(db, "2026-10-01", "2026-10-31", TYPE).values()]).toEqual([NAME]);
-      forgetEntry(db, NAME, TYPE);
+      forgetEntry(db, NAME, undefined, TYPE);
       expect(rows(sql)).toMatchObject([
         { sub: OTHER_SUB, name: NAME },
         { sub: OTHER_SUB, name: OTHER },
@@ -170,7 +170,7 @@ describe("the sessions of the linked Google account", () => {
       sql.exec("DELETE FROM google_account");
       expect(hasEntry(db, NAME, TYPE)).toBe(false);
       expect(entryIdsBetween(db, "2026-10-13", "2026-10-13", TYPE).size).toBe(0);
-      forgetEntry(db, NAME, TYPE);
+      forgetEntry(db, NAME, undefined, TYPE);
       expect(() => recordEntry(db, OTHER, "2026-10-13", OWNER_SUB, TYPE)).toThrow("store: no Google account is linked");
       // The row of the account that was linked stays, for when it is linked again.
       expect(rows(sql)).toMatchObject([{ sub: OWNER_SUB, name: NAME }]);

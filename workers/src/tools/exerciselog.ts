@@ -476,7 +476,7 @@ async function deleteExerciseDay(deps: ExerciseLogDeps, day: LocalDate, owner: s
     );
   }
   try {
-    for (const stored of names.values()) deps.entries.forget(stored);
+    for (const stored of names.values()) deps.entries.forget(stored, owner);
   } catch (cause) {
     throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
       cause,
@@ -558,7 +558,7 @@ const EXERCISE_LOG_DELETE = writeTool(
     // token of this account.
     await deps.api.deleteExercise(id, owner);
     try {
-      deps.entries.forget(entryId);
+      deps.entries.forget(entryId, owner);
     } catch (cause) {
       throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
         cause,

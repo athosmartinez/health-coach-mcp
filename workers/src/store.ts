@@ -307,7 +307,7 @@ export class CoachStore extends DurableObject<Env> {
         },
         has: (name) => hasEntry(db, name, type),
         onDay: (day) => entryNamesBetween(db, day, day, type),
-        forget: (name) => forgetEntry(db, name, type),
+        forget: (name, owner) => forgetEntry(db, name, owner, type),
       });
       let writeDeps: WriteDeps | undefined;
       const newWriteDeps = (): WriteDeps | undefined => {

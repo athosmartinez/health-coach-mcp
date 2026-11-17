@@ -62,7 +62,11 @@ export interface Entries {
    * data point ID. An entry of another account is not included, and neither is an entry this server did not create.
    */
   onDay(day: LocalDate): ReadonlyMap<string, string>;
-  forget(name: string): void;
+  /**
+   * Removes the row of an entry of `owner`, the account the delete was sent for. Another account can be the
+   * linked one when Google answers: the row that goes is still the one of `owner`, and no row of another account.
+   */
+  forget(name: string, owner: string): void;
 }
 
 /** What the write tools need. */
@@ -346,7 +350,7 @@ async function deleteFoodDay(deps: WriteDeps, day: LocalDate, owner: string): Pr
     );
   }
   try {
-    for (const stored of names.values()) deps.entries.forget(stored);
+    for (const stored of names.values()) deps.entries.forget(stored, owner);
   } catch (cause) {
     throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
       cause,
@@ -428,7 +432,7 @@ const NUTRITION_LOG_DELETE = writeTool(
     // token of this account.
     await deps.api.deleteNutritionLog(id, owner);
     try {
-      deps.entries.forget(entryId);
+      deps.entries.forget(entryId, owner);
     } catch (cause) {
       throw new ToolError("internal_error", "the entry was deleted in Google Health, but this server could not update its record", "no other step is needed", {
         cause,

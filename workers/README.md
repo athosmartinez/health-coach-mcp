@@ -220,7 +220,7 @@ POST https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoint
 {"names":["users/me/dataTypes/nutrition-log/dataPoints/<id>"]}
 ```
 
-- The answer is an `Operation`. The server never uses the wildcard data type (`dataTypes/-`) and never sends more than one name.
+- The answer is an `Operation`. The server never uses the wildcard data type (`dataTypes/-`). One id sends one name. A `date` sends every name this server stored for that day, under `users/me`.
 - A write answer is read through a cap of 64 KiB and parsed whole.
 
 ### A create is never sent twice

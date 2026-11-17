@@ -12,7 +12,7 @@ Product context is in [`docs/PRODUCT-BRIEF.md`](docs/PRODUCT-BRIEF.md). The tool
 
 - **Recovery, training, food and the week.** Morning readiness against your own recent nights, a day's workouts, a day's food log, an ISO week against the week before and the 28 days before that, and a series of one metric.
 - **Coach memory.** Profile, versioned targets (kcal, protein, weekly sessions), health history, lab results, preferences and notes the coach can search.
-- **Logging back to Google Health.** Add or delete one food entry, and add or delete one completed workout the band did not record. A delete removes only an entry this server created. A logged workout stays a separate record from the band's; when they overlap in time the result says so.
+- **Logging back to Google Health.** Add one food entry or one completed workout the band did not record, and delete one entry this server created, or every entry it created on a day. A logged workout stays a separate record from the band's; when they overlap in time the result says so.
 - **Prompts and guardrails.** Four prompts, one per coaching moment, and a `coach://guardrails` resource the answers are told to follow.
 - **Your account only.** Google sign-in is checked against an allowlist. Anyone else is refused, and nothing of that sign-in is stored.
 
@@ -135,19 +135,19 @@ These five read Google Health. Each result says how many days it rests on. The b
 | Tool | What it does |
 |---|---|
 | `morning_briefing` | Sleep, overnight HRV and resting heart rate against the recent baseline, yesterday's training load, and a readiness level. |
-| `workout_review` | The workouts of one day, or one session, the ISO week against the sessions target, and the night after. |
+| `workout_review` | The workouts of one day, or one session, the ISO week against the sessions target, and the night after. Each session includes its notes when the record has them. |
 | `nutrition_day` | One day's food log against the kcal and protein targets, with protein per kilogram and the energy balance when it can be shown. |
-| `weekly_report` | An ISO week against the previous week and the 28 days before it: weight, body fat, resting heart rate, HRV, sleep, steps, adherence and the week's decision notes. |
-| `metric_series` | Daily or weekly values of one metric over a range of at most 366 days and at most 180 points. |
+| `weekly_report` | An ISO week against the previous week and the 28 days before it: weight, body fat, resting heart rate, HRV, sleep, steps, the latest daily VO2 max, adherence and the week's decision notes. |
+| `metric_series` | Daily or weekly values of one metric, including daily VO2 max, over a range of at most 366 days and at most 180 points. |
 
 ### Logging to Google Health
 
 | Tool | What it does |
 |---|---|
 | `nutrition_log_add` | Logs one meal or food item in Google Health, with the calories and macros the client estimated, and returns `entry_id`. |
-| `nutrition_log_delete` | Deletes one food entry, and only an entry this server created. |
+| `nutrition_log_delete` | Deletes one food entry, or every food entry this server created on a day, and nothing it did not create. |
 | `exercise_log_add` | Logs one completed workout the band did not record, and returns `entry_id`. |
-| `exercise_log_delete` | Deletes one workout session, and only a session this server created. |
+| `exercise_log_delete` | Deletes one workout session, or every session this server created on a day, and nothing it did not create. |
 
 `nutrition_day` and `workout_review` repeat that `entry_id` on the item or session, so a later chat can delete it. An item or session this server did not create has `entry_id` null.
 

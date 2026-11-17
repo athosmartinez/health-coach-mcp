@@ -1066,14 +1066,29 @@ function redactWriteText(text: string): string {
     .trim();
 }
 
-/** A shorter text identifies nothing, and its removal would empty the message. */
+/**
+ * A text of fewer characters is removed only where it stands alone: as a part
+ * of a word or of a longer number it identifies nothing, and its removal
+ * there would empty the message. A calorie or macro amount is often that
+ * short (`50`), and it must not stay in the message.
+ */
 const MIN_ECHO_CHARS = 3;
+
+/**
+ * The edges of a short text that stands alone: no letter or digit touches it,
+ * and it is not a field of a time, a date or a decimal number (`14:50:00`,
+ * `2026-10-16`, `1.50`), which the server or Google wrote.
+ */
+const ALONE_BEFORE = "(?<![\\p{L}\\p{N}]|\\p{N}[.:\\-])";
+const ALONE_AFTER = "(?![\\p{L}\\p{N}]|[.:\\-]\\p{N})";
 
 const REGEXP_SYNTAX = /[\\^$.*+?()[\]{}|]/g;
 
 /**
  * `text` without every occurrence of a text of `echoes`, compared without
  * regard to letter case. Each removed stretch becomes one space.
+ * A text shorter than {@link MIN_ECHO_CHARS} characters is removed only
+ * where it stands alone.
  *
  * Every occurrence is marked on the text as Google sent it, and the marked
  * stretches are cut together: so a text that is part of another one (a name
@@ -1085,9 +1100,11 @@ function withoutEchoes(text: string, echoes: readonly string[]): string {
   const cut = new Array<boolean>(text.length).fill(false);
   let found = false;
   for (const echo of echoes) {
-    if ([...echo].length < MIN_ECHO_CHARS) continue;
+    if (echo === "") continue;
+    const literal = echo.replace(REGEXP_SYNTAX, "\\$&");
+    const pattern = [...echo].length < MIN_ECHO_CHARS ? `${ALONE_BEFORE}${literal}${ALONE_AFTER}` : literal;
     // A lookahead matches at every start, also where two occurrences overlap.
-    const occurrence = new RegExp(`(?=(${echo.replace(REGEXP_SYNTAX, "\\$&")}))`, "giu");
+    const occurrence = new RegExp(`(?=(${pattern}))`, "giu");
     for (const match of text.matchAll(occurrence)) {
       cut.fill(true, match.index, match.index + (match[1]?.length ?? 0));
       found = true;

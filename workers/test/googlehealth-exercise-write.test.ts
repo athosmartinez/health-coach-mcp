@@ -805,12 +805,15 @@ describe("a refusal of Google that repeats what the request sent", () => {
     expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${message}`);
   });
 
-  it("a create: a text shorter than 3 characters is not taken out", async () => {
-    // A kcal of 50 and a name of two letters: both are in the time of the session and in common words.
-    const message = "calories_kcal 50 at 2026-10-16T10:50:00Z is too low";
+  it("a create: a text shorter than 3 characters is taken out only where it stands alone", async () => {
+    // A kcal of 50 and a name of two letters: both are also in the time of the session and inside other words.
+    const message = "calories_kcal 50 at 2026-10-16T10:50:00Z is too low for this session, got: 50.";
     fakeApi(refusal(message));
-    await failure(testClient().client.createExercise({ ...SESSION, displayName: "is", kcal: 50, notes: undefined }, ACCOUNT));
-    expect(rejectLine()).toBe(message);
+    const error = await failure(testClient().client.createExercise({ ...SESSION, displayName: "is", kcal: 50, notes: undefined }, ACCOUNT));
+    // The amount and the name go. The minutes of the time and the letters of "this" and "session" stay.
+    const kept = "calories_kcal at 2026-10-16T10:50:00Z too low for this session, got: .";
+    expect(rejectLine()).toBe(kept);
+    expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${kept}`);
   });
 
   // Ids that the redaction of tokens and of account ids does not catch on its own: no digit, and fewer than 10 digits.

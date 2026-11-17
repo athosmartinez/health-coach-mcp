@@ -1066,11 +1066,15 @@ describe("a refusal of Google that repeats what the food request sent", () => {
     expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${message}`);
   });
 
-  it("a create: a text shorter than 3 characters is not taken out", async () => {
-    const message = "energy 50 at 2026-10-16T14:50:00Z is too low";
+  it("a create: an amount or a name shorter than 3 characters is taken out only where it stands alone", async () => {
+    // 50 kcal and 7 g, and a name of two letters. Each is also a part of a time, of a date or of a word.
+    const message = "energy 50 at 2026-10-07T14:50:00Z is too low; protein=7, name 'ok' looks broken (code 507)";
     fakeApi(refusal(message));
-    await failure(testClient().client.createNutritionLog({ ...ENTRY, name: "ok", kcal: 50, proteinGrams: undefined, carbGrams: undefined, fatGrams: undefined }, ACCOUNT));
-    expect(rejectLine()).toBe(message);
+    const error = await failure(testClient().client.createNutritionLog({ ...ENTRY, name: "ok", kcal: 50, proteinGrams: 7, carbGrams: undefined, fatGrams: undefined }, ACCOUNT));
+    // The amounts and the name go. The date, the time, "looks", "broken" and the longer number stay.
+    const kept = "energy at 2026-10-07T14:50:00Z is too low; protein= , name ' ' looks broken (code 507)";
+    expect(rejectLine()).toBe(kept);
+    expect(toWire(error).message).toBe(`Google Health refused the entry: ${REASON}: ${kept}`);
   });
 
   it.each(["syn_point_k", "4410772"])("a delete: the data point id %s is taken out, in any letter case", async (id) => {

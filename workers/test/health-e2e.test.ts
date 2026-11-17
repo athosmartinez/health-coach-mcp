@@ -180,7 +180,8 @@ describe("the Google Health read side, from the sign-in to a tool result", () =>
     expect(served).toHaveBeenCalledTimes(6);
     // The Google requests of each call, all to the Health API. test/coach-e2e.test.ts
     // holds the plan of each tool, and test/subrequests.test.ts the worst cases.
-    expect(requests).toEqual([8, 8, 4, 11, 1]);
+    // weekly_report lists daily-vo2-max once; the kcal target set above skips one activity read.
+    expect(requests).toEqual([8, 8, 4, 12, 1]);
     // The access token of the sign-in is sent to the Health API. No call asked for a new one.
     expect(new Set(g.auths)).toEqual(new Set([`Bearer ${GOOGLE_ACCESS_TOKEN}`]));
     // R4: the whole log is one line per call, with the tool name, the duration

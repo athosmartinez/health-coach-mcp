@@ -71,6 +71,31 @@ describe("daily vo2 max", () => {
       expect(out.skipped).toBe(1);
     }));
 
+  it("makes the same choice for a day in every order of its records", () =>
+    inStore(async (db) => {
+      const estimatedLow = (day: string) => vo2Rec(day, 40, { estimated: true });
+      const estimatedHigh = (day: string) => vo2Rec(day, 42, { estimated: true });
+      const measured = (day: string) => vo2Rec(day, 45);
+      // Two estimated readings that differ, and one that is not estimated, in three orders.
+      for (const record of [estimatedLow, estimatedHigh, measured]) h.google.add("daily-vo2-max", record("2026-10-10"));
+      for (const record of [measured, estimatedLow, estimatedHigh]) h.google.add("daily-vo2-max", record("2026-10-11"));
+      for (const record of [estimatedLow, measured, estimatedHigh]) h.google.add("daily-vo2-max", record("2026-10-12"));
+      // Only estimated readings, and they differ: the day is unread.
+      for (const record of [estimatedLow, estimatedHigh]) h.google.add("daily-vo2-max", record("2026-10-13"));
+      // Two readings that are not estimated differ: an estimated one does not settle the day.
+      h.google.add("daily-vo2-max", vo2Rec("2026-10-14", 44));
+      h.google.add("daily-vo2-max", vo2Rec("2026-10-14", 45, { estimated: true }));
+      h.google.add("daily-vo2-max", vo2Rec("2026-10-14", 46));
+      const out = await newData(db).vo2("2026-10-10", "2026-10-14");
+      const kept = { value: 45, estimated: false, source: "Synthetic Band" };
+      expect([...out.days.entries()]).toEqual([
+        ["2026-10-10", kept],
+        ["2026-10-11", kept],
+        ["2026-10-12", kept],
+      ]);
+      expect(out.skipped).toBe(2);
+    }));
+
   it("is a miss with no records, and the next call asks again", () =>
     inStore(async (db) => {
       const data = newData(db);

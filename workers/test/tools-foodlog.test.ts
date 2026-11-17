@@ -873,6 +873,29 @@ describe("nutrition_log_delete", () => {
     expect(s.removed).toHaveLength(2);
   });
 
+  it("keeps every row of a day of several entries when Google answers that it found none", async () => {
+    // The answer does not say which of the entries Google still holds.
+    const s = session({ remove: async () => "gone" });
+    const first = await s.ok("nutrition_log_add", { ...FOOD, date: TODAY, time: "08:00" });
+    const second = await s.ok("nutrition_log_add", { ...FOOD, name: "Other plate", date: TODAY, time: "08:30" });
+    g.clearLogs();
+    const error = await s.fails("nutrition_log_delete", { date: TODAY });
+    expect(error).toEqual({
+      code: "invalid_input",
+      message: "Google Health did not find every entry of that day, and may have deleted none",
+      hint: "delete each entry by its entry_id, which nutrition_day lists",
+    });
+    expect([...s.rows.keys()].sort()).toEqual([first.entry_id, second.entry_id].sort());
+    expect(s.steps.filter((step) => step === "forget")).toEqual([]);
+    expectNoSecret(g.logged());
+    // One id at a time, the same answer proves that this entry is gone.
+    expect(await s.ok("nutrition_log_delete", { entry_id: first.entry_id })).toEqual({ entry_id: first.entry_id, deleted: true });
+    expect([...s.rows.keys()]).toEqual([second.entry_id]);
+    // A day with one entry left names one point: its answer is proof too.
+    expect(await s.ok("nutrition_log_delete", { date: TODAY })).toEqual({ date: TODAY, deleted: true, deleted_count: 1 });
+    expect(s.rows.size).toBe(0);
+  });
+
   it("does not delete a day that is after today, or a day with more entries than one request can name", async () => {
     const future = session();
     expect(await future.fails("nutrition_log_delete", { date: "2026-10-17" })).toMatchObject({ code: "invalid_input", message: "date is after today" });

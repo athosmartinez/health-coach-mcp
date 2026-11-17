@@ -942,6 +942,27 @@ describe("exercise_log_delete", () => {
     expect(s.removed).toHaveLength(2);
   });
 
+  it("keeps every row of a day of several sessions when Google answers that it found none", async () => {
+    // The answer does not say which of the sessions Google still holds.
+    const s = session({ remove: async () => "gone" });
+    const first = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "07:00", duration_min: 30 });
+    const second = await s.ok("exercise_log_add", { ...WORKOUT, date: TODAY, start_time: "08:00", duration_min: 30 });
+    const error = await s.fails("exercise_log_delete", { date: TODAY });
+    expect(error).toEqual({
+      code: "invalid_input",
+      message: "Google Health did not find every entry of that day, and may have deleted none",
+      hint: "delete each session by its entry_id, which workout_review lists",
+    });
+    expect([...s.rows.keys()].sort()).toEqual([first.entry_id, second.entry_id].sort());
+    expect(s.steps.filter((step) => step === "forget")).toEqual([]);
+    // One id at a time, the same answer proves that this session is gone.
+    expect(await s.ok("exercise_log_delete", { entry_id: first.entry_id })).toEqual({ entry_id: first.entry_id, deleted: true });
+    expect([...s.rows.keys()]).toEqual([second.entry_id]);
+    // A day with one session left names one point: its answer is proof too.
+    expect(await s.ok("exercise_log_delete", { date: TODAY })).toEqual({ date: TODAY, deleted: true, deleted_count: 1 });
+    expect(s.rows.size).toBe(0);
+  });
+
   it("keeps the row when the client does not send the delete because its token is of another account", async () => {
     const notSent = new ToolError("invalid_input", "the linked Google account changed during this MCP request: the delete was not sent", "send this call in a request of its own");
     const { s, entryId } = await withEntry({

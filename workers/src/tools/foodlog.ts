@@ -332,7 +332,19 @@ async function deleteFoodDay(deps: WriteDeps, day: LocalDate, owner: string): Pr
     throw new ToolError("invalid_input", "that day has more entries than one delete can send", "delete them by entry_id");
   }
   const ids = [...names.keys()].sort();
-  await deps.api.deleteNutritionLogs(ids, owner);
+  const outcome = await deps.api.deleteNutritionLogs(ids, owner);
+  // "gone" for one name proves that Google no longer has that point. For
+  // several names, the reference does not say whether Google removed the
+  // points it has or refused the whole request. So no row is removed: a row
+  // that is forgotten while Google still holds its point can never be deleted
+  // by this server again. A delete by entry_id settles each row on its own.
+  if (outcome === "gone" && ids.length > 1) {
+    throw new ToolError(
+      "invalid_input",
+      "Google Health did not find every entry of that day, and may have deleted none",
+      "delete each entry by its entry_id, which nutrition_day lists",
+    );
+  }
   try {
     for (const stored of names.values()) deps.entries.forget(stored);
   } catch (cause) {

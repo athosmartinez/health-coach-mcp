@@ -104,7 +104,7 @@ Recovery for the night that ended on `date`.
   days, no encouragement of very low intake, doctor or registered dietitian referral.
 
 #### `workout_review(date? | exercise_id?)`
-- **sessions[]:** type, duration, average/max HR, `heart_rate_zone_durations`, kcal, AZM.
+- **sessions[]:** type, duration, average/max HR, `heart_rate_zone_durations`, kcal, AZM. **Worker only:** `notes` is the session's own note, or null when the record has none.
 - **week_context:** sessions this week vs `weekly_sessions_target`, minutes per type.
 - **recovery_context:** that night's HRV and resting HR (if available).
 - **quality_flags:** `low_hr_for_activity`, `manual_entry`, `no_hr_data`.

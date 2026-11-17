@@ -228,11 +228,11 @@ const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
  * and line or paragraph separator characters are dropped and the length is
  * capped. U+FFFD (what invalid UTF-8 decodes to) and lone surrogates go too.
  */
-export function clean(s: string): string {
+export function clean(s: string, max = MAX_LABEL_RUNES): string {
   let out = "";
   let kept = 0;
   for (const char of s) {
-    if (kept === MAX_LABEL_RUNES) break;
+    if (kept === max) break;
     if (dropped(char)) continue;
     out += char;
     kept++;

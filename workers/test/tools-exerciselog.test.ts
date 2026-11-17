@@ -1514,8 +1514,10 @@ describe("the reads of a session this server logged", () => {
       // It covers time of the band's class: the same workout may be there twice.
       quality_flags: ["manual_entry", "no_hr_data", "overlaps_band_session"],
       source: "GOOGLE_WEB_API",
+      notes: null,
       entry_id: createdName(2),
     });
+    expect(sessions[2]?.notes).toBe("Roda de sexta");
     expect(sessions[2]).toMatchObject({ type: "OTHER", name: "Capoeira angola", active_min: 45, kcal: 300.5, avg_hr_bpm: null, quality_flags: ["manual_entry", "no_hr_data"] });
     // Nothing of the two records is merged: the band's class keeps its own values and flags.
     expect(sessions[0]).toMatchObject({ active_min: 60, avg_hr_bpm: 81, kcal: 400, quality_flags: ["low_hr_for_activity"], entry_id: null });

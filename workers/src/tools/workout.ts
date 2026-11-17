@@ -114,6 +114,7 @@ const WORKOUT_REVIEW_DATA = s.object({
       exercise_id: s.string(),
       type: s.string(),
       name: s.string(),
+      notes: s.nullable(s.string("the session's notes, or null when the record has none")),
       start: s.string(),
       end: s.string(),
       active_min: s.number(),
@@ -253,6 +254,7 @@ function sessionOf(deps: CoachDeps, session: Exercise, own: ReadonlyMap<string, 
     exercise_id: session.id,
     type: session.type,
     name: session.name,
+    notes: session.notes,
     start: localTime(session.start, deps.zone),
     end: localTime(session.end, deps.zone),
     active_min: round1(session.activeMin),
@@ -341,16 +343,17 @@ function workoutInput() {
 }
 
 /**
- * What the description adds to the Go server's text: the sessions that
- * exercise_log_add logged, their id and their flag, on a session and on the
- * result.
+ * What the description adds past the frozen tools/list fixture: the sessions
+ * that exercise_log_add logged, their id, their flag and their notes, on a
+ * session and on the result.
  */
 export const LOGGED_SESSIONS =
   " A session this server logged has entry_id, the id exercise_log_delete accepts, and the flags manual_entry " +
   "and no_hr_data; a session of the band, or logged for another linked Google account, has entry_id null. " +
   "overlaps_band_session marks a logged session that overlaps a band session in time: the two are separate " +
   "records, and the same workout may be counted twice. In the result's quality_flags it also covers the " +
-  "sessions of the week: week_context may then count the same workout twice.";
+  "sessions of the week: week_context may then count the same workout twice. notes is the session's own note " +
+  "when the record has one, and null when it does not.";
 
 export const WORKOUT_REVIEW = coachTool(
   {

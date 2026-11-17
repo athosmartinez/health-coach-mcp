@@ -1,7 +1,7 @@
 // Workout sessions.
 
 import type { LocalDate } from "../coach/date";
-import { pointId } from "../googlehealth/exerciselog";
+import { MAX_NOTES_CHARS, pointId } from "../googlehealth/exerciselog";
 import { FLAG_OVERLAPS_BAND_SESSION, exerciseFlags } from "../metrics/quality";
 import type { Context } from "./cache";
 import { ZERO_TIME, clean, dataSource, decode, float, int64s, label, object, optionalInt64s, parseDuration, root, text, time } from "./decode";
@@ -39,6 +39,8 @@ export interface Exercise {
   type: string;
   /** Display name. */
   name: string;
+  /** The record's notes, or null when it has none. */
+  notes: string | null;
   start: Date;
   end: Date;
   /** Without pauses. */
@@ -144,6 +146,7 @@ function readExercise(record: unknown) {
     source: dataSource(r),
     present: exercise !== undefined,
     displayName: text(exercise, "displayName"),
+    notes: text(exercise, "notes"),
     exerciseType: text(exercise, "exerciseType"),
     activeDuration: text(exercise, "activeDuration"),
     start: time(interval, "startTime"),
@@ -207,6 +210,7 @@ export function parseExercise(record: unknown, own?: ReadonlySet<string>): Exerc
       id: RESOURCE_NAME.test(r.name) ? r.name : "",
       type: clean(r.exerciseType),
       name: clean(r.displayName),
+      notes: clean(r.notes, MAX_NOTES_CHARS) || null,
       start,
       end,
       activeMin,

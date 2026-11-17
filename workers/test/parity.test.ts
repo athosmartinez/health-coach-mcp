@@ -86,8 +86,11 @@ function withoutSessionEntryId(tool: ListedTool | undefined): ListedTool | undef
     properties?: { data?: { properties?: { sessions?: { items?: { properties?: Record<string, unknown>; required?: string[] } } } } };
   };
   const session = output.properties?.data?.properties?.sessions?.items;
-  if (session?.properties) delete session.properties.entry_id;
-  if (session?.required) session.required = session.required.filter((field) => field !== "entry_id");
+  if (session?.properties) {
+    delete session.properties.entry_id;
+    delete session.properties.notes;
+  }
+  if (session?.required) session.required = session.required.filter((field) => field !== "entry_id" && field !== "notes");
   return copy;
 }
 
@@ -142,7 +145,9 @@ describe("parity with the Go server's tools/list", () => {
       // The field is there, required and nullable, before it is taken out for the comparison.
       const session = (worker?.outputSchema as any).properties.data.properties.sessions.items;
       expect(session.properties.entry_id).toEqual({ type: ["null", "string"], description: expect.stringContaining("exercise_log_delete") });
-      expect(session.required).toContain("entry_id");
+      expect(session.properties.notes).toEqual({ type: ["null", "string"], description: expect.stringContaining("notes") });
+      expect(session.required).toEqual(expect.arrayContaining(["entry_id", "notes"]));
+      expect(LOGGED_SESSIONS).toContain("notes is the session's own note when the record has one");
       expect(canonical(withoutSessionEntryId(worker))).toBe(canonical(go));
       return;
     }

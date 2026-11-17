@@ -54,6 +54,7 @@ describe("workout_review", () => {
       exercise_id: `${ID}2`,
       type: "JIU_JITSU",
       name: "Session 2",
+      notes: null,
       start: "2026-10-14T19:00:00-03:00",
       end: "2026-10-14T20:00:00-03:00",
       active_min: 60,
@@ -98,6 +99,14 @@ describe("workout_review", () => {
       "exercises 2026-10-12..2026-10-16 maxHR=false",
       "recovery 2026-09-17..2026-10-15",
     ]);
+  });
+
+  it("shows the notes the record carries", async () => {
+    const h = workoutWeek();
+    const day = h.sessions.find((one) => one.day === "2026-10-14");
+    if (day) day.notes = "Roda de sexta";
+    const out = await review(h, { date: "2026-10-14" });
+    expect(out.data.sessions.map((session: { notes: string | null }) => session.notes)).toContain("Roda de sexta");
   });
 
   it("reviews one session by its ID", async () => {

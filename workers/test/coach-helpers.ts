@@ -272,6 +272,7 @@ export function session(id: string, day: LocalDate, hh: number, type: string, mi
     day,
     type,
     name: `Session ${id}`,
+    notes: null,
     start,
     end: new Date(start.getTime() + minutes * MINUTE),
     activeMin: minutes,

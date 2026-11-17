@@ -21,6 +21,12 @@ export const CREATE_PATH = `/users/me/dataTypes/${WRITE_DATA_TYPE}/dataPoints`;
 /** `POST` here deletes the data points named in the body. */
 export const DELETE_PATH = `${CREATE_PATH}:batchDelete`;
 
+/**
+ * The most names one batchDelete body may hold. The reference says `names`
+ * is required and can hold up to 10,000 resource names.
+ */
+export const MAX_BATCH_DELETE = 10_000;
+
 /** A write answer is one Operation with at most one data point: far below this. */
 export const MAX_WRITE_RESPONSE_BYTES = 64 << 10;
 
@@ -148,14 +154,21 @@ export function callerTexts(body: { nutritionLog: NutritionLogBody }): string[] 
 }
 
 /**
- * The body of the delete request for one data point ID. The name is written
- * with `users/me`, the form of the documented example and of the request path:
- * the reference says that every name must share the parent of the path.
- * Throws for a text that is not a data point ID (a caller bug).
+ * The body of the delete request for one data point ID, or for several. The
+ * names are written with `users/me`, the form of the documented example and of
+ * the request path: the reference says that every name must share the parent
+ * of the path. Throws for a text that is not a data point ID, for no id, or
+ * for more than {@link MAX_BATCH_DELETE} ids (a caller bug).
  */
-export function deleteBody(id: string): { names: string[] } {
-  if (typeof id !== "string" || !POINT_ID_ONLY.test(id)) throw new Error("googlehealth: not a data point ID");
-  return { names: [`users/me/dataTypes/${WRITE_DATA_TYPE}/dataPoints/${id}`] };
+export function deleteBody(idOrIds: string | readonly string[]): { names: string[] } {
+  const ids = typeof idOrIds === "string" ? [idOrIds] : idOrIds;
+  if (ids.length === 0 || ids.length > MAX_BATCH_DELETE) throw new Error("googlehealth: not a data point ID");
+  return {
+    names: ids.map((id) => {
+      if (typeof id !== "string" || !POINT_ID_ONLY.test(id)) throw new Error("googlehealth: not a data point ID");
+      return `users/me/dataTypes/${WRITE_DATA_TYPE}/dataPoints/${id}`;
+    }),
+  };
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   CREATE_PATH,
   DELETE_PATH,
   GOOGLE_MAX_QUANTITY,
+  MAX_BATCH_DELETE,
   MAX_WRITE_RESPONSE_BYTES,
   type NewFoodEntry,
   createBody,
@@ -782,6 +783,17 @@ describe("deleteNutritionLog", () => {
     expect(() => deleteBody(id)).toThrow("not a data point ID");
     expect(requests).toHaveLength(0);
     expect(tokens.asked).toBe(0);
+  });
+
+  it("names every id of a day in one batchDelete, and refuses none or more than the documented cap", async () => {
+    const requests = fakeApi(() => deleted());
+    expect(await testClient().client.deleteNutritionLogs(["syn-point-9f3a", "syn-point-9f3b"], ACCOUNT)).toBe("deleted");
+    expect(requests[0]?.text).toBe(
+      '{"names":["users/me/dataTypes/nutrition-log/dataPoints/syn-point-9f3a","users/me/dataTypes/nutrition-log/dataPoints/syn-point-9f3b"]}',
+    );
+    expect(() => deleteBody([])).toThrow("not a data point ID");
+    expect(() => deleteBody(Array.from({ length: MAX_BATCH_DELETE + 1 }, () => "syn-point-9f3a"))).toThrow("not a data point ID");
+    expect(deleteBody(Array.from({ length: MAX_BATCH_DELETE }, () => "syn-point-9f3a")).names).toHaveLength(MAX_BATCH_DELETE);
   });
 
   it("takes Google's own 404, with the status NOT_FOUND, as a point that is already gone, without a retry", async () => {

@@ -588,6 +588,17 @@ const CASES: Case[] = [
     later: null,
     waits: 3,
   },
+  // A day is one batchDelete of the entries this server created, whatever the count. A later request finds none.
+  {
+    tool: "`nutrition_log_delete`",
+    input: "the entries this server created on one day",
+    empty: true,
+    before: [ADD, ADD, ADD],
+    calls: [["nutrition_log_delete", { date: day(0) }]],
+    health: [1],
+    later: 0,
+    laterResult: "no_data",
+  },
   {
     tool: "`nutrition_log_add`, 100 calls",
     input: "one POST with 100 entries; the access token is renewed first",
@@ -647,6 +658,17 @@ const CASES: Case[] = [
     first: "upstream_unavailable",
     later: null,
     waits: 3,
+  },
+  // A day is one batchDelete of the sessions this server created. A later request finds none.
+  {
+    tool: "`exercise_log_delete`",
+    input: "the sessions this server created on one day",
+    empty: true,
+    before: [LOG_SESSION, LOG_SESSION],
+    calls: [["exercise_log_delete", { date: day(0) }]],
+    health: [1],
+    later: 0,
+    laterResult: "no_data",
   },
 ];
 

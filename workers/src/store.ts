@@ -11,7 +11,7 @@ import { RequestTokens } from "./googlehealth/tokens";
 import { HealthData, dbCache } from "./healthdata";
 import { MCP_PATH, createServer } from "./mcp";
 import { Db } from "./store/db";
-import { forgetEntry, hasEntry, linkedAccount, recordEntry } from "./store/entries";
+import { entryNamesBetween, forgetEntry, hasEntry, linkedAccount, recordEntry } from "./store/entries";
 import { targetInForce } from "./store/memory";
 import { clearMetrics } from "./store/metrics";
 import { searchNotes } from "./store/notes";
@@ -306,6 +306,7 @@ export class CoachStore extends DurableObject<Env> {
           recordEntry(db, name, day, owner, type);
         },
         has: (name) => hasEntry(db, name, type),
+        onDay: (day) => entryNamesBetween(db, day, day, type),
         forget: (name) => forgetEntry(db, name, type),
       });
       let writeDeps: WriteDeps | undefined;

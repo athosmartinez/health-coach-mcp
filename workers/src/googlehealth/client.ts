@@ -333,8 +333,17 @@ export class GoogleHealthClient {
    * must never be deleted with the token of another.
    */
   async deleteNutritionLog(id: string, account: string): Promise<"deleted" | "gone"> {
-    // The ID is an entry id: a refusal that repeats it must not carry it on.
-    return this.remove("nutrition-log", DELETE_PATH, deleteBody(id), { account }, [id]);
+    return this.deleteNutritionLogs([id], account);
+  }
+
+  /**
+   * Deletes the nutrition-log data points with these IDs, in one batchDelete.
+   * The rules are the ones of deleteNutritionLog. `account` is the Google
+   * account whose entries the caller checked.
+   */
+  async deleteNutritionLogs(ids: readonly string[], account: string): Promise<"deleted" | "gone"> {
+    // Each ID is an entry id: a refusal that repeats one must not carry it on.
+    return this.remove("nutrition-log", DELETE_PATH, deleteBody(ids), { account }, ids);
   }
 
   /**
@@ -367,8 +376,17 @@ export class GoogleHealthClient {
    * account must never be deleted with the token of another.
    */
   async deleteExercise(id: string, account: string): Promise<"deleted" | "gone"> {
-    // The ID is an entry id: a refusal that repeats it must not carry it on.
-    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(id), { account }, [id]);
+    return this.deleteExercises([id], account);
+  }
+
+  /**
+   * Deletes the exercise data points with these IDs, in one batchDelete. The
+   * rules are the ones of deleteExercise. `account` is the Google account
+   * whose sessions the caller checked.
+   */
+  async deleteExercises(ids: readonly string[], account: string): Promise<"deleted" | "gone"> {
+    // Each ID is an entry id: a refusal that repeats one must not carry it on.
+    return this.remove("exercise", EXERCISE_DELETE_PATH, exerciseDeleteBody(ids), { account }, ids);
   }
 
   /**

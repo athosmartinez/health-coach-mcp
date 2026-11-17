@@ -62,6 +62,8 @@ interface WorkoutSession {
   exercise_id: string;
   type: string;
   name: string;
+  /** The session's own note, or null when the record has none. */
+  notes: string | null;
   start: string;
   end: string;
   /** Leaves out pauses. */

@@ -276,7 +276,7 @@ export function foodDays(google: FakeGoogle, back: number): void {
 
 /** The budget error of the Google Health client: the call needs more requests than one MCP request may send. */
 export function expectBudgetError(error: WireError, context: string): void {
-  expect(error.message, context).toMatch(/^the date range holds more [a-z-]+ data than one call reads$/);
+  expect(error.message, context).toMatch(/^the date range holds more [a-z0-9-]+ data than one call reads$/);
   expect(error, context).toMatchObject({ code: "invalid_input", hint: "use a shorter date range" });
 }
 

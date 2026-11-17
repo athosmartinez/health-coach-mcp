@@ -28,6 +28,8 @@ import {
   type RecoveryOptions,
   type RestingHR,
   type Source,
+  type Vo2Reading,
+  Vo2,
 } from "../src/healthdata";
 import type { Target } from "../src/store/memory";
 import type { NoteFilter, NoteResults } from "../src/store/notes";
@@ -113,6 +115,8 @@ export class FakeHealth implements Source {
   nutritionOtherDays = new Map<LocalDate, number>();
   activitySkipped = 0;
   bodySkipped = 0;
+  vo2Days = new Map<LocalDate, Vo2Reading>();
+  vo2Skipped = 0;
   errs: Record<string, unknown> = {};
   /** Every call, with its range and its narrow option: the request plan of a tool. */
   calls: string[] = [];
@@ -194,6 +198,14 @@ export class FakeHealth implements Source {
     n.otherSourceDays = within(this.nutritionOtherDays, from, to);
     n.otherSource = this.nutritionOther + [...n.otherSourceDays.values()].reduce((sum, count) => sum + count, 0);
     return n;
+  }
+
+  async vo2(from: LocalDate, to: LocalDate): Promise<Vo2> {
+    this.call("vo2", from, to);
+    const v = new Vo2(from, to);
+    v.days = within(this.vo2Days, from, to);
+    v.skipped = this.vo2Skipped;
+    return v;
   }
 }
 

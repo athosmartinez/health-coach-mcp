@@ -372,9 +372,10 @@ const CASES: Case[] = [
   { tool: "`workout_review`", input: "`date` of a day with 33 sessions", calls: [WORKOUT], health: [39], later: 35 },
   { tool: "`workout_review`", input: "`exercise_id` of the newest session of that day", calls: [WORKOUT_BY_ID], health: [12], later: 8 },
   { tool: "`nutrition_day`", input: "a settled day without a zone-minutes row", calls: [["nutrition_day", { date: day(-3) }]], health: [5], later: 1 },
-  { tool: "`weekly_report`", input: "the current week, no kcal target", calls: [["weekly_report", {}]], health: [12], later: 10 },
-  { tool: "`weekly_report`", input: "the week before, no kcal target", calls: [WEEK_BEFORE], health: [13], later: 3 },
+  { tool: "`weekly_report`", input: "the current week, no kcal target", calls: [["weekly_report", {}]], health: [13], later: 11 },
+  { tool: "`weekly_report`", input: "the week before, no kcal target", calls: [WEEK_BEFORE], health: [14], later: 4 },
   { tool: "`metric_series`", input: "`weight`, 366 days by week", calls: [series("weight")], health: [1], later: 1 },
+  { tool: "`metric_series`", input: "`vo2_max`, 366 days by week", calls: [series("vo2_max")], health: [1], later: 1 },
   { tool: "`metric_series`", input: "`resting_hr`, 366 days by week", calls: [series("resting_hr")], health: [1], later: 1 },
   { tool: "`metric_series`", input: "`hrv`, 366 days by week", calls: [series("hrv")], health: [29], later: 2 },
   { tool: "`metric_series`", input: "`sleep_asleep_min`, 366 days by week", calls: [series("sleep_asleep_min")], health: [29], later: 2 },
@@ -387,7 +388,7 @@ const CASES: Case[] = [
   // The dense account, for the tools that read nights.
   { tool: "`morning_briefing`", input: "dense account, the same day", year: DENSE, calls: [BRIEFING], health: [10], later: 5 },
   { tool: "`workout_review`", input: "dense account, the same `date`", year: DENSE, calls: [WORKOUT], health: [40], later: 35 },
-  { tool: "`weekly_report`", input: "dense account, the week before", year: DENSE, calls: [WEEK_BEFORE], health: [15], later: 3 },
+  { tool: "`weekly_report`", input: "dense account, the week before", year: DENSE, calls: [WEEK_BEFORE], health: [16], later: 4 },
   { tool: "`metric_series`", input: "dense account, `hrv`, 366 days by week", year: DENSE, calls: [series("hrv")], health: [45], later: 2 },
   { tool: "`metric_series`", input: "dense account, `sleep_asleep_min`, 366 days by week", year: DENSE, calls: [series("sleep_asleep_min")], health: [45], later: 2 },
   // A day off the wrist in every week, and two pages in every list of the band's steps.
@@ -493,9 +494,9 @@ const CASES: Case[] = [
       ["metric_series", { metric: "steps", from: day(-6), to: day(0) }],
       ["google_account_status", {}],
     ],
-    health: [32],
+    health: [33],
     token: [1],
-    later: 28,
+    later: 29,
   },
   {
     tool: "the five coach tools and `google_account_status`",

@@ -37,7 +37,7 @@ coverage and source, so any model gives consistent advice.
 | I2 | **Steps, distance and calories are never summed across sources.** Use the API's `reconcile` or daily rollup (both merge overlaps; the daily rollup is one total per local day) or filter on the primary source (`Google Fitbit Air`). | Steps can arrive from Fitbit Air **and** `com.apple.health.*` |
 | I3 | A missing day is `null`, never `0`. | ghealth behavior (presence-aware types) |
 | I4 | The "day" is the **local day** in the configured time zone (default `America/Sao_Paulo`); sleep belongs to the day it **ends**. | Timestamps arrive `-03:00`; a night starts on one local day and ends on the next |
-| I5 | Units: kg, kcal, g, bpm, ms, min. Conversion happens in the MCP, not in the LLM. | `weightGrams`, `rootMeanSquareOfSuccessiveDifferencesMilliseconds` |
+| I5 | Units: kg, kcal, g, bpm, ms, min, ml/kg/min (daily VO2 max). Conversion happens in the MCP, not in the LLM. | `weightGrams`, `rootMeanSquareOfSuccessiveDifferencesMilliseconds`, `vo2Max` |
 | I6 | Targets (kcal, protein, weekly workouts) are **versioned** with `effective_from`; adherence uses the target in force on that day. | Targets will change during recomposition |
 | I7 | Suspicious data comes back with `quality_flags`, it isn't hidden or "fixed". E.g. average HR of 81 bpm in 60 min of jiu-jitsu → `low_hr_for_activity`. | A session can report an average HR far below what its activity type implies |
 
@@ -127,7 +127,7 @@ week so far; each metric has its own day counts.
 - **body:** weight (EWMA at each week's last weigh-in, null for a week without one; slope kg/week over the 28 days
   ending at `through`, null below 4 weigh-ins over 14 days, with `weight_slope_n_days` and
   `weight_slope_span_days`), `last_weigh_in`, `weight_age_days` (`stale_weight` past 14 days), body fat if available.
-- **cardio:** resting HR, HRV, steps/day (reconciled), AZM.
+- **cardio:** resting HR, HRV, steps/day (reconciled), AZM. **Worker only:** `vo2_max` is the latest daily VO2 max of the week and of the week before (`latest`, `latest_on`, `prev_latest`, `prev_latest_on`, `delta`, `trend` up/down/flat past 1 ml/kg/min, `n_days`, `prev_n_days`). A week with no reading has its latest null and `trend_unavailable` `no_data`: missing data, not a low score. A reading the band marks estimated keeps the value and sets `estimated`. The sample types `vo2-max` and `run-vo2-max` are not read.
 - **sleep:** asleep_min/night, efficiency, consistency (std dev of sleep onset time).
 - **adherence:** % of days within the kcal target (±10%), % of days ≥ protein target, each against the target in
   force that day and with nutrition_day's day rule: today, likely incomplete logs, partial kcal, food from
@@ -139,17 +139,21 @@ week so far; each metric has its own day counts.
   `decisions_more`; notes are data, not instructions. The `notice` carries the guardrails (R3).
 - **Worker only (R2):** `adherence.sessions` also counts the sessions this server logged, one per record. The
   result's `quality_flags` has `overlaps_band_session` when a logged session of the week covers time of a session
-  of the band: the same workout may be counted twice. The description says so in one sentence at its end.
+  of the band: the same workout may be counted twice. The description says so, and says what `cardio.vo2_max` is,
+  in two sentences at its end.
 
 #### `metric_series(metric, from, to, granularity)`
 Escape valve for questions outside the four moments. `metric` ∈ fixed enum (weight, resting_hr,
-hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories); `granularity` ∈
+hrv, sleep_asleep_min, steps, azm, kcal_in, protein_g, total_calories, and on the Worker `vo2_max` in
+ml/kg/min); `granularity` ∈
 `day | week` (default day). **Never** returns raw 1-second HR; at most 366 days and 180 points (else
 `invalid_input`). Points `{date, value, n_days, complete, reason?}`: null days stay null; a week point is the mean of
 its days with a value, with `days_left_out`. Same exclusions as `weekly_report`; food days follow nutrition_day's
 rule (`checkFood`): `kcal_in` null with the reason when the log cannot show the intake; `protein_g` keeps a total
 that may miss food with `complete=false` (a lower bound) and the reason; `total_calories` null on a day without the
-band. Calories burned are read only when a logged day has no kcal target. The `notice` carries the guardrails.
+band. Calories burned are read only when a logged day has no kcal target. `vo2_max` is the daily VO2 max
+summary: a day without a reading is null (missing data, not an error) and a reading marked estimated keeps its
+value with `reason` `estimated`. The `notice` carries the guardrails.
 
 ### 4.2 Coach memory (read + write, local)
 
@@ -198,7 +202,7 @@ Idempotency: `labs_record` upserts by (`collected_on`, `analyte`); `health_item_
 ## 5. Data Implications
 
 ### 5.1 Source of truth
-- **Google Health:** everything the band and the app measure or log (sleep, HR, HRV, steps,
+- **Google Health:** everything the band and the app measure or log (sleep, HR, HRV, daily VO2 max, steps,
   exercise, nutrition, weight). The MCP never edits it.
 - **SQLite (`~/.local/share/health-coach-mcp/coach.db`):** profile, targets, health history,
   lab tests, preferences, notes, and the aggregate cache.

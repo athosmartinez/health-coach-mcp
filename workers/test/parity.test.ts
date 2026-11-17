@@ -11,7 +11,8 @@
 // array (required, enum, type).
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { OVERLAP_IN_WEEK } from "../src/tools/weekly";
+import { SERIES_VO2 } from "../src/tools/series";
+import { OVERLAP_IN_WEEK, VO2_IN_WEEK } from "../src/tools/weekly";
 import { LOGGED_SESSIONS } from "../src/tools/workout";
 import fixtureText from "./fixtures/go-tools-list.json?raw";
 import { rpc, signInAsOwner } from "./helpers";
@@ -124,7 +125,7 @@ describe("parity with the Go server's tools/list", () => {
     expect(Object.keys(go ?? {}).sort()).toEqual(Object.keys(worker ?? {}).sort());
 
     expect(worker?.annotations).toEqual(go?.annotations);
-    expect(worker?.inputSchema).toEqual(go?.inputSchema);
+    if (name !== "metric_series") expect(worker?.inputSchema).toEqual(go?.inputSchema);
     if (name === "nutrition_day") {
       // The Worker adds entry_id to each food item, and one sentence that says where it comes from.
       const sentence = " An item this server logged has entry_id, the id nutrition_log_delete accepts; an item from another app, or logged for another linked Google account, has entry_id null.";
@@ -147,11 +148,30 @@ describe("parity with the Go server's tools/list", () => {
     }
     if (name === "weekly_report") {
       // The Worker counts the sessions it logged, and says which flag marks a week that may count a workout twice.
-      expect(worker?.description).toBe(`${go?.description}${OVERLAP_IN_WEEK}`);
+      expect(worker?.description).toBe(`${go?.description}${OVERLAP_IN_WEEK}${VO2_IN_WEEK}`);
       expect(OVERLAP_IN_WEEK).toContain("overlaps_band_session in quality_flags marks a week in which a session this server logged overlaps a band session in time");
-      // Everything else is the Go tool.
-      expect(worker?.outputSchema).toEqual(go?.outputSchema);
-      expect(canonical({ ...worker, description: go?.description })).toBe(canonical(go));
+      expect(VO2_IN_WEEK).toContain("cardio.vo2_max is the latest daily VO2 max");
+      const copy = structuredClone(worker);
+      const cardio = (copy?.outputSchema as { properties: { data: { properties: { cardio: { properties: Record<string, unknown>; required: string[] } } } } })
+        .properties.data.properties.cardio;
+      expect(cardio.properties.vo2_max).toBeDefined();
+      expect(cardio.required).toContain("vo2_max");
+      delete cardio.properties.vo2_max;
+      cardio.required = cardio.required.filter((name) => name !== "vo2_max");
+      if (copy) copy.description = go?.description ?? "";
+      expect(copy?.outputSchema).toEqual(go?.outputSchema);
+      expect(canonical(copy)).toBe(canonical(go));
+      return;
+    }
+    if (name === "metric_series") {
+      expect(worker?.description).toBe(`${go?.description}${SERIES_VO2}`);
+      expect(SERIES_VO2).toContain("vo2_max is the daily VO2 max in ml/kg/min");
+      const copy = structuredClone(worker);
+      const metric = (copy?.inputSchema as { properties: { metric: { enum: string[] } } }).properties.metric;
+      expect(metric.enum).toContain("vo2_max");
+      metric.enum = metric.enum.filter((value) => value !== "vo2_max");
+      if (copy) copy.description = go?.description ?? "";
+      expect(canonical(copy)).toBe(canonical(go));
       return;
     }
     expect(worker?.description).toBe(go?.description);

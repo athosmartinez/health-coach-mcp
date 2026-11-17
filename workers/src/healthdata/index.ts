@@ -9,6 +9,7 @@ import { type Cache, Context, type Fetcher, type Logger } from "./cache";
 import { type Exercises, readExercises } from "./exercise";
 import { type Nutrition, readNutrition } from "./nutrition";
 import { type Recovery, type RecoveryOptions, readRecovery } from "./recovery";
+import { type Vo2, readVo2 } from "./vo2";
 
 export {
   ACTIVITY_KEYS,
@@ -66,6 +67,7 @@ export {
 export { MAX_LABEL_RUNES, allVisible, clean } from "./decode";
 export { PRIMARY_PLATFORM, type Stages } from "./parse";
 export { KCAL_WINDOW_DAYS, MAX_RANGE_DAYS, NIGHT_WINDOW_DAYS, ROLLUP_WINDOW_DAYS, SETTLE_DAYS, WORN_WINDOW_DAYS } from "./plan";
+export { MAX_VO2, MIN_VO2, type Vo2Read, type Vo2Reading, Vo2, parseVo2 } from "./vo2";
 export {
   type Excluded,
   type HRVNight,
@@ -109,6 +111,8 @@ export interface Source {
    */
   exercises(from: LocalDate, to: LocalDate, maxHR: boolean, only?: string): Promise<Exercises>;
   nutrition(from: LocalDate, to: LocalDate): Promise<Nutrition>;
+  /** Daily VO2 max. A day without a reading is absent, never an error. */
+  vo2(from: LocalDate, to: LocalDate): Promise<Vo2>;
 }
 
 /**
@@ -142,5 +146,9 @@ export class HealthData implements Source {
 
   nutrition(from: LocalDate, to: LocalDate): Promise<Nutrition> {
     return readNutrition(this.ctx, from, to);
+  }
+
+  vo2(from: LocalDate, to: LocalDate): Promise<Vo2> {
+    return readVo2(this.ctx, from, to);
   }
 }

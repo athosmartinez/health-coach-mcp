@@ -704,8 +704,9 @@ function checkBaseUrl(base: string): void {
   }
 }
 
-const READ_PATH = /^\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints(:reconcile)?$/;
-const ROLLUP_PATH = /^\/users\/me\/dataTypes\/([a-z-]+)\/dataPoints:dailyRollUp$/;
+// A documented type name can contain a digit (daily-vo2-max).
+const READ_PATH = /^\/users\/me\/dataTypes\/([a-z0-9-]+)\/dataPoints(:reconcile)?$/;
+const ROLLUP_PATH = /^\/users\/me\/dataTypes\/([a-z0-9-]+)\/dataPoints:dailyRollUp$/;
 
 /**
  * The read-only guard: the data type of a request the client may send, or

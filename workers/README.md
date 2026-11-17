@@ -23,7 +23,7 @@ Remote MCP server for the health coach. It serves Streamable HTTP at `/mcp`, pro
 - The 4 MCP prompts: `morning_briefing`, `nutrition_review`, `workout_review`, `weekly_report`. Each tells the model to call `profile_get` and its tool, with the guardrails inline. The optional day is parsed as a calendar date before it reaches the text.
 - The resource `coach://guardrails`: the coach guardrails, the text in `src/prompts/guardrails.ts`.
 
-Seventeen of the tools are in the frozen `tools/list` snapshot in `test/fixtures/go-tools-list.json`, and thirteen of them match it exactly (names, descriptions, annotations, schemas). The server lists 5 tools that snapshot does not have. Four tools in the snapshot differ on purpose: `server_info` adds `transport` to its output and has annotations, `nutrition_day` and `workout_review` add `entry_id` and sentences at the end of the description, and `weekly_report` adds one sentence about `overlaps_band_session`. [Frozen contract](#frozen-contract) says how the tests pin that. [Behavior notes](#behavior-notes) lists what a client or an operator can observe that is easy to miss.
+Seventeen of the tools are in the frozen `tools/list` snapshot in `test/fixtures/go-tools-list.json`, and twelve of them match it exactly (names, descriptions, annotations, schemas). The server lists 5 tools that snapshot does not have. Five tools in the snapshot differ on purpose: `server_info` adds `transport` to its output and has annotations, `nutrition_day` and `workout_review` add `entry_id` and sentences at the end of the description, `weekly_report` adds `cardio.vo2_max` and two sentences (one about `overlaps_band_session`, one about the daily VO2 max), and `metric_series` adds `vo2_max`. [Frozen contract](#frozen-contract) says how the tests pin that. [Behavior notes](#behavior-notes) lists what a client or an operator can observe that is easy to miss.
 
 ### How a tool call runs
 
@@ -59,7 +59,7 @@ A source fetches the missing days in as few requests as it can (`src/healthdata/
 - **Merged runs.** The missing days of a window are fetched as one covering range. Days of that range that are already cached keep their cached value. A cache with holes never needs more requests than a cold cache.
 - **Narrow reads.** A tool reads only what its values need. `metric_series resting_hr` does not list sleep; `metric_series steps` reads only the steps rollup; `morning_briefing` does not read total calories; `weekly_report` and the food metrics read them only for the logged days without a kcal target, and only for the days the band was worn. One exception: when the narrow read of `nutrition_day` or `morning_briefing` has no value for its day and dropped an unreadable row, the tool reads the total it left out for that one day (the steps rollup, or the total-calories rollup: one more request).
 - **The "band worn" check** lists the band's step records only for the days without a zone-minutes row.
-- **Never cached:** sessions, heart-rate samples, the food log, today and the 2 days before it (a day is cached when it is at most today − 3), and a day without band data. A steps or total-calories row is cached only for a day whose zone-minutes value is known, so `metric_series steps` alone costs the same on every call until a zone-minutes read covers its days.
+- **Never cached:** sessions, heart-rate samples, the food log, the daily VO2 max list, today and the 2 days before it (a day is cached when it is at most today − 3), and a day without band data. A steps or total-calories row is cached only for a day whose zone-minutes value is known, so `metric_series steps` alone costs the same on every call until a zone-minutes read covers its days.
 
 ### Memory
 
@@ -101,9 +101,10 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | `workout_review` | `date` of a day with 33 sessions | 39 | 0 | 39 | ok | 1 | 35 |
 | `workout_review` | `exercise_id` of the newest session of that day | 12 | 0 | 12 | ok | 1 | 8 |
 | `nutrition_day` | a settled day without a zone-minutes row | 5 | 0 | 5 | ok | 1 | 1 |
-| `weekly_report` | the current week, no kcal target | 12 | 0 | 12 | ok | 1 | 10 |
-| `weekly_report` | the week before, no kcal target | 13 | 0 | 13 | ok | 1 | 3 |
+| `weekly_report` | the current week, no kcal target | 13 | 0 | 13 | ok | 1 | 11 |
+| `weekly_report` | the week before, no kcal target | 14 | 0 | 14 | ok | 1 | 4 |
 | `metric_series` | `weight`, 366 days by week | 1 | 0 | 1 | ok | 1 | 1 |
+| `metric_series` | `vo2_max`, 366 days by week | 1 | 0 | 1 | ok | 1 | 1 |
 | `metric_series` | `resting_hr`, 366 days by week | 1 | 0 | 1 | ok | 1 | 1 |
 | `metric_series` | `hrv`, 366 days by week | 29 | 0 | 29 | ok | 1 | 2 |
 | `metric_series` | `sleep_asleep_min`, 366 days by week | 29 | 0 | 29 | ok | 1 | 2 |
@@ -115,7 +116,7 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | `metric_series` | `kcal_in`, 366 days by week, a kcal target on every day | 1 | 0 | 1 | ok | 1 | 1 |
 | `morning_briefing` | dense account, the same day | 10 | 0 | 10 | ok | 1 | 5 |
 | `workout_review` | dense account, the same `date` | 40 | 0 | 40 | ok | 1 | 35 |
-| `weekly_report` | dense account, the week before | 15 | 0 | 15 | ok | 1 | 3 |
+| `weekly_report` | dense account, the week before | 16 | 0 | 16 | ok | 1 | 4 |
 | `metric_series` | dense account, `hrv`, 366 days by week | 45 | 0 | 45 | ok | 1 | 2 |
 | `metric_series` | dense account, `sleep_asleep_min`, 366 days by week | 45 | 0 | 45 | ok | 1 | 2 |
 | `metric_series` | off-wrist days and two-page steps lists, `azm`, 366 days | 31 | 0 | 31 | ok | 1 | 29 |
@@ -127,7 +128,7 @@ Columns: the Google Health requests and the token requests of each MCP HTTP requ
 | `metric_series` | the case above, and a new sign-in replaces the link during each renewal | 45, 2 | 4, 0 | 49, 2 | budget error | 2 | 2 |
 | `morning_briefing` | Google Health answers 503 to every request | 4 | 0 | 4 | upstream_unavailable | none | — |
 | `metric_series` | `total_calories`, 366 days; Google Health answers 503 three times before each answer | 45 | 0 | 45 | upstream_unavailable | none | — |
-| the five coach tools and `google_account_status` | one POST; today's briefing, a day with one session, a day of food, the current week, 7 days of steps; the access token is renewed first | 32 | 1 | 33 | ok | 1 | 28 |
+| the five coach tools and `google_account_status` | one POST; today's briefing, a day with one session, a day of food, the current week, 7 days of steps; the access token is renewed first | 33 | 1 | 34 | ok | 1 | 29 |
 | the five coach tools and `google_account_status` | one POST; the worst-case input of each tool; the access token is renewed first | 45, 45, 45, 45 | 1, 0, 0, 0 | 46, 45, 45, 45 | ok, budget error ×4, ok | none | — |
 | `nutrition_log_add` | one entry | 1 | 0 | 1 | ok | 1 | 1 |
 | `nutrition_log_add` | one entry; the access token is renewed first, and Google rejects the new one once | 2 | 2 | 4 | ok | 1 | 1 |
@@ -501,7 +502,7 @@ The tests run in workerd through `@cloudflare/vitest-plugin`. They mock every Go
 
 `test/fixtures/go-tools-list.json` and `test/fixtures/go-prompts.json` are a frozen snapshot of the former Go server. They are the source of truth for the parity tests. Nothing in the repository regenerates them.
 
-`test/parity.test.ts` compares 16 tools (the 11 memory tools and the 5 coach tools) with `go-tools-list.json` field by field. For `server_info`, the 17th tool of the snapshot, it checks only that the server lists it: `server_info` differs on purpose (`transport` in its output, and annotations). The server lists 5 tools that snapshot does not have (`exercise_log_add`, `exercise_log_delete`, `google_account_status`, `nutrition_log_add`, `nutrition_log_delete`), and the test pins that list, so a tool that is in neither fails. Three of the 16 tools differ on purpose, and the test pins each difference: `nutrition_day` and `workout_review` have `entry_id` on each listed item or session, and sentences at the end of the description that say so (for `workout_review`, also what `overlaps_band_session` marks, on a session and on the result); `weekly_report` has one sentence at the end of its description, about `overlaps_band_session` on the result, and nothing else of it differs. `test/prompts.test.ts` compares the prompts and the resource with `go-prompts.json` (`prompts/list`, each `prompts/get`, `resources/list` and `resources/read`).
+`test/parity.test.ts` compares 16 tools (the 11 memory tools and the 5 coach tools) with `go-tools-list.json` field by field. For `server_info`, the 17th tool of the snapshot, it checks only that the server lists it: `server_info` differs on purpose (`transport` in its output, and annotations). The server lists 5 tools that snapshot does not have (`exercise_log_add`, `exercise_log_delete`, `google_account_status`, `nutrition_log_add`, `nutrition_log_delete`), and the test pins that list, so a tool that is in neither fails. Four of the 16 tools differ on purpose, and the test pins each difference: `nutrition_day` and `workout_review` have `entry_id` on each listed item or session, and sentences at the end of the description that say so (for `workout_review`, also what `overlaps_band_session` marks, on a session and on the result); `weekly_report` adds `cardio.vo2_max` and two sentences at the end of its description (one about `overlaps_band_session` on the result, one about the daily VO2 max); `metric_series` adds `vo2_max` to the metric enum and one sentence at the end of its description. Nothing else of those tools differs. `test/prompts.test.ts` compares the prompts and the resource with `go-prompts.json` (`prompts/list`, each `prompts/get`, `resources/list` and `resources/read`).
 
 A change to a tool definition, a prompt or the guardrails that should stay inside that contract has to update the fixture in the same change. The tests read only the committed fixtures.
 

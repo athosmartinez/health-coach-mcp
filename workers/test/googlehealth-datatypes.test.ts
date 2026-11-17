@@ -34,9 +34,10 @@ describe("type table", () => {
     "total-calories": { kind: "civilStart", ops: ["dailyRollup"], page: 10000, cap: 14 },
     weight: { kind: "physical", ops: LD, page: 10000, cap: 90 },
     "body-fat": { kind: "physical", ops: LD, page: 10000, cap: 90 },
+    "daily-vo2-max": { kind: "date", ops: L, page: 10000, cap: 0 },
   };
 
-  it("holds the twelve types the coach reads", () => {
+  it("holds the thirteen types the coach reads", () => {
     expect(Object.keys(TYPE_TABLE).sort()).toEqual(Object.keys(want).sort());
     expect([...DATA_TYPES].sort()).toEqual(Object.keys(want).sort());
   });
@@ -73,6 +74,9 @@ describe("filter", () => {
     );
     expect(filter(TYPE_TABLE["daily-resting-heart-rate"], "2026-12-31", "2026-12-31", SAO_PAULO)).toBe(
       'daily_resting_heart_rate.date >= "2026-12-31" AND daily_resting_heart_rate.date < "2027-01-01"',
+    );
+    expect(filter(TYPE_TABLE["daily-vo2-max"], "2026-10-05", "2026-10-11", SAO_PAULO)).toBe(
+      'daily_vo2_max.date >= "2026-10-05" AND daily_vo2_max.date < "2026-10-12"',
     );
   });
 

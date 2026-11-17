@@ -6,7 +6,7 @@ import type { LocalDate } from "../src/coach/date";
 import { ToolError } from "../src/coach/errors";
 import { MAX_RANGE_DAYS } from "../src/healthdata";
 import { COACH_TOOLS } from "../src/tools/moments";
-import { MAX_SERIES_POINTS, SERIES_METRICS, SERIES_NOTICE, SERIES_UNITS } from "../src/tools/series";
+import { MAX_SERIES_POINTS, REASON_ESTIMATED, SERIES_METRICS, SERIES_NOTICE, SERIES_UNITS } from "../src/tools/series";
 import {
   COACH_TODAY,
   FakeHealth,
@@ -142,6 +142,7 @@ describe("metric_series", () => {
         "Google Fitbit Air",
         ["nutrition 2026-10-14..2026-10-16", ...burnCalls("2026-10-14", "2026-10-15")],
       ],
+      ["vo2_max", "ml/kg/min", "2026-10-14=null/0 2026-10-15=null/0 2026-10-16=null/0", "", "", ["vo2 2026-10-14..2026-10-16"]],
     ])("%s", async (metric, unit, points, flag, source, calls) => {
       const h = health();
       const out = await coachSession(h).ok("metric_series", args("2026-10-14", COACH_TODAY, metric));
@@ -153,7 +154,7 @@ describe("metric_series", () => {
     });
 
     it("covers the closed list of the input schema, each with a unit", () => {
-      expect(SERIES_METRICS).toEqual(["weight", "resting_hr", "hrv", "sleep_asleep_min", "steps", "azm", "kcal_in", "protein_g", "total_calories"]);
+      expect(SERIES_METRICS).toEqual(["weight", "resting_hr", "hrv", "sleep_asleep_min", "steps", "azm", "kcal_in", "protein_g", "total_calories", "vo2_max"]);
       expect(SERIES_UNITS).toEqual({
         weight: "kg",
         resting_hr: "bpm",
@@ -164,7 +165,21 @@ describe("metric_series", () => {
         kcal_in: "kcal",
         protein_g: "g",
         total_calories: "kcal",
+        vo2_max: "ml/kg/min",
       });
+    });
+
+    it("keeps an estimated daily VO2 max and leaves a day without one null", async () => {
+      const h = health();
+      h.vo2Days.set("2026-10-14", { value: 48, estimated: false, source: "Synthetic Band" });
+      h.vo2Days.set("2026-10-16", { value: 47, estimated: true, source: "Synthetic Band" });
+      const out = await coachSession(h).ok("metric_series", args("2026-10-14", COACH_TODAY, "vo2_max"));
+      expect(render(out)).toBe(`2026-10-14=48/1 2026-10-15=null/0 2026-10-16=47/1/${REASON_ESTIMATED}`);
+      expect(out.data.points[2].complete).toBe(true);
+      expect(out.coverage).toEqual({ n_days: 2, confidence: "low" });
+      expect(out.sources).toEqual(["Synthetic Band"]);
+      const week = await coachSession(h).ok("metric_series", args("2026-10-14", COACH_TODAY, "vo2_max", "week"));
+      expect(render(week)).toBe("2026-10-12=47.5/2");
     });
 
     it("does not tie resting heart rate to the night's processing", async () => {

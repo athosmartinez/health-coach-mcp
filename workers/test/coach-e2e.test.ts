@@ -452,7 +452,7 @@ describe("a coach tool without a usable Google link", () => {
     g.healthReply = googleError(403, "PERMISSION_DENIED");
     const error = await fails(await linkedStore(), name, args);
     expect(error.code).toBe("scope_missing");
-    expect(error.message).toMatch(/^Google Health denied access to [a-z-]+ data$/);
+    expect(error.message).toMatch(/^Google Health denied access to [a-z0-9-]+ data$/);
     expect(error.hint).toBe(SCOPE_HINT);
     // A denial is not retried, and it is not a reason to renew the token.
     expect(g.takeExternal()).toMatchObject({ total: 1 });
@@ -732,7 +732,7 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     const first = await ok(stub, "weekly_report");
     // No kcal target: the log check of the week's two logged days reads total calories too.
     expect(g.takeExternal(), "cold, no targets").toEqual({
-      total: 12,
+      total: 13,
       // recovery of the 28 days before the week and the week: sleep in 2 pages, HRV, resting heart rate
       sleep: 2,
       "heart-rate-variability": 1,
@@ -741,9 +741,10 @@ describe("the Google requests of the two report tools on a cold cache", () => {
       "rollup steps": 1,
       "rollup active-zone-minutes": 1,
       steps: 1,
-      // 90 days of weight and body fat
+      // 90 days of weight and body fat, and the daily VO2 max of the two weeks
       weight: 1,
       "body-fat": 1,
+      "daily-vo2-max": 1,
       // the week's food log and sessions
       "nutrition-log": 1,
       exercise: 1,
@@ -753,7 +754,7 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     const second = await ok(stub, "weekly_report");
     // The settled days come from the cache: one sleep page less, and no steps list.
     expect(g.takeExternal(), "the cache it filled").toEqual({
-      total: 10,
+      total: 11,
       sleep: 1,
       "heart-rate-variability": 1,
       "daily-resting-heart-rate": 1,
@@ -761,6 +762,7 @@ describe("the Google requests of the two report tools on a cold cache", () => {
       "rollup active-zone-minutes": 1,
       weight: 1,
       "body-fat": 1,
+      "daily-vo2-max": 1,
       "nutrition-log": 1,
       exercise: 1,
       "rollup total-calories": 1,
@@ -771,11 +773,11 @@ describe("the Google requests of the two report tools on a cold cache", () => {
     await ok(withTarget, "targets_set", { effective_from: "2026-10-01", kcal: 2000, protein_g: 150, weekly_sessions: 4 });
     await ok(withTarget, "weekly_report");
     const targeted = g.takeExternal();
-    expect(targeted.total, "cold, with a kcal target").toBe(11);
+    expect(targeted.total, "cold, with a kcal target").toBe(12);
     expect(targeted).not.toHaveProperty("rollup total-calories");
     // A closed week reads the same data types over a range that ends on its Sunday.
     await ok(await linkedStore(), "weekly_report", { week_end: day(-7) });
-    expect(g.takeExternal().total, "cold, the week before").toBe(11);
+    expect(g.takeExternal().total, "cold, the week before").toBe(12);
   });
 
   // Harder years than the one below. A day without band data has no
@@ -977,7 +979,7 @@ describe("two MCP HTTP requests at the same time", () => {
     expect(sent.first.length + sent.second.length).toBeGreaterThan(HEALTH_REQUESTS);
     // Both were in flight for the whole report.
     expect(together).toBeGreaterThanOrEqual(2 * sent.second.length - 2);
-    expect(sent.second).toHaveLength(12);
+    expect(sent.second).toHaveLength(13);
   });
 
   it("can fetch the same windows twice: the same call in both requests sends every Google request twice", async () => {
@@ -1009,10 +1011,10 @@ describe("one HTTP request with several tool calls", () => {
     // Every external fetch of the HTTP request: one token renewal for the six
     // calls, and the Google Health requests of the five tools, which take
     // turns: a later tool finds in the cache what an earlier one fetched.
-    // 8 + 8 + 4 for the three day tools, 12 for the weekly report and 1 for the series.
+    // 8 + 8 + 4 for the three day tools, 13 for the weekly report and 1 for the series.
     const counts = g.takeExternal();
     expect(counts).toEqual({
-      total: 34,
+      total: 35,
       token: 1,
       sleep: 6,
       "heart-rate-variability": 3,
@@ -1026,6 +1028,7 @@ describe("one HTTP request with several tool calls", () => {
       "nutrition-log": 2,
       weight: 3,
       "body-fat": 1,
+      "daily-vo2-max": 1,
     });
     expect(counts.total).toBeLessThanOrEqual(MAX_SUBREQUESTS);
     expect(new Set(g.auths)).toEqual(new Set([`Bearer ${RENEWED_TOKEN}`]));
